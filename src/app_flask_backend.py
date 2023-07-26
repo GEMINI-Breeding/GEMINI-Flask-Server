@@ -6,21 +6,22 @@ import uvicorn
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 
 
-# define the Flask application for serving files
+# Define the Flask application for serving files
 file_app = Flask(__name__)
 
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
-    return send_from_directory('/home/GEMINI', filename)
+    return send_from_directory('/home/GEMINI/GEMINI-Data', filename)
 
 # endpoint to list files
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
-    dir_path = os.path.join('/home/GEMINI', dir_path)  # join with base directory path
+    dir_path = os.path.join('/home/GEMINI/GEMINI-Data', dir_path)  # join with base directory path
     if os.path.exists(dir_path):
         dirs = next(os.walk(dir_path))[1]
         return jsonify(dirs), 200
@@ -44,6 +45,15 @@ def run_script():
 
 # FastAPI app
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Add Flask app to FastAPI
 app.mount("/flask_app", WSGIMiddleware(file_app))
