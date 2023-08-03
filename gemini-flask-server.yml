@@ -1,4 +1,4 @@
-name: gemini-tile-server
+name: gemini-flask-server
 channels:
   - conda-forge
   - defaults
@@ -114,7 +114,6 @@ dependencies:
   - tiledb=2.16.0=hf0b6e87_3
   - tk=8.6.12=h27826a3_0
   - tzcode=2023c=h0b41bf4_0
-  - tzdata=2023c=h71feb2d_0
   - wheel=0.40.0=pyhd8ed1ab_1
   - xerces-c=3.2.4=h8d71039_2
   - xorg-kbproto=1.0.7=h7f98852_1002
@@ -146,8 +145,10 @@ dependencies:
       - cramjam==2.6.2
       - exceptiongroup==1.1.2
       - fastapi==0.100.0
+      - fiona==1.9.4.post1
       - flask==2.3.2
       - geojson-pydantic==0.6.3
+      - geopandas==0.13.2
       - h11==0.14.0
       - httpcore==0.17.3
       - httpx==0.24.1
@@ -160,12 +161,15 @@ dependencies:
       - mercantile==1.2.1
       - morecantile==4.3.0
       - numexpr==2.8.4
+      - packaging==23.1
+      - pandas==2.0.3
       - pydantic==1.10.11
       - pyparsing==3.1.0
       - pyproj==3.5.0
       - pystac==1.8.2
       - python-dateutil==2.8.2
       - python-dotenv==1.0.0
+      - pytz==2023.3
       - rangehttpserver==1.3.3
       - rasterio==1.3.8
       - rio-cogeo==4.0.1
@@ -185,6 +189,7 @@ dependencies:
       - titiler-extensions==0.12.0
       - titiler-mosaic==0.12.0
       - typing-extensions==4.7.1
+      - tzdata==2023.3
       - uvicorn==0.23.1
       - werkzeug==2.3.6
       - zipp==3.16.2
