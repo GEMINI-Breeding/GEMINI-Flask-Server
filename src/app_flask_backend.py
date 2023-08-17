@@ -124,6 +124,10 @@ def process_images():
                         closest_location = location
 
                 if closest_location is not None:
+
+                    # Remove the first part of the image path
+                    image_path = image_path.replace('/home/GEMINI/GEMINI-Data', '')
+
                     selected_images.append({
                         'image_path': image_path,
                         'gcp_lat': closest_location['latitude'],
@@ -154,11 +158,11 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 if __name__ == "__main__":
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8090"
+    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=5001)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
