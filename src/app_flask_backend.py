@@ -106,6 +106,10 @@ def process_images():
 
             # Extract GPS coordinates from EXIF data
             image = Image.open(image_path)
+
+            # Get image dimensions
+            width, height = image.size
+
             exif_data = image._getexif()
             if exif_data is not None and 34853 in exif_data:
                 gps_info = exif_data[34853]
@@ -131,11 +135,112 @@ def process_images():
                     selected_images.append({
                         'image_path': image_path,
                         'gcp_lat': closest_location['latitude'],
-                        'gcp_lon': closest_location['longitude']
+                        'gcp_lon': closest_location['longitude'],
+                        'gcp_label': closest_location['label'],
+                        'naturalWidth': width,
+                        'naturalHeight': height
                     })
 
     # Return the selected images and their corresponding GPS coordinates
     return jsonify({'selected_images': selected_images}), 200
+
+@file_app.route('/save_array', methods=['POST'])
+def save_array():
+    data = request.json
+    if 'array' not in data:
+        return jsonify({"message": "Missing array in data"}), 400
+
+    # Extracting the directory path based on the first element in the array 
+    base_image_path = data['array'][0]['image_path']
+    processed_path = base_image_path.replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
+    save_directory = os.path.join('/home/GEMINI/GEMINI-Data/', processed_path)
+    print(save_directory, flush=True)
+
+    # Creating the directory if it doesn't exist
+    os.makedirs(save_directory, exist_ok=True)
+
+    filename = os.path.join(save_directory, "gcp_list.txt")
+
+    # Load existing data from file
+    existing_data = {}
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                parts = line.strip().split()
+                # Use image name as a key for easy lookup
+                image_name = parts[5]
+                existing_data[image_name] = {
+                    'gcp_lon': parts[0],
+                    'gcp_lat': parts[1],
+                    'pointX': parts[3],
+                    'pointY': parts[4],
+                    'image_path': os.path.join(processed_path, image_name),
+                    'gcp_label': parts[6],
+                    'naturalWidth': parts[7],
+                    'naturalHeight': parts[8]
+                }
+
+    # Merge new data with existing data
+    for item in data['array']:
+        if 'pointX' in item and 'pointY' in item:
+            print(item, flush=True)
+            image_name = item['image_path'].split("/")[-1]
+            existing_data[image_name] = {
+                'gcp_lon': item['gcp_lon'],
+                'gcp_lat': item['gcp_lat'],
+                'pointX': item['pointX'],
+                'pointY': item['pointY'],
+                'image_path': os.path.join(processed_path, image_name),
+                'gcp_label': item['gcp_label'],
+                'naturalWidth': item['naturalWidth'],
+                'naturalHeight': item['naturalHeight']
+            }
+
+    # Write merged data to file
+    with open(filename, "w") as f:
+        for image_name, item in existing_data.items():
+            formatted_data = f"{item['gcp_lon']} {item['gcp_lat']} 0 {item['pointX']} {item['pointY']} {image_name} {item['gcp_label']} {item['naturalWidth']} {item['naturalHeight']} \n"
+            f.write(formatted_data)
+
+    return jsonify({"message": f"Array saved successfully in {filename}!"}), 200
+
+@file_app.route('/initialize_file', methods=['POST'])
+def initialize_file():
+    data = request.json
+    if 'basePath' not in data:
+        return jsonify({"message": "Missing basePath in data"}), 400
+
+    processed_path = data['basePath'].replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
+    save_directory = os.path.join('/home/GEMINI/GEMINI-Data/', processed_path)
+
+    # Creating the directory if it doesn't exist
+    os.makedirs(save_directory, exist_ok=True)
+
+    filename = os.path.join(save_directory, "gcp_list.txt")
+
+    existing_data = []
+    if os.path.exists(filename):
+        # Read the existing data
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                parts = line.strip().split()
+                existing_data.append({
+                    'gcp_lon': parts[0],
+                    'gcp_lat': parts[1],
+                    'pointX': parts[3],
+                    'pointY': parts[4],
+                    'image_path': os.path.join(processed_path, parts[5])  # Assuming this path is correct, adjust if needed
+                })
+    else:
+        # Create the file if it doesn't exist
+        with open(filename, 'w') as f:
+            pass
+
+    return jsonify({"existing_data": existing_data,
+                    "file_path": save_directory}), 200
+
 
 # FastAPI app
 app = FastAPI()
@@ -158,11 +263,11 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 if __name__ == "__main__":
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
+    titiler_command = "uvicorn titiler.application.main:app --reload --port 8090"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5001)
+    uvicorn.run(app, host="0.0.0.0", port=5000)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
