@@ -13,6 +13,9 @@ from PIL import Image
 from pyproj import Geod
 import pandas as pd
 
+# Set data dir
+data_root_dir = '/home/gemini/GEMINI-Data'
+
 # Define the Flask application for serving files
 file_app = Flask(__name__)
 
@@ -20,12 +23,12 @@ file_app = Flask(__name__)
 # endpoint to serve files
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
-    return send_from_directory('/home/GEMINI/GEMINI-Data', filename)
+    return send_from_directory(data_root_dir, filename)
 
 # endpoint to list files
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
-    dir_path = os.path.join('/home/GEMINI/GEMINI-Data', dir_path)  # join with base directory path
+    dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
     if os.path.exists(dir_path):
         dirs = next(os.walk(dir_path))[1]
         return jsonify(dirs), 200
@@ -62,7 +65,7 @@ def process_images():
     date = request.json['date']
     radius_meters = request.json['radius_meters']
 
-    prefix = '/home/GEMINI/GEMINI-Data/Raw'
+    prefix = data_root_dir+'/Raw'
     image_folder = os.path.join(prefix, location, population, date, 'Drone', 'Images')
 
     print("Loading predefined locations from CSV file...")
@@ -130,7 +133,7 @@ def process_images():
                 if closest_location is not None:
 
                     # Remove the first part of the image path
-                    image_path = image_path.replace('/home/GEMINI/GEMINI-Data', '')
+                    image_path = image_path.replace(data_root_dir, '')
 
                     selected_images.append({
                         'image_path': image_path,
@@ -153,7 +156,7 @@ def save_array():
     # Extracting the directory path based on the first element in the array 
     base_image_path = data['array'][0]['image_path']
     processed_path = base_image_path.replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
-    save_directory = os.path.join('/home/GEMINI/GEMINI-Data/', processed_path)
+    save_directory = os.path.join(data_root_dir+'/', processed_path)
     print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
@@ -212,7 +215,7 @@ def initialize_file():
         return jsonify({"message": "Missing basePath in data"}), 400
 
     processed_path = data['basePath'].replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
-    save_directory = os.path.join('/home/GEMINI/GEMINI-Data/', processed_path)
+    save_directory = os.path.join(data_root_dir+'/', processed_path)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)

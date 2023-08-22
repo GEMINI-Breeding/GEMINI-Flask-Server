@@ -163,6 +163,7 @@ dependencies:
       - numexpr==2.8.4
       - packaging==23.1
       - pandas==2.0.3
+      - pillow==10.0.0
       - pydantic==1.10.11
       - pyparsing==3.1.0
       - pyproj==3.5.0
