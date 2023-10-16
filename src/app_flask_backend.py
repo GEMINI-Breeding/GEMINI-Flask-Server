@@ -13,8 +13,9 @@ from PIL import Image
 from pyproj import Geod
 import pandas as pd
 
-# Set data dir
-data_root_dir = '/home/gemini/GEMINI-Data'
+import argparse
+from scripts.drone_trait_extraction.drone_gis import process_tiff
+
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -23,11 +24,13 @@ file_app = Flask(__name__)
 # endpoint to serve files
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
+    global data_root_dir
     return send_from_directory(data_root_dir, filename)
 
 # endpoint to list files
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
+    global data_root_dir
     dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
     if os.path.exists(dir_path):
         dirs = next(os.walk(dir_path))[1]
@@ -59,6 +62,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 @file_app.route('/process_images', methods=['POST'])
 def process_images():
+    global data_root_dir
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
@@ -146,6 +150,74 @@ def process_images():
 
     # Return the selected images and their corresponding GPS coordinates
     return jsonify({'selected_images': selected_images}), 200
+
+
+def find_drone_tiffs(image_folder:str) -> [str, str]:
+    # List the files in the image folder
+    files = os.listdir(image_folder)
+    
+    # Find the RGB tiff file
+    rgb_tiff_file = None
+    for file in files:
+        if file.endswith(".tif") and "RGB" in file and not "Pyramid" in file:
+            rgb_tiff_file = file
+            break
+
+    if rgb_tiff_file is None:
+        raise Exception("No RGB tiff file found in folder.")
+    else:
+        print(f"Found RGB tiff file: {rgb_tiff_file}")
+
+    # Find the DEM tif file
+    dem_tiff_file = None
+    for file in files:
+        if file.endswith(".tif") and "DEM" in file and not "Pyramid" in file:
+            dem_tiff_file = file
+            break
+    
+    if dem_tiff_file is None:
+        raise Exception("No DEM tiff file found in folder.")
+    else:
+        print(f"Found DEM tiff file: {dem_tiff_file}")
+
+    return rgb_tiff_file, dem_tiff_file
+
+@file_app.route('/process_drone_tiff/<path:dir_path>')
+def process_drone_tiff(dir_path):
+    # Check if already in processing
+    global now_drone_processing
+    if now_drone_processing:
+        return jsonify({'message': 'Already in processing'}), 400
+    
+    now_drone_processing = True
+    print(f"Processing drone tiff...{dir_path}")
+    # Define the path to the image folder
+    image_folder = os.path.join(data_root_dir, "Processed", dir_path,"Drone")
+    
+    try: 
+        rgb_tiff_file, dem_tiff_file = find_drone_tiffs(image_folder)
+        geojson_path = os.path.join(data_root_dir, "Processed", dir_path,"../Plot-Attributes-WGS84.geojson")
+        date = dir_path.split("/")[-1]
+        sensor = "Drone"
+        output_geojson = os.path.join(data_root_dir, "Processed", dir_path,"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
+        process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tiff_file),
+                     tiff_files_dem=os.path.join(image_folder,dem_tiff_file),
+                     mask_file=geojson_path,
+                     output_file=output_geojson,
+                     debug=False)
+
+
+    except Exception as e:
+        now_drone_processing = False
+        return jsonify({'message': str(e)}), 400
+
+
+
+    now_drone_processing = False
+
+    return jsonify({'message': 'Processing Finished'}), 200
+
+
 
 @file_app.route('/save_array', methods=['POST'])
 def save_array():
@@ -265,12 +337,29 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 
 if __name__ == "__main__":
 
+    # Add arguments to the command line
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-Data',required=False)
+    parser.add_argument('--port', type=int, default=5000,required=False) # Default port is 5000
+    args = parser.parse_args()
+
+    # Print the arguments to the console
+    print(f"data_root_dir: {args.data_root_dir}")
+    print(f"port: {args.port}")
+
+    # Update global data_root_dir from the argument
+    global data_root_dir
+    data_root_dir = args.data_root_dir
+
+    global now_drone_processing
+    now_drone_processing = False
+
     # Start the Titiler server using the subprocess module
     titiler_command = "uvicorn titiler.application.main:app --reload --port 8090"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
