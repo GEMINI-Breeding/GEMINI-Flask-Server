@@ -6,6 +6,7 @@ import cv2
 from tqdm import tqdm
 import json
 import argparse
+import geopandas as gpd
 
 def get_img_data(src, rgb=False):
    
@@ -131,7 +132,7 @@ def draw_geojson(dataset, total_height, plotlabels, fieldmap, mask_ds, rgb=False
         
     return height_map
 
-def calculate_exG_mask(clr_arr,threshold=0.9):
+def calculate_exG_mask(clr_arr,threshold=0.5):
     # Calculate Ex
     clr_ratio = np.zeros((clr_arr.shape[0],clr_arr.shape[1],3),dtype=np.float32)
     clr_arr_float = clr_arr.astype(np.float32)
@@ -149,7 +150,7 @@ def calculate_exG_mask(clr_arr,threshold=0.9):
     # Debug
     if 0:
         cv2.imwrite("exg.png",exg)
-
+    #TODO: Test triangle method
     if 1:
         # testing all thresholds from 0 to the maximum of the image
         threshold_range = range(np.max(exg)+1)
@@ -220,9 +221,11 @@ def crop_geojson(dataset, mask_ds, rgb=False, debug = False):
             # Debug
             cv2.imwrite("data.jpg",cropped_img)
             break
-        
-        # if len(data_total) > 2:
-        #     break
+
+        # Dry run for debugging
+        if debug:
+            if len(data_total) > 10:
+                break
         
     return data_total
 
@@ -253,6 +256,7 @@ def compute_otsu_criteria(im, th):
 
     return weight0 * var0 + weight1 * var1
 
+# Make a modular function
 def get_mask(clr_arr):
     if 0:
         hsv_arr = cv2.cvtColor(clr_arr,cv2.COLOR_BGR2HSV)
@@ -298,12 +302,12 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
         # Load RGB
         print(f"Load rgb..Processing {tiff_rgb}")
         dataset_rgb = gdal.Open(tiff_rgb, gdal.GA_ReadOnly)
-        data_rgb = crop_geojson(dataset_rgb, mask_ds, rgb=True)
+        data_rgb = crop_geojson(dataset_rgb, mask_ds, rgb=True, debug=debug)
 
         # Load Depth
         print(f"Load depth..Processing {tiff_dem}")
         dataset = gdal.Open(tiff_dem, gdal.GA_ReadOnly)
-        data_depth = crop_geojson(dataset, mask_ds, rgb=False)
+        data_depth = crop_geojson(dataset, mask_ds, rgb=False, debug=debug)
 
         # Create a crop dir if arg.crop is true
         if crop:
@@ -423,13 +427,8 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
             json_fieldmap['features'][i] = feature
 
         # Write JSON file with new data
-        with open(output_file, 'w') as f:
-            f.write(json.dumps(json_fieldmap))
-
-
-
+        gpd.GeoDataFrame.from_features(json_fieldmap).to_file(output_file, driver='GeoJSON')
         
-
 
 
 
@@ -438,5 +437,5 @@ if __name__ == "__main__":
     process_tiff(tiff_files_rgb="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Drone/2022-07-25-P4-RGB.tif",
                  tiff_files_dem="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Drone/2022-07-25-P4-DEM.tif",
                  mask_file="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/Plot-Attributes-WGS84.geojson",
-                 output_file="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Results/2022-07-25-Drone-Traits-WGS84.geojson",
+                 output_file="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Results/2022-07-25-Drone-Traits-WGS84_debug.geojson",
                  debug=True)
