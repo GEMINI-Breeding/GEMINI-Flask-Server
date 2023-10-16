@@ -12,9 +12,10 @@ import csv
 from PIL import Image
 from pyproj import Geod
 import pandas as pd
+import geopandas as gpd
 
 # Set data dir
-data_root_dir = '/home/gemini/GEMINI-Data'
+data_root_dir = '/home/GEMINI/GEMINI-Data'
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -244,6 +245,28 @@ def initialize_file():
     return jsonify({"existing_data": existing_data,
                     "file_path": save_directory}), 200
 
+@file_app.route('/query_traits', methods=['POST'])
+
+def query_traits():
+    # receive the parameters
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    sensor = request.json['sensor']
+
+    prefix = data_root_dir+'/Processed'
+    traitpth = os.path.join(prefix, location, population, date, 'Results', 
+                          '-'.join([date, sensor, 'Traits-WGS84.geojson']))
+
+    if not os.path.isfile(traitpth):
+        return jsonify({'message': []}), 404
+    else:
+        gdf = gpd.read_file(traitpth)
+        traits = list(gdf.columns)
+        extraneous_columns = ['Tier','Bed','Plot','Label','Group','geometry']
+        traits = [x for x in traits if x not in extraneous_columns]
+        print(traits, flush=True)
+        return jsonify(traits), 200
 
 # FastAPI app
 app = FastAPI()
@@ -270,7 +293,7 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=5050)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
