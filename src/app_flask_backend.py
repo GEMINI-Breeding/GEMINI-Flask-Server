@@ -28,7 +28,7 @@ def serve_files(filename):
     global data_root_dir
     return send_from_directory(data_root_dir, filename)
 
-# endpoint to list files
+# endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
     global data_root_dir
@@ -36,6 +36,20 @@ def list_dirs(dir_path):
     if os.path.exists(dir_path):
         dirs = next(os.walk(dir_path))[1]
         return jsonify(dirs), 200
+    else:
+        return jsonify({'message': 'Directory not found'}), 404
+
+# endpoint to list files
+@file_app.route('/list_files/<path:dir_path>', methods=['GET'])
+def list_files(dir_path):
+    global data_root_dir
+    dir_path = os.path.join(data_root_dir, dir_path)
+    if os.path.exists(dir_path):
+        files = os.listdir(dir_path)
+        files = [x for x in files if not x.startswith('.')]
+        files = [x for x in files if not os.path.isdir(os.path.join(dir_path, x))]
+        files.sort()
+        return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
 
@@ -150,7 +164,8 @@ def process_images():
                     })
 
     # Return the selected images and their corresponding GPS coordinates
-    return jsonify({'selected_images': selected_images}), 200
+    return jsonify({'selected_images': selected_images,
+                    'num_total': len(files)}), 200
 
 
 def find_drone_tiffs(image_folder:str) -> [str, str]:
