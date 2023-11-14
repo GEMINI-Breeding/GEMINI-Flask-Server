@@ -397,7 +397,7 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5050)
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
