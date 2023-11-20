@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 pushd ../GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
-
 # bash ./install_flask_server.sh
 
 # Activate conda env

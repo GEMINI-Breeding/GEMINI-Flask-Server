@@ -9,6 +9,7 @@ from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 
 import csv
+import json
 from PIL import Image
 from pyproj import Geod
 import pandas as pd
@@ -304,7 +305,6 @@ def initialize_file():
                     "file_path": save_directory}), 200
 
 @file_app.route('/query_traits', methods=['POST'])
-
 def query_traits():
     # receive the parameters
     location = request.json['location']
@@ -325,6 +325,44 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+    
+@file_app.route('/save_geojson', methods=['POST'])
+def save_geojson():
+    data = request.json
+    selected_location_gcp = data.get('selectedLocationGcp')
+    selected_population_gcp = data.get('selectedPopulationGcp')
+    geojson_data = data.get('geojsonData')
+    filename = data.get('filename')
+
+    # Load GeoJSON data into a GeoDataFrame
+    gdf = gpd.GeoDataFrame.from_features(geojson_data)
+
+    # Construct file path based on GCP variables
+    prefix = data_root_dir+'/Processed'
+    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+
+    # Save GeoDataFrame to file
+    gdf.to_file(file_path, driver='GeoJSON')
+
+    return jsonify({"status": "success", "message": "GeoJSON data saved successfully"})
+
+@file_app.route('/load_geojson', methods=['GET'])
+def load_geojson():
+    selected_location_gcp = request.args.get('selectedLocationGcp')
+    selected_population_gcp = request.args.get('selectedPopulationGcp')
+    filename = request.args.get('filename')
+
+    # Construct file path
+    prefix = data_root_dir+'/Processed'
+    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+
+    # Load GeoJSON data from file
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            geojson_data = json.load(file)
+        return jsonify(geojson_data)
+    else:
+        return jsonify({"status": "error", "message": "File not found"})
 
 # FastAPI app
 app = FastAPI()
@@ -368,7 +406,7 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
