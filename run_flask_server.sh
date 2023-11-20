@@ -4,8 +4,7 @@ pushd ../GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
 # bash ./install_flask_server.sh
 
 # Activate conda env
-source ~/miniconda3/bin/activate
-conda activate gemini-flask-server
+source /media/data/miniconda3/bin/activate .conda/
 
 # Use default arguments when they are not provided (data_root_dir, port)
 if [ -z "$1" ]; then
@@ -15,7 +14,7 @@ else
 fi
 
 if [ -z "$2" ]; then
-    port=5002
+    port=5000
 else
     port=$2
 fi

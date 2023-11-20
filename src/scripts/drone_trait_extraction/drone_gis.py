@@ -7,6 +7,66 @@ from tqdm import tqdm
 import json
 import argparse
 import geopandas as gpd
+import rasterio
+import time
+
+DEBUG_ITER = 10
+
+def find_drone_tiffs(image_folder:str) -> [str, str]:
+    # List the files in the image folder
+    files = os.listdir(image_folder)
+    
+    files = [file for file in files if file.endswith(".tif") and not "Pyramid" in file]
+
+    # Find the RGB tiff file
+    rgb_tiff_file = None
+    for file in files:
+        if "RGB" in file and "FLIR" not in file:
+            rgb_tiff_file = file
+            break
+
+    if rgb_tiff_file is None:
+        raise Exception("No RGB tiff file found in folder.")
+    else:
+        print(f"Found RGB tiff file: {rgb_tiff_file}")
+
+    # Find the DEM tif file
+    dem_tiff_file = None
+    for file in files:
+        if "DEM" in file:
+            dem_tiff_file = file
+            break
+    
+    if dem_tiff_file is None:
+        #raise Exception("No DEM tiff file found in folder.")
+        print("No DEM tiff file found in folder.")
+        pass
+    else:
+        print(f"Found DEM tiff file: {dem_tiff_file}")
+
+    # Find ther Thermal tif file
+    thermal_tiff_file = None
+    for file in files:
+        if "FLIR" in file:
+            thermal_tiff_file = file
+            break
+
+    if thermal_tiff_file is None:
+        print("No Thermal tiff file found in folder.")
+        pass
+    else:
+        print(f"Found Thermal tiff file: {thermal_tiff_file}")
+        
+
+    return rgb_tiff_file, dem_tiff_file, thermal_tiff_file
+
+# Open tiff file using rasterio
+def open_tiff_rasterio(tiff_file):
+    # Open tiff file
+    src = rasterio.open(tiff_file)
+
+
+    return src
 
 def get_img_data(src, rgb=False):
    
@@ -30,7 +90,7 @@ def get_img_data(src, rgb=False):
 
     return data    
 
-def crop_xywh(src, x,y,w,h, rgb=False):
+def crop_xywh(src, x,y,w,h, image_type='rgb'):
     # Get the image's starting coordinate
     geotransform = src.GetGeoTransform()
     xinit = geotransform[0]
@@ -40,8 +100,8 @@ def crop_xywh(src, x,y,w,h, rgb=False):
 
     #p1 = point upper left of bounding box
     #p2 = point bottom right of bounding box
-    p1 = (x, y) #(6, 5)
-    p2 = (x+w, y-h) #(12, 14)
+    p1 = (x, y) 
+    p2 = (x+w, y-h)
 
     row1 = int((p1[1] - yinit)/ysize)
     col1 = int((p1[0] - xinit)/xsize)
@@ -49,24 +109,27 @@ def crop_xywh(src, x,y,w,h, rgb=False):
     row2 = int((p2[1] - yinit)/ysize)
     col2 = int((p2[0] - xinit)/xsize)
 
-    if rgb == True:
-        if 0:
-            band1 = src.GetRasterBand(1)
-            band2 = src.GetRasterBand(2)
-            band3 = src.GetRasterBand(3)
-        else:
-            # Opencv BGR
-            band1 = src.GetRasterBand(3)
-            band2 = src.GetRasterBand(2)
-            band3 = src.GetRasterBand(1)
+    if image_type == 'rgb':
+        # Opencv BGR
+        band1 = src.GetRasterBand(3)
+        band2 = src.GetRasterBand(2)
+        band3 = src.GetRasterBand(1)
         data = np.transpose([band1.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
                 band2.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
                 band3.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)],(1,2,0))
-
-    else:
+    elif image_type == 'thermal':
+        # Read last channel
+        band = src.GetRasterBand(4)
+        data = band.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)
+        data = data / 100 - 273.15
+    elif image_type == 'dem':
+        # Read single channel
         band = src.GetRasterBand(1)
         data = band.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)
-
+    else:
+        # Raise error
+        raise ValueError("image_type must be either rgb, thermal or dem")
+    
     return data
 
 def draw_rect_xywh(src, canvas, color, x,y,w,h, rgb=False):
@@ -92,50 +155,13 @@ def draw_rect_xywh(src, canvas, color, x,y,w,h, rgb=False):
 
     return canvas
 
-def draw_geojson(dataset, total_height, plotlabels, fieldmap, mask_ds, rgb=False, debug = True):
-
-    # get the first layer in the mask file
-    mask_layer = mask_ds.GetLayer()
-
-    # get the spatial reference of the mask layer
-    mask_srs = mask_layer.GetSpatialRef()
-
-    
-    # get the input file's spatial reference
-    input_srs = osr.SpatialReference()
-    input_srs.ImportFromWkt(dataset.GetProjection())
-    # create a transformation between the input and mask file spatial references
-    transform = osr.CoordinateTransformation(mask_srs, input_srs) 
-
-    # Draw on Map
-    img = dataset_rgb.GetRasterBand(1)
-    # Create an empty image
-    height_map = np.ones((img.YSize,img.XSize,3),dtype=np.uint8)*255
-
-    for feature, height in tqdm(zip(mask_layer, total_height)):
-        # get the geometry of the feature
-        geometry = feature.GetGeometryRef()
-        # apply the transformation to the geometry
-        geometry.Transform(transform)
-
-        # get the extent of the feature in the input file's coordinate system
-        minX, maxX, minY, maxY = geometry.GetEnvelope()
-
-        # calculate the output file size and resolution
-        pixel_width = dataset.GetGeoTransform()[1]
-        pixel_height = dataset.GetGeoTransform()[5]
-        x_res = int((maxX - minX) / pixel_width)
-        y_res = int((maxY - minY) / -pixel_height)
-
-        height_map = draw_rect_xywh(dataset, height_map, (255,0,0), maxX, maxY, maxX - minX, maxY - minY,rgb=rgb)
-        
-        
-    return height_map
 
 def calculate_exG_mask(clr_arr,threshold=0.5):
-    # Calculate Ex
+    # Calculate ExG
     clr_ratio = np.zeros((clr_arr.shape[0],clr_arr.shape[1],3),dtype=np.float32)
     clr_arr_float = clr_arr.astype(np.float32)
+
+    # Calculate ratio
     for i in range(3):
         clr_ratio[:,:,i] = clr_arr_float[:,:,i] / (clr_arr_float[:,:,0] + clr_arr_float[:,:,1] + clr_arr_float[:,:,2])
     
@@ -174,7 +200,7 @@ def calculate_exG_mask(clr_arr,threshold=0.5):
 
     return np.array(mask,dtype=np.uint8)
 
-def crop_geojson(dataset, mask_ds, rgb=False, debug = False):
+def crop_geojson(dataset, mask_ds, image_type='rgb', debug = False):
 
     # get the first layer in the mask file
     mask_layer = mask_ds.GetLayer()
@@ -206,7 +232,8 @@ def crop_geojson(dataset, mask_ds, rgb=False, debug = False):
         x_res = int((maxX - minX) / pixel_width)
         y_res = int((maxY - minY) / -pixel_height)
 
-        cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY,rgb=rgb)
+        #@TODO: Crop image with any polygon shape
+        cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY,image_type=image_type)
         
         # Create a dict
         data_dict = {"Bed":feature.items()['Bed'],"Tier":feature.items()['Tier'],"img":cropped_img,
@@ -220,11 +247,10 @@ def crop_geojson(dataset, mask_ds, rgb=False, debug = False):
         if debug==True:        
             # Debug
             cv2.imwrite("data.jpg",cropped_img)
-            break
 
         # Dry run for debugging
         if debug:
-            if len(data_total) > 10:
+            if len(data_total) > DEBUG_ITER:
                 break
         
     return data_total
@@ -271,9 +297,9 @@ def get_mask(clr_arr):
         mask = calculate_exG_mask(clr_arr)
         return np.array(mask,dtype=np.uint8)
 
-def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=False, debug=False):
+def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojson, output_geojson, crop=False, debug=False):
 
-    # Check if the tiff_files is a list
+    # tiff_files_rgb is the essential file
     if type(tiff_files_rgb) == str:
         tiff_files_rgb = [tiff_files_rgb]
 
@@ -281,33 +307,59 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
     if type(tiff_files_dem) == str:
         tiff_files_dem = [tiff_files_dem]
 
+    # Check if the tiff_files is a list
+    if type(tiff_files_thermal) == str:
+        tiff_files_thermal = [tiff_files_thermal]
+
     # open the mask file using ogr
-    mask_ds = ogr.Open(mask_file)
+    mask_ds = ogr.Open(plot_geojson)
 
-    # get the first layer in the mask file
-    mask_layer = mask_ds.GetLayer()
+    open_tiff_rasterio(tiff_files_rgb[0])
 
-    # get the spatial reference of the mask layer
-    mask_srs = mask_layer.GetSpatialRef()
+    # Measure operation time if load the entire image
+    if 0:
+        start_time = time.time()
+        dataset_rgb = gdal.Open(tiff_files_rgb[0], gdal.GA_ReadOnly)
+        get_img_data(dataset_rgb, rgb=True)
+        print("--- %s seconds ---" % (time.time() - start_time))
 
-    total_df = pd.DataFrame()
 
     # Load the GeoJSON file
-    with open(mask_file) as f:
+    with open(plot_geojson) as f:
         json_fieldmap = json.load(f)
 
 
 
-    for day, (tiff_dem,tiff_rgb) in enumerate(zip(tiff_files_dem,tiff_files_rgb)):
+    for day in range(len(tiff_files_rgb)):
+        tiff_rgb = tiff_files_rgb[day]
         # Load RGB
-        print(f"Load rgb..Processing {tiff_rgb}")
+        print(f"Load rgb... {tiff_rgb}",flush=True)
         dataset_rgb = gdal.Open(tiff_rgb, gdal.GA_ReadOnly)
-        data_rgb = crop_geojson(dataset_rgb, mask_ds, rgb=True, debug=debug)
+        data_rgb = crop_geojson(dataset_rgb, mask_ds, image_type='rgb', debug=debug)
 
-        # Load Depth
-        print(f"Load depth..Processing {tiff_dem}")
-        dataset = gdal.Open(tiff_dem, gdal.GA_ReadOnly)
-        data_depth = crop_geojson(dataset, mask_ds, rgb=False, debug=debug)
+        try:
+            tiff_dem = tiff_files_dem[day]
+        except:
+            tiff_dem = None
+
+        if tiff_dem:
+            # Load Depth
+            print(f"Load depth... {tiff_dem}",flush=True)
+            dataset = gdal.Open(tiff_dem, gdal.GA_ReadOnly)
+            data_depth = crop_geojson(dataset, mask_ds, image_type='dem', debug=debug)
+
+        try:
+            tiff_thermal = tiff_files_thermal[day]
+        except:
+            tiff_thermal = None
+
+
+        if tiff_thermal:
+            # Load Thermal
+            print(f"Load thermal... {tiff_thermal}",flush=True)
+            dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
+            data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
+        
 
         # Create a crop dir if arg.crop is true
         if crop:
@@ -319,15 +371,19 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
 
         total_height = []
         total_vf = []
+        total_temperature = []
         print("Analyze...")
         Bed = []
         Tier = []
         total_lat = []
         total_lon = []
 
-        plot_cordinates = []
         # TODO: Parallelize
-        for rgb, depth in zip(tqdm(data_rgb), data_depth):
+        for img_idx in tqdm(range(len(data_rgb))):
+            rgb = data_rgb[img_idx]
+            depth = data_depth[img_idx]
+            thermal = data_thermal[img_idx]
+
             # Extract
             rgb_img = rgb['img']
             depth_img = depth['img']
@@ -336,33 +392,49 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
             
             vegetation_fraction = np.sum(mask) / mask.size
             total_vf.append(vegetation_fraction)
-            # Apply mask to image
-            masked_img = cv2.bitwise_and(depth_img, depth_img, mask=mask)
-            # Height Analyis
-            # Debug
-            if debug:
-                cv2.imwrite("rgb_img.png", rgb_img)
-                cv2.imwrite("mask.png", mask*255)
 
-                # normalize depth values to range between 0 and 255
-                depth_map_normalized = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-                # create a grayscale image
-                depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
-                cv2.imwrite("depth_map_gray_orig.png",depth_map_gray)
+            if tiff_dem:
+                # Apply mask to image
+                masked_depth_img = cv2.bitwise_and(depth_img, depth_img, mask=mask)
+                # Height Analyis
+                # Debug
+                if debug:
+                    cv2.imwrite("rgb_img.png", rgb_img)
+                    cv2.imwrite("mask.png", mask*255)
 
-                # normalize depth values to range between 0 and 255
-                depth_map_normalized = cv2.normalize(masked_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-                # create a grayscale image
-                depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
-                cv2.imwrite("depth_map_gray.png",depth_map_gray)
+                    # normalize depth values to range between 0 and 255
+                    depth_map_normalized = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                    # create a grayscale image
+                    depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
+                    cv2.imwrite("depth_map_gray_orig.png",depth_map_gray)
 
-            # Extract pixel values to list
-            pixel_values = masked_img[np.where(masked_img != 0)].tolist()
-            base = np.quantile(pixel_values,0.05)
-            height = np.quantile(pixel_values,0.95)
-            total_height.append(height - base)
+                    # normalize depth values to range between 0 and 255
+                    depth_map_normalized = cv2.normalize(masked_depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                    # create a grayscale image
+                    depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
+                    cv2.imwrite("depth_map_gray.png",depth_map_gray)
 
-            crop_height = height - base
+                # Extract pixel values to list
+                depth_pixel_values = masked_depth_img[np.where(masked_depth_img != 0)].tolist()
+                base = np.quantile(depth_pixel_values,0.05)
+                height = np.quantile(depth_pixel_values,0.95)
+                crop_height = height - base
+                total_height.append(height - base)
+            else:
+                print("No depth file found. Skipping depth analysis.")
+
+            if tiff_thermal:
+                # Thermal Analysis
+                thermal_img = thermal['img']
+                # Resize mask to thermal image size
+                thermal_mask = cv2.resize(mask,dsize=(thermal_img.shape[1],thermal_img.shape[0]))
+                masked_thermal_img = cv2.bitwise_and(thermal_img, thermal_img, mask=thermal_mask)
+                thermal_pixel_values = masked_thermal_img[np.where(masked_thermal_img != 0)].tolist()
+                avg_temp = np.mean(thermal_pixel_values) 
+                total_temperature.append(avg_temp)
+            else:
+                print("No thermal file found. Skipping thermal analysis.")
+
 
             bed_no = rgb['Bed']
             tier_no = rgb['Tier']
@@ -375,15 +447,6 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
 
             total_lon.append(lon)
             total_lat.append(lat)
-
-            # Create a dict
-            crop_location = {"Bed":bed_no,"Tier":tier_no,"maxX":rgb['maxX'], "maxY":rgb['maxY'], "minX":rgb['minX'], "minY":rgb['minY'],
-                             "pixel_width":rgb['pixel_width'], "pixel_height":rgb['pixel_height'],
-                             "minLon":rgb['minLon'], "maxLon":rgb['maxLon'], "minLat":rgb['minLat'], "maxLat":rgb['maxLat'],
-                             }
-            
-            # Append to list
-            plot_cordinates.append(crop_location)
 
 
             # Save image if arg.crop is true
@@ -399,17 +462,25 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
 
             # Dry run for debugging
             if debug:
-                if len(Bed) > 10:
+                if len(Bed) > DEBUG_ITER:
                     break
 
         
         df = pd.DataFrame({"Bed":Bed,
                            "Tier":Tier,
-                           "height_95p_meters":total_height,
-                           "vegetation_fraciton":total_vf,
                            "lon":total_lon,
                            "lat":total_lat, 
                            })
+        
+        if len(total_height) > 0:
+            df["height_95p_meters"] = total_height
+        
+        if len(total_vf) > 0:
+            df["vegetation_fraciton"] = total_vf
+        
+        if len(total_temperature) > 0:
+            df["avg_temp_c"] = total_temperature
+
         
         for i in range(len(df)):
         
@@ -423,19 +494,21 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, mask_file, output_file, crop=Fa
 
             feature['properties']['Height_95p_meters'] = round(df.iloc[i]['height_95p_meters'], 4)
             feature['properties']['Vegetation_Fraction'] = round(df.iloc[i]['vegetation_fraciton'], 4)
+            feature['properties']['Avg_Temp_C'] = round(df.iloc[i]['avg_temp_c'], 4)
 
             json_fieldmap['features'][i] = feature
 
         # Write JSON file with new data
-        gpd.GeoDataFrame.from_features(json_fieldmap).to_file(output_file, driver='GeoJSON')
+        gpd.GeoDataFrame.from_features(json_fieldmap).to_file(output_geojson, driver='GeoJSON')
         
 
 
 
 # Debug
 if __name__ == "__main__":
-    process_tiff(tiff_files_rgb="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Drone/2022-07-25-P4-RGB.tif",
-                 tiff_files_dem="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Drone/2022-07-25-P4-DEM.tif",
-                 mask_file="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/Plot-Attributes-WGS84.geojson",
-                 output_file="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-07-25/Results/2022-07-25-Drone-Traits-WGS84_debug.geojson",
+    process_tiff(tiff_files_rgb="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-RGB.tif",
+                 tiff_files_dem="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-DEM.tif",
+                 tiff_files_thermal="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-FLIR-RGBT.tif",
+                 plot_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/Plot-Attributes-WGS84.geojson",
+                 output_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Results/2022-06-20-Drone-Traits-WGS84_debug.geojson",
                  debug=True)

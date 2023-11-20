@@ -15,7 +15,7 @@ import pandas as pd
 import geopandas as gpd
 
 import argparse
-from scripts.drone_trait_extraction.drone_gis import process_tiff
+from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
 
 
 # Define the Flask application for serving files
@@ -168,36 +168,6 @@ def process_images():
                     'num_total': len(files)}), 200
 
 
-def find_drone_tiffs(image_folder:str) -> [str, str]:
-    # List the files in the image folder
-    files = os.listdir(image_folder)
-    
-    # Find the RGB tiff file
-    rgb_tiff_file = None
-    for file in files:
-        if file.endswith(".tif") and "RGB" in file and not "Pyramid" in file:
-            rgb_tiff_file = file
-            break
-
-    if rgb_tiff_file is None:
-        raise Exception("No RGB tiff file found in folder.")
-    else:
-        print(f"Found RGB tiff file: {rgb_tiff_file}")
-
-    # Find the DEM tif file
-    dem_tiff_file = None
-    for file in files:
-        if file.endswith(".tif") and "DEM" in file and not "Pyramid" in file:
-            dem_tiff_file = file
-            break
-    
-    if dem_tiff_file is None:
-        raise Exception("No DEM tiff file found in folder.")
-    else:
-        print(f"Found DEM tiff file: {dem_tiff_file}")
-
-    return rgb_tiff_file, dem_tiff_file
-
 @file_app.route('/process_drone_tiff/<path:dir_path>')
 def process_drone_tiff(dir_path):
     # Check if already in processing
@@ -211,15 +181,16 @@ def process_drone_tiff(dir_path):
     image_folder = os.path.join(data_root_dir, "Processed", dir_path,"Drone")
     
     try: 
-        rgb_tiff_file, dem_tiff_file = find_drone_tiffs(image_folder)
+        rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
         geojson_path = os.path.join(data_root_dir, "Processed", dir_path,"../Plot-Attributes-WGS84.geojson")
         date = dir_path.split("/")[-1]
         sensor = "Drone"
         output_geojson = os.path.join(data_root_dir, "Processed", dir_path,"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
-        process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tiff_file),
-                     tiff_files_dem=os.path.join(image_folder,dem_tiff_file),
-                     mask_file=geojson_path,
-                     output_file=output_geojson,
+        process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tif_file),
+                     tiff_files_dem=os.path.join(image_folder,dem_tif_file),
+                     tiff_files_thermal=os.path.join(image_folder,thermal_tif_file),
+                     plot_geojson=geojson_path,
+                     output_geojson=output_geojson,
                      debug=False)
 
 
@@ -397,7 +368,7 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="0.0.0.0", port=5050)
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
