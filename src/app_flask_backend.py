@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import csv
 import json
+import subprocess
+import traceback
 from PIL import Image
 from pyproj import Geod
 import pandas as pd
@@ -363,6 +365,60 @@ def load_geojson():
         return jsonify(geojson_data)
     else:
         return jsonify({"status": "error", "message": "File not found"})
+
+# rover model training
+def get_labels(labels_path):
+    unique_labels = set()
+
+    # Iterate over the files in the directory
+    for filename in os.listdir(labels_path):
+        if filename.endswith(".txt"):
+            file_path = os.path.join(labels_path, filename)
+            with open(file_path, 'r') as file:
+                for line in file:
+                    label = line.split()[0]  # Extracting the label
+                    unique_labels.add(label)
+
+    sorted_unique_labels = sorted(unique_labels, key=lambda x: int(x))
+    return list(sorted_unique_labels)
+
+@file_app.route('/train_model', methods=['POST'])
+def train_model():
+    global data_root_dir
+    
+    # receive the parameters
+    epochs = int(request.json['epochs'])
+    batch_size = int(request.json['batchSize'])
+    image_size = int(request.json['imageSize'])
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    trait = request.json['trait']
+    # sensor = request.json['sensor']
+    sensor = 'Rover'
+    
+    # extract labels
+    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
+    labels = get_labels(labels_path)
+    labels_arg = " ".join(labels)
+    
+    # other training args
+    container_dir = '/app/mnt'
+    pretrained = "/app/train/yolov8n.pt"
+    save = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
+    
+    # run training
+    try:
+        cmd = (f"docker exec train python /app/train/train.py "
+                f"--pretrained {pretrained} --images {images} --save {save} --sensor {sensor} "
+                f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
+                f"--batch-size {batch_size} --labels {labels_arg}")
+        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return jsonify({"Training Finished": process.stdout.decode("utf-8")}), 200
+    except Exception as e:
+        traceback.print_exc()  # This prints the full traceback to the server logs
+        return jsonify({"error": str(e)}), 500
 
 # FastAPI app
 app = FastAPI()
