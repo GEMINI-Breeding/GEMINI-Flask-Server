@@ -10,10 +10,10 @@ from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from subprocess import CalledProcessError
 
 import csv
 import json
-import subprocess
 import traceback
 from PIL import Image
 from pyproj import Geod
@@ -388,17 +388,30 @@ def get_labels(labels_path):
 
 def scan_for_new_folders(save_path):
     global latest_epoch
-    known_folders = set()
+    # Initialize known_folders with existing folders in save_path
+    known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
+
     while True:
+        # Check for new folders
         for folder_name in os.listdir(save_path):
             folder_path = os.path.join(save_path, folder_name)
             if os.path.isdir(folder_path) and folder_path not in known_folders:
-                known_folders.add(folder_path)
+                known_folders.add(folder_path)  # Add new folder to the set
                 results_file = os.path.join(folder_path, 'results.csv')
+
+                # Wait for results.csv to appear in the new folder
+                file_wait_time = 0
+                file_wait_timeout = 600  # Timeout after 10 minutes (600 seconds)
+                while not os.path.exists(results_file) and file_wait_time < file_wait_timeout:
+                    time.sleep(5)  # Check every 5 seconds
+                    file_wait_time += 5
+
+                # Check if the results.csv file exists after waiting
                 if os.path.exists(results_file):
                     df = pd.read_csv(results_file)
-                    latest_epoch['epoch'] = int(df['epoch'].iloc[-1])
-        time.sleep(10)  # Check every 10 seconds
+                    latest_epoch['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+
+        time.sleep(10)  # Check for new folders every 10 seconds
         
 @file_app.route('/get_training_progress', methods=['GET'])
 def get_training_progress():
@@ -428,7 +441,7 @@ def train_model():
     container_dir = '/app/mnt'
     pretrained = "/app/train/yolov8n.pt"
     save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
-    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
     latest_epoch['epoch'] = 0
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
     images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
@@ -453,12 +466,26 @@ def train_model():
 def stop_training():
     container_name = 'train'
     try:
-        # Send SIGTERM to all processes in the container except for PID 1
-        kill_cmd = f"docker exec {container_name} sh -c 'kill -SIGTERM $(pidof -o 1)'"
-        subprocess.run(kill_cmd, shell=True, check=True)
-        return jsonify({"message": "Training processes in container stopped"}), 200
+        # Continuously attempt to kill the Python process inside the container
+        max_attempts = 10  # Limit the number of attempts to avoid infinite loop
+        attempts = 0
+        while attempts < max_attempts:
+            kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+            subprocess.run(kill_cmd, shell=True)
+            # Check if the process is still running
+            check_cmd = f"docker exec {container_name} pgrep -f python"
+            print(check_cmd)
+            result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE)
+            if not result.stdout.strip():
+                # Process has been successfully terminated
+                return jsonify({"message": "Python process in container successfully stopped"}), 200
+            attempts += 1
+            time.sleep(1)  # Wait a bit before next attempt
+
+        return jsonify({"error": "Failed to stop the Python process after multiple attempts"}), 500
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
+
 
 # FastAPI app
 app = FastAPI()
