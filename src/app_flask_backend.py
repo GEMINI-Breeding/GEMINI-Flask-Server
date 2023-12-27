@@ -2,6 +2,9 @@ import os
 import subprocess
 import threading
 import uvicorn
+import signal
+import flask
+import time
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
@@ -23,6 +26,7 @@ from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_ti
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
+latest_epoch = {'epoch': 0}
 
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
@@ -382,9 +386,27 @@ def get_labels(labels_path):
     sorted_unique_labels = sorted(unique_labels, key=lambda x: int(x))
     return list(sorted_unique_labels)
 
+def scan_for_new_folders(save_path):
+    global latest_epoch
+    known_folders = set()
+    while True:
+        for folder_name in os.listdir(save_path):
+            folder_path = os.path.join(save_path, folder_name)
+            if os.path.isdir(folder_path) and folder_path not in known_folders:
+                known_folders.add(folder_path)
+                results_file = os.path.join(folder_path, 'results.csv')
+                if os.path.exists(results_file):
+                    df = pd.read_csv(results_file)
+                    latest_epoch['epoch'] = int(df['epoch'].iloc[-1])
+        time.sleep(10)  # Check every 10 seconds
+        
+@file_app.route('/get_training_progress', methods=['GET'])
+def get_training_progress():
+    return jsonify(latest_epoch)
+
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir
+    global data_root_dir, latest_epoch
     
     # receive the parameters
     epochs = int(request.json['epochs'])
@@ -405,20 +427,34 @@ def train_model():
     # other training args
     container_dir = '/app/mnt'
     pretrained = "/app/train/yolov8n.pt"
-    save = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    latest_epoch['epoch'] = 0
+    threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
     images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
     
     # run training
+    cmd = (f"docker exec train sh -c "
+           f"'python /app/train/train.py "
+           f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
+           f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
+           f"--batch-size {batch_size} --labels {labels_arg} & echo $!'")
     try:
-        cmd = (f"docker exec train python /app/train/train.py "
-                f"--pretrained {pretrained} --images {images} --save {save} --sensor {sensor} "
-                f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
-                f"--batch-size {batch_size} --labels {labels_arg}")
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return jsonify({"Training Finished": process.stdout.decode("utf-8")}), 200
-    except Exception as e:
-        traceback.print_exc()  # This prints the full traceback to the server logs
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"message": "Training started"}), 202
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+@file_app.route('/stop_training', methods=['POST'])
+def stop_training():
+    container_name = 'train'
+    try:
+        # Send SIGTERM to all processes in the container except for PID 1
+        kill_cmd = f"docker exec {container_name} sh -c 'kill -SIGTERM $(pidof -o 1)'"
+        subprocess.run(kill_cmd, shell=True, check=True)
+        return jsonify({"message": "Training processes in container stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 # FastAPI app
 app = FastAPI()
