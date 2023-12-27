@@ -434,16 +434,20 @@ def train_model():
     images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
     
     # run training
-    cmd = (f"docker exec train sh -c "
-           f"'python /app/train/train.py "
+    cmd = (f"docker exec train "
+           f"python /app/train/train.py "
            f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
            f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
-           f"--batch-size {batch_size} --labels {labels_arg} & echo $!'")
+           f"--batch-size {batch_size} --labels {labels_arg}")
+    
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return jsonify({"message": "Training started"}), 202
+        output = process.stdout.decode('utf-8')
+        return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+        error_output = e.stderr.decode('utf-8')
+        print("Error occurred:", error_output)  # Log error
+        return jsonify({"error": error_output}), 500
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
