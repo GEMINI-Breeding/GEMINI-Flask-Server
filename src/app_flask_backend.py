@@ -27,6 +27,7 @@ from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_ti
 # Define the Flask application for serving files
 file_app = Flask(__name__)
 latest_epoch = {'epoch': 0}
+training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
@@ -387,29 +388,30 @@ def get_labels(labels_path):
     return list(sorted_unique_labels)
 
 def scan_for_new_folders(save_path):
-    global latest_epoch
-    # Initialize known_folders with existing folders in save_path
+    global latest_epoch, training_stopped_event, new_folder
     known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
 
-    while True:
+    while not training_stopped_event.is_set():  # Continue while training is ongoing
         # Check for new folders
         for folder_name in os.listdir(save_path):
             folder_path = os.path.join(save_path, folder_name)
             if os.path.isdir(folder_path) and folder_path not in known_folders:
                 known_folders.add(folder_path)  # Add new folder to the set
+                new_folder = folder_path  # Update global variable
                 results_file = os.path.join(folder_path, 'results.csv')
 
-                # Wait for results.csv to appear in the new folder
-                file_wait_time = 0
-                file_wait_timeout = 600  # Timeout after 10 minutes (600 seconds)
-                while not os.path.exists(results_file) and file_wait_time < file_wait_timeout:
+                # Continuously check results.csv for updates
+                while not os.path.isfile(results_file):
                     time.sleep(5)  # Check every 5 seconds
-                    file_wait_time += 5
 
-                # Check if the results.csv file exists after waiting
-                if os.path.exists(results_file):
-                    df = pd.read_csv(results_file)
-                    latest_epoch['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+                # Periodically read results.csv for updates
+                while os.path.isfile(results_file):
+                    try:
+                        df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                        latest_epoch['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+                    except Exception as e:
+                        print(f"Error reading {results_file}: {e}")
+                    time.sleep(5)  # Update every 30 seconds
 
         time.sleep(10)  # Check for new folders every 10 seconds
         
@@ -419,7 +421,7 @@ def get_training_progress():
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_epoch
+    global data_root_dir, latest_epoch, training_stopped_event
     
     # receive the parameters
     epochs = int(request.json['epochs'])
@@ -443,6 +445,7 @@ def train_model():
     save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
     scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
     latest_epoch['epoch'] = 0
+    training_stopped_event.clear()
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
     images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
     
@@ -459,30 +462,19 @@ def train_model():
         return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
-        print("Error occurred:", error_output)  # Log error
         return jsonify({"error": error_output}), 500
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
+    global training_stopped_event, new_folder
     container_name = 'train'
     try:
-        # Continuously attempt to kill the Python process inside the container
-        max_attempts = 10  # Limit the number of attempts to avoid infinite loop
-        attempts = 0
-        while attempts < max_attempts:
-            kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-            subprocess.run(kill_cmd, shell=True)
-            # Check if the process is still running
-            check_cmd = f"docker exec {container_name} pgrep -f python"
-            print(check_cmd)
-            result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE)
-            if not result.stdout.strip():
-                # Process has been successfully terminated
-                return jsonify({"message": "Python process in container successfully stopped"}), 200
-            attempts += 1
-            time.sleep(1)  # Wait a bit before next attempt
-
-        return jsonify({"error": "Failed to stop the Python process after multiple attempts"}), 500
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        training_stopped_event.set()
+        subprocess.run(f"rm -rf {new_folder}", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
