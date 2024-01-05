@@ -424,7 +424,8 @@ def train_model():
     global data_root_dir, latest_epoch, training_stopped_event
     
     # receive the parameters
-    epochs = int(request.json['epochs'])
+    # epochs = int(request.json['epochs'])
+    epochs = 1 # testing
     batch_size = int(request.json['batchSize'])
     image_size = int(request.json['imageSize'])
     location = request.json['location']
