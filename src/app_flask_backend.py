@@ -339,9 +339,7 @@ def save_csv():
     file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
 
     # Save CSV data to file
-    with open(file_path, 'w') as file:
-        writer = csv.writer(file)
-        writer.writerows(csv_data)
+    pd.DataFrame(csv_data).to_csv(file_path, index=False)
 
     return jsonify({"status": "success", "message": "CSV data saved successfully"}), 200
     
