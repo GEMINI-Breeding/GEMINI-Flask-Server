@@ -326,6 +326,25 @@ def query_traits():
         print(traits, flush=True)
         return jsonify(traits), 200
     
+@file_app.route('/save_csv', methods=['POST'])
+def save_csv():
+    data = request.json
+    selected_location_gcp = data.get('selectedLocationGcp')
+    selected_population_gcp = data.get('selectedPopulationGcp')
+    csv_data = data.get('csvData')
+    filename = data.get('filename')
+
+    # Construct file path based on GCP variables
+    prefix = data_root_dir+'/Processed'
+    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+
+    # Save CSV data to file
+    with open(file_path, 'w') as file:
+        writer = csv.writer(file)
+        writer.writerows(csv_data)
+
+    return jsonify({"status": "success", "message": "CSV data saved successfully"}), 200
+    
 @file_app.route('/save_geojson', methods=['POST'])
 def save_geojson():
     data = request.json
