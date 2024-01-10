@@ -413,7 +413,7 @@ def scan_for_new_folders(save_path):
                         print(f"Error reading {results_file}: {e}")
                     time.sleep(5)  # Update every 30 seconds
 
-        time.sleep(10)  # Check for new folders every 10 seconds
+        time.sleep(5)  # Check for new folders every 10 seconds
         
 @file_app.route('/get_training_progress', methods=['GET'])
 def get_training_progress():
