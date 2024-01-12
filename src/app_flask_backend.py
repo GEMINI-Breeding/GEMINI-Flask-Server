@@ -17,7 +17,7 @@ import geopandas as gpd
 
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
-
+from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -229,7 +229,7 @@ def save_array():
     if os.path.exists(filename):
         with open(filename, 'r') as f:
             lines = f.readlines()
-            for line in lines:
+            for line in lines[1:]:
                 parts = line.strip().split()
                 # Use image name as a key for easy lookup
                 image_name = parts[5]
@@ -262,6 +262,7 @@ def save_array():
 
     # Write merged data to file
     with open(filename, "w") as f:
+        f.write('EPSG:4326\n')
         for image_name, item in existing_data.items():
             formatted_data = f"{item['gcp_lon']} {item['gcp_lat']} 0 {item['pointX']} {item['pointY']} {image_name} {item['gcp_label']} {item['naturalWidth']} {item['naturalHeight']} \n"
             f.write(formatted_data)
@@ -287,7 +288,7 @@ def initialize_file():
         # Read the existing data
         with open(filename, 'r') as f:
             lines = f.readlines()
-            for line in lines:
+            for line in lines[1:]:
                 parts = line.strip().split()
                 existing_data.append({
                     'gcp_lon': parts[0],
@@ -299,6 +300,7 @@ def initialize_file():
     else:
         # Create the file if it doesn't exist
         with open(filename, 'w') as f:
+            f.write("EPSG:4326\n")
             pass
 
     return jsonify({"existing_data": existing_data,
@@ -380,6 +382,36 @@ def load_geojson():
         return jsonify(geojson_data)
     else:
         return jsonify({"status": "error", "message": "File not found"})
+
+@file_app.route('/run_odm', methods=['POST'])
+def run_odm_endpoint():
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    sensor = data.get('sensor')
+    temp_dir = data.get('temp_dir')
+    reconstruction_quality = data.get('reconstruction_quality')
+    custom_options = data.get('custom_options')
+
+    if not temp_dir:
+        temp_dir = '/home/GEMINI/temp/project'
+    if not reconstruction_quality:
+        reconstruction_quality = 'Low'
+
+    # Run ODM
+    args = argparse.Namespace()
+    args.data_root_dir = data_root_dir
+    args.location = location
+    args.population = population
+    args.date = date
+    args.sensor = sensor
+    args.temp_dir = temp_dir
+    args.reconstruction_quality = reconstruction_quality
+    args.custom_options = custom_options
+    run_odm(args)
+
+    return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
 # FastAPI app
 app = FastAPI()

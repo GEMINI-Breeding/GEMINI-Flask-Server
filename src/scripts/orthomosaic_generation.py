@@ -88,13 +88,12 @@ def run_odm(args):
     if os.path.basename(pth) != 'project':
         pth = os.path.join(pth, 'project')   
 
-    if args.reconstruction_quality == 'custom':
+    if args.reconstruction_quality == 'Custom':
         subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options])
-    elif args.reconstruction_quality == 'low':
-        # opendronemap --project-path project --feature-type sift --auto-boundary --gcp project/code/gcp_list.txt --skip-3dmodel --dsm --dtm --dem-resolution 0.2 --rerun-from odm_dem
-        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--resize-to', '1000', '--min-num-features', '8000'])
-    elif args.reconstruction_quality == 'high':
-        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--resize-to', '2000', '--min-num-features', '16000'])
+    elif args.reconstruction_quality == 'Low':
+        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000'])
+    elif args.reconstruction_quality == 'High':
+        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000'])
     else:
         raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
     
@@ -109,7 +108,7 @@ if __name__ == '__main__':
                         default='/home/GEMINI/temp/project')
     parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=['high', 'low', 'custom'], default='low')
+                        choices=['High', 'Low', 'Custom'], default='low')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
