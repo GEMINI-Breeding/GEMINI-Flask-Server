@@ -1,3 +1,4 @@
+from concurrent.futures import thread
 import os
 import subprocess
 import threading
@@ -409,7 +410,10 @@ def run_odm_endpoint():
     args.temp_dir = temp_dir
     args.reconstruction_quality = reconstruction_quality
     args.custom_options = custom_options
-    run_odm(args)
+    
+    # Run ODM in a separate thread
+    thread = threading.Thread(target=run_odm, args=(args,))
+    thread.start()
 
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
