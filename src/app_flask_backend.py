@@ -371,7 +371,7 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
 
-# rover model training
+### rover model training
 def get_labels(labels_path):
     unique_labels = set()
 
@@ -424,8 +424,8 @@ def train_model():
     global data_root_dir, latest_epoch, training_stopped_event
     
     # receive the parameters
-    # epochs = int(request.json['epochs'])
-    epochs = 1 # testing
+    epochs = int(request.json['epochs'])
+    # epochs = 1 # testing
     batch_size = int(request.json['batchSize'])
     image_size = int(request.json['imageSize'])
     location = request.json['location']
@@ -470,6 +470,7 @@ def stop_training():
     global training_stopped_event, new_folder
     container_name = 'train'
     try:
+        print('Training stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
