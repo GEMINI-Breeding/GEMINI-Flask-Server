@@ -26,7 +26,7 @@ from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_ti
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_epoch = {'epoch': 0}
+latest_data = {'epoch': 0, 'map': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -371,7 +371,7 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
 
-### rover model training
+### ROVER MODEL TRAINING ###
 def get_labels(labels_path):
     unique_labels = set()
 
@@ -388,7 +388,7 @@ def get_labels(labels_path):
     return list(sorted_unique_labels)
 
 def scan_for_new_folders(save_path):
-    global latest_epoch, training_stopped_event, new_folder
+    global latest_data, training_stopped_event, new_folder
     known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
 
     while not training_stopped_event.is_set():  # Continue while training is ongoing
@@ -408,7 +408,8 @@ def scan_for_new_folders(save_path):
                 while os.path.isfile(results_file):
                     try:
                         df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-                        latest_epoch['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+                        latest_data['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+                        latest_data['map'] = df['metrics/mAP50(B)'].iloc[-1]  # Update latest mAP
                     except Exception as e:
                         print(f"Error reading {results_file}: {e}")
                     time.sleep(5)  # Update every 30 seconds
@@ -417,11 +418,11 @@ def scan_for_new_folders(save_path):
         
 @file_app.route('/get_training_progress', methods=['GET'])
 def get_training_progress():
-    return jsonify(latest_epoch)
+    return jsonify(latest_data)
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_epoch, training_stopped_event
+    global data_root_dir, latest_data, training_stopped_event
     
     # receive the parameters
     epochs = int(request.json['epochs'])
@@ -433,7 +434,7 @@ def train_model():
     date = request.json['date']
     trait = request.json['trait']
     # sensor = request.json['sensor']
-    sensor = 'Rover'
+    sensor = 'Rover' # testing
     
     # extract labels
     labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
@@ -445,7 +446,8 @@ def train_model():
     pretrained = "/app/train/yolov8n.pt"
     save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
     scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
-    latest_epoch['epoch'] = 0
+    latest_data['epoch'] = 0
+    latest_data['map'] = 0
     training_stopped_event.clear()
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
     images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
