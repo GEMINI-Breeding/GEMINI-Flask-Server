@@ -3,6 +3,7 @@ import os
 import subprocess
 import threading
 import uvicorn
+import time
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
@@ -22,6 +23,8 @@ from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
+latest_data = {'epoch': 0, 'map': 0}
+training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
@@ -384,6 +387,7 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
 
+
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
     data = request.json
@@ -416,6 +420,117 @@ def run_odm_endpoint():
     thread.start()
 
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
+
+### ROVER MODEL TRAINING ###
+def get_labels(labels_path):
+    unique_labels = set()
+
+    # Iterate over the files in the directory
+    for filename in os.listdir(labels_path):
+        if filename.endswith(".txt"):
+            file_path = os.path.join(labels_path, filename)
+            with open(file_path, 'r') as file:
+                for line in file:
+                    label = line.split()[0]  # Extracting the label
+                    unique_labels.add(label)
+
+    sorted_unique_labels = sorted(unique_labels, key=lambda x: int(x))
+    return list(sorted_unique_labels)
+
+def scan_for_new_folders(save_path):
+    global latest_data, training_stopped_event, new_folder
+    known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
+
+    while not training_stopped_event.is_set():  # Continue while training is ongoing
+        # Check for new folders
+        for folder_name in os.listdir(save_path):
+            folder_path = os.path.join(save_path, folder_name)
+            if os.path.isdir(folder_path) and folder_path not in known_folders:
+                known_folders.add(folder_path)  # Add new folder to the set
+                new_folder = folder_path  # Update global variable
+                results_file = os.path.join(folder_path, 'results.csv')
+
+                # Continuously check results.csv for updates
+                while not os.path.isfile(results_file):
+                    time.sleep(5)  # Check every 5 seconds
+
+                # Periodically read results.csv for updates
+                while os.path.isfile(results_file):
+                    try:
+                        df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                        latest_data['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
+                        latest_data['map'] = df['metrics/mAP50(B)'].iloc[-1]  # Update latest mAP
+                    except Exception as e:
+                        print(f"Error reading {results_file}: {e}")
+                    time.sleep(5)  # Update every 30 seconds
+
+        time.sleep(5)  # Check for new folders every 10 seconds
+        
+@file_app.route('/get_training_progress', methods=['GET'])
+def get_training_progress():
+    return jsonify(latest_data)
+
+@file_app.route('/train_model', methods=['POST'])
+def train_model():
+    global data_root_dir, latest_data, training_stopped_event
+    
+    # receive the parameters
+    epochs = int(request.json['epochs'])
+    # epochs = 1 # testing
+    batch_size = int(request.json['batchSize'])
+    image_size = int(request.json['imageSize'])
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    trait = request.json['trait']
+    # sensor = request.json['sensor']
+    sensor = 'Rover' # testing
+    
+    # extract labels
+    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
+    labels = get_labels(labels_path)
+    labels_arg = " ".join(labels)
+    
+    # other training args
+    container_dir = '/app/mnt'
+    pretrained = "/app/train/yolov8n.pt"
+    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
+    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
+    latest_data['epoch'] = 0
+    latest_data['map'] = 0
+    training_stopped_event.clear()
+    threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
+    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
+    
+    # run training
+    cmd = (f"docker exec train "
+           f"python /app/train/train.py "
+           f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
+           f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
+           f"--batch-size {batch_size} --labels {labels_arg}")
+    
+    try:
+        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = process.stdout.decode('utf-8')
+        return jsonify({"message": "Training started", "output": output}), 202
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr.decode('utf-8')
+        return jsonify({"error": error_output}), 500
+    
+@file_app.route('/stop_training', methods=['POST'])
+def stop_training():
+    global training_stopped_event, new_folder
+    container_name = 'train'
+    try:
+        print('Training stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        training_stopped_event.set()
+        subprocess.run(f"rm -rf {new_folder}", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 # FastAPI app
 app = FastAPI()
