@@ -1,3 +1,4 @@
+from concurrent.futures import thread
 import os
 import subprocess
 import threading
@@ -18,7 +19,7 @@ import geopandas as gpd
 
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
-
+from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -232,7 +233,7 @@ def save_array():
     if os.path.exists(filename):
         with open(filename, 'r') as f:
             lines = f.readlines()
-            for line in lines:
+            for line in lines[1:]:
                 parts = line.strip().split()
                 # Use image name as a key for easy lookup
                 image_name = parts[5]
@@ -265,6 +266,7 @@ def save_array():
 
     # Write merged data to file
     with open(filename, "w") as f:
+        f.write('EPSG:4326\n')
         for image_name, item in existing_data.items():
             formatted_data = f"{item['gcp_lon']} {item['gcp_lat']} 0 {item['pointX']} {item['pointY']} {image_name} {item['gcp_label']} {item['naturalWidth']} {item['naturalHeight']} \n"
             f.write(formatted_data)
@@ -290,7 +292,7 @@ def initialize_file():
         # Read the existing data
         with open(filename, 'r') as f:
             lines = f.readlines()
-            for line in lines:
+            for line in lines[1:]:
                 parts = line.strip().split()
                 existing_data.append({
                     'gcp_lon': parts[0],
@@ -302,6 +304,7 @@ def initialize_file():
     else:
         # Create the file if it doesn't exist
         with open(filename, 'w') as f:
+            f.write("EPSG:4326\n")
             pass
 
     return jsonify({"existing_data": existing_data,
@@ -328,6 +331,23 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+    
+@file_app.route('/save_csv', methods=['POST'])
+def save_csv():
+    data = request.json
+    selected_location_gcp = data.get('selectedLocationGcp')
+    selected_population_gcp = data.get('selectedPopulationGcp')
+    csv_data = data.get('csvData')
+    filename = data.get('filename')
+
+    # Construct file path based on GCP variables
+    prefix = data_root_dir+'/Processed'
+    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+
+    # Save CSV data to file
+    pd.DataFrame(csv_data).to_csv(file_path, index=False)
+
+    return jsonify({"status": "success", "message": "CSV data saved successfully"}), 200
     
 @file_app.route('/save_geojson', methods=['POST'])
 def save_geojson():
@@ -366,6 +386,40 @@ def load_geojson():
         return jsonify(geojson_data)
     else:
         return jsonify({"status": "error", "message": "File not found"})
+
+
+@file_app.route('/run_odm', methods=['POST'])
+def run_odm_endpoint():
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    sensor = data.get('sensor')
+    temp_dir = data.get('temp_dir')
+    reconstruction_quality = data.get('reconstruction_quality')
+    custom_options = data.get('custom_options')
+
+    if not temp_dir:
+        temp_dir = '/home/GEMINI/temp/project'
+    if not reconstruction_quality:
+        reconstruction_quality = 'Low'
+
+    # Run ODM
+    args = argparse.Namespace()
+    args.data_root_dir = data_root_dir
+    args.location = location
+    args.population = population
+    args.date = date
+    args.sensor = sensor
+    args.temp_dir = temp_dir
+    args.reconstruction_quality = reconstruction_quality
+    args.custom_options = custom_options
+    
+    # Run ODM in a separate thread
+    thread = threading.Thread(target=run_odm, args=(args,))
+    thread.start()
+
+    return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
 ### ROVER MODEL TRAINING ###
 def get_labels(labels_path):
@@ -477,7 +531,6 @@ def stop_training():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
-
 
 # FastAPI app
 app = FastAPI()

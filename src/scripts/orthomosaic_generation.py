@@ -1,4 +1,5 @@
 from glob import glob
+from math import log
 import os
 import shutil
 import subprocess
@@ -6,6 +7,8 @@ import sys
 import cv2
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+
+from numpy import std
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -86,17 +89,22 @@ def run_odm(args):
     if pth[-1] == '/':
         pth = pth[:-1]
     if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')   
+        pth = os.path.join(pth, 'project')
+    
+    log_file = os.path.join(pth, 'code', 'logs.txt')
 
-    if args.reconstruction_quality == 'custom':
-        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options])
-    elif args.reconstruction_quality == 'low':
-        # opendronemap --project-path project --feature-type sift --auto-boundary --gcp project/code/gcp_list.txt --skip-3dmodel --dsm --dtm --dem-resolution 0.2 --rerun-from odm_dem
-        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--resize-to', '1000', '--min-num-features', '8000'])
-    elif args.reconstruction_quality == 'high':
-        subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--resize-to', '2000', '--min-num-features', '16000'])
-    else:
-        raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+    with open(log_file, 'w') as f:
+        if args.reconstruction_quality == 'Custom':
+            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options], stdout=f, stderr=subprocess.STDOUT)
+        elif args.reconstruction_quality == 'Low':
+            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000'], stdout=f, stderr=subprocess.STDOUT)
+        elif args.reconstruction_quality == 'High':
+            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000'], stdout=f, stderr=subprocess.STDOUT)
+        else:
+            raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+        process.wait()
+    
+    _process_outputs(args)
     
     
 if __name__ == '__main__':
@@ -109,7 +117,7 @@ if __name__ == '__main__':
                         default='/home/GEMINI/temp/project')
     parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=['high', 'low', 'custom'], default='low')
+                        choices=['High', 'Low', 'Custom'], default='low')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
