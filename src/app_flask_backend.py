@@ -17,6 +17,9 @@ from pyproj import Geod
 import pandas as pd
 import geopandas as gpd
 
+from werkzeug.utils import secure_filename
+from pathlib import Path
+
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
 from scripts.orthomosaic_generation import run_odm
@@ -43,6 +46,21 @@ def list_dirs(dir_path):
         return jsonify(dirs), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+    
+@file_app.route('/list_dirs_nested', methods=['GET'])
+def list_dirs_nested():
+    global data_root_dir
+    base_dir = Path(data_root_dir) / 'Raw'
+
+    def build_nested_structure(path):
+        structure = {}
+        for child in path.iterdir():
+            if child.is_dir():
+                structure[child.name] = build_nested_structure(child)
+        return structure
+
+    nested_structure = build_nested_structure(base_dir)
+    return jsonify(nested_structure), 200
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
@@ -57,6 +75,18 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+    
+@file_app.route('/upload', methods=['POST'])
+def upload_files():
+    dir_path = request.form.get('dirPath')
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    os.makedirs(full_dir_path, exist_ok=True)
+
+    for file in request.files.getlist("files"):
+        filename = secure_filename(file.filename)
+        file.save(os.path.join(full_dir_path, filename))
+
+    return jsonify({'message': 'Files uploaded successfully'}), 200
 
 #### SCRIPT SERVING ENDPOINTS ####
 # endpoint to run script
@@ -554,7 +584,7 @@ if __name__ == "__main__":
 
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-Data',required=False)
+    parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-App-Data',required=False)
     parser.add_argument('--port', type=int, default=5000,required=False) # Default port is 5000
     args = parser.parse_args()
 
@@ -565,6 +595,8 @@ if __name__ == "__main__":
     # Update global data_root_dir from the argument
     global data_root_dir
     data_root_dir = args.data_root_dir
+
+    UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global now_drone_processing
     now_drone_processing = False
