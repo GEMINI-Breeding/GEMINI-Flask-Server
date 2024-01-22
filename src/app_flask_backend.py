@@ -19,6 +19,7 @@ from PIL import Image
 from pyproj import Geod
 import pandas as pd
 import geopandas as gpd
+from pathlib import Path
 
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
@@ -433,24 +434,26 @@ def train_model():
     population = request.json['population']
     date = request.json['date']
     trait = request.json['trait']
-    # sensor = request.json['sensor']
-    sensor = 'Rover' # testing
+    sensor = request.json['sensor']
+    # sensor = 'Rover' # testing
     
     # extract labels
-    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
+    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/annotations/labels/train'
     labels = get_labels(labels_path)
     labels_arg = " ".join(labels)
     
     # other training args
     container_dir = '/app/mnt'
     pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
-    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
+    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models'
+    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models'+f'/{trait}-det'
+    scan_save = Path(scan_save)
+    scan_save.mkdir(parents=True, exist_ok=True)
     latest_data['epoch'] = 0
     latest_data['map'] = 0
     training_stopped_event.clear()
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
+    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/annotations'
     
     # run training
     cmd = (f"docker exec train "
