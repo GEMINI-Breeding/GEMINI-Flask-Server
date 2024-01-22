@@ -79,14 +79,36 @@ def list_files(dir_path):
 @file_app.route('/upload', methods=['POST'])
 def upload_files():
     dir_path = request.form.get('dirPath')
+    upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
 
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
-        file.save(os.path.join(full_dir_path, filename))
+        file_path = os.path.join(full_dir_path, filename)
+
+        if upload_new_files_only and os.path.isfile(file_path):
+            print(f"Skipping {filename} because it already exists in {dir_path}")
+            continue  # Skip existing file
+
+        file.save(file_path)
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
+
+@file_app.route('/check_files', methods=['POST'])
+def check_files():
+    data = request.json
+    fileList = data['fileList']
+    dirPath = data['dirPath']
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dirPath)
+
+    existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
+    new_files = [file for file in fileList if file not in existing_files]
+
+    print(f"Uploading {str(len(new_files))} out of {str(len(fileList))} files to {dirPath}")
+
+    return jsonify(new_files), 200
+
 
 #### SCRIPT SERVING ENDPOINTS ####
 # endpoint to run script
