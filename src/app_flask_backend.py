@@ -485,6 +485,14 @@ def stop_training():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
+### ROVER LOCATE PLANTS ###
+@file_app.route('/locate_plants', methods=['POST'])
+def locate_plants():
+    global data_root_dir
+    
+    
+    
+    return
 
 # FastAPI app
 app = FastAPI()
