@@ -490,9 +490,37 @@ def stop_training():
 def locate_plants():
     global data_root_dir
     
+    # recieve parameters
+    batch_size = int(request.json['batchSize'])
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    sensor = request.json['sensor']
     
+    # other args
+    container_dir = '/root/app/mnt'
+    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/images'
+    # configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+sensor+'/configs'
+    configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+'Rover/T4' 
+    plotmap = container_dir+'/Processed/'+location+'/'+population+'/Plot-Attributes-WGS84.geojson' 
+    models = container_dir+'temp/default/plant-det_yolov8_mAP76_640_20230620.pt'
+    save = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Results'
     
-    return
+    # run locate
+    cmd = (
+        f"docker exec locate "
+        f"python -W ignore {container_dir}/locate.py "
+        f"-- images {images} --configs {configs} --plotmap {plotmap} "
+        f"--batch-size {batch_size} --models {models} --save {save} "
+    )
+    
+    try:
+        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = process.stdout.decode('utf-8')
+        return jsonify({"message": "Locate has started", "output": output}), 202
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr.decode('utf-8')
+        return jsonify({"error": error_output}), 500
 
 # FastAPI app
 app = FastAPI()
