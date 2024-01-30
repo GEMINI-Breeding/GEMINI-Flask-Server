@@ -49,7 +49,7 @@ def _create_directory_structure(args):
                                 images)
 
     # Copy the gcp_list.txt to the temporary directory
-    gcp_pth = os.path.join(args.data_root_dir, 'Processed', args.location, args.population, args.date, args.sensor, 'gcp_list.txt')
+    gcp_pth = os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.sensor, 'gcp_list.txt')
     shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
 
 def _process_outputs(args):
@@ -112,6 +112,8 @@ if __name__ == '__main__':
     parser.add_argument('--date', type=str, help='Date of the data collection')
     parser.add_argument('--location', type=str, help='Location of the data collection')
     parser.add_argument('--population', type=str, help='Population for the dataset')
+    parser.add_argument('--year', type=str, help='Year of the data collection')
+    parser.add_argument('--experiment', type=str, help='Experiment name')
     parser.add_argument('--sensor', type=str, help='Sensor used')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
                         default='/home/GEMINI/temp/project')

@@ -1,4 +1,5 @@
 from concurrent.futures import thread
+from math import e
 import os
 import subprocess
 import threading
@@ -140,9 +141,11 @@ def process_images():
     population = request.json['population']
     date = request.json['date']
     radius_meters = request.json['radius_meters']
+    year = request.json['year']
+    experimnent = request.json['experiment']
 
     prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, location, population, date, 'Drone', 'Images')
+    image_folder = os.path.join(prefix, year, experimnent, location, population, date, 'Drone', 'Images')
 
     print("Loading predefined locations from CSV file...")
 
@@ -225,24 +228,32 @@ def process_images():
                     'num_total': len(files)}), 200
 
 
-@file_app.route('/process_drone_tiff/<path:dir_path>')
+@file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff(dir_path):
+    # receive the parameters
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    year = request.json['year']
+    experimnent = request.json['experiment']
+
+    prefix = data_root_dir+'/Processed'
+    image_folder = os.path.join(prefix, year, experimnent, location, population, date, 'Drone')
+    dir_path = os.path.join(prefix, year, experimnent, location, population, date)
+
     # Check if already in processing
     global now_drone_processing
     if now_drone_processing:
         return jsonify({'message': 'Already in processing'}), 400
     
     now_drone_processing = True
-    print(f"Processing drone tiff...{dir_path}")
-    # Define the path to the image folder
-    image_folder = os.path.join(data_root_dir, "Processed", dir_path,"Drone")
     
     try: 
         rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
-        geojson_path = os.path.join(data_root_dir, "Processed", dir_path,"../Plot-Attributes-WGS84.geojson")
+        geojson_path = os.path.join(dir_path,'Plot-Attributes-WGS84.geojson')
         date = dir_path.split("/")[-1]
         sensor = "Drone"
-        output_geojson = os.path.join(data_root_dir, "Processed", dir_path,"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
+        output_geojson = os.path.join(os.path.dirname(image_folder),"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
         process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tif_file),
                      tiff_files_dem=os.path.join(image_folder,dem_tif_file),
                      tiff_files_thermal=os.path.join(image_folder,thermal_tif_file),
@@ -351,7 +362,7 @@ def initialize_file():
                     'gcp_lat': parts[1],
                     'pointX': parts[3],
                     'pointY': parts[4],
-                    'image_path': os.path.join(processed_path, parts[5])  # Assuming this path is correct, adjust if needed
+                    'image_path': os.path.join(processed_path, parts[5])
                 })
     else:
         # Create the file if it doesn't exist
@@ -369,9 +380,11 @@ def query_traits():
     population = request.json['population']
     date = request.json['date']
     sensor = request.json['sensor']
+    year = request.json['year']
+    experiment = request.json['experiment']
 
     prefix = data_root_dir+'/Processed'
-    traitpth = os.path.join(prefix, location, population, date, 'Results', 
+    traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
                           '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
     if not os.path.isfile(traitpth):
@@ -389,12 +402,15 @@ def save_csv():
     data = request.json
     selected_location_gcp = data.get('selectedLocationGcp')
     selected_population_gcp = data.get('selectedPopulationGcp')
+    selected_year_gcp = data.get('selectedYearGcp')
+    selected_experiment_gcp = data.get('selectedExperimentGcp')
     csv_data = data.get('csvData')
     filename = data.get('filename')
 
     # Construct file path based on GCP variables
     prefix = data_root_dir+'/Processed'
-    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+    file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
+                             selected_population_gcp, filename)
 
     # Save CSV data to file
     pd.DataFrame(csv_data).to_csv(file_path, index=False)
@@ -406,6 +422,8 @@ def save_geojson():
     data = request.json
     selected_location_gcp = data.get('selectedLocationGcp')
     selected_population_gcp = data.get('selectedPopulationGcp')
+    selected_year_gcp = data.get('selectedYearGcp')
+    selected_experiment_gcp = data.get('selectedExperimentGcp')
     geojson_data = data.get('geojsonData')
     filename = data.get('filename')
 
@@ -414,7 +432,8 @@ def save_geojson():
 
     # Construct file path based on GCP variables
     prefix = data_root_dir+'/Processed'
-    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+    file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
+                             selected_population_gcp, filename) 
 
     # Save GeoDataFrame to file
     gdf.to_file(file_path, driver='GeoJSON')
@@ -425,11 +444,14 @@ def save_geojson():
 def load_geojson():
     selected_location_gcp = request.args.get('selectedLocationGcp')
     selected_population_gcp = request.args.get('selectedPopulationGcp')
+    selected_year_gcp = request.args.get('selectedYearGcp')
+    selected_experiment_gcp = request.args.get('selectedExperimentGcp')
     filename = request.args.get('filename')
 
     # Construct file path
     prefix = data_root_dir+'/Processed'
-    file_path = os.path.join(prefix, selected_location_gcp, selected_population_gcp, filename)
+    file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
+                             selected_population_gcp, filename)
 
     # Load GeoJSON data from file
     if os.path.exists(file_path):
@@ -446,6 +468,8 @@ def run_odm_endpoint():
     location = data.get('location')
     population = data.get('population')
     date = data.get('date')
+    year = data.get('year')
+    experiment = data.get('experiment')
     sensor = data.get('sensor')
     temp_dir = data.get('temp_dir')
     reconstruction_quality = data.get('reconstruction_quality')
@@ -462,6 +486,8 @@ def run_odm_endpoint():
     args.location = location
     args.population = population
     args.date = date
+    args.year = year
+    args.experiment = experiment
     args.sensor = sensor
     args.temp_dir = temp_dir
     args.reconstruction_quality = reconstruction_quality
@@ -533,26 +559,28 @@ def train_model():
     image_size = int(request.json['imageSize'])
     location = request.json['location']
     population = request.json['population']
+    year = request.json['year']
+    experiment = request.json['experiment']
     date = request.json['date']
     trait = request.json['trait']
     # sensor = request.json['sensor']
     sensor = 'Rover' # testing
     
     # extract labels
-    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
+    labels_path = data_root_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
     labels = get_labels(labels_path)
     labels_arg = " ".join(labels)
     
     # other training args
     container_dir = '/app/mnt'
     pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models/custom'
-    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
+    save_train_model = container_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/models/custom'
+    scan_save = data_root_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
     latest_data['epoch'] = 0
     latest_data['map'] = 0
     training_stopped_event.clear()
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
+    images = container_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
     
     # run training
     cmd = (f"docker exec train "
