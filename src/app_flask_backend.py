@@ -142,15 +142,16 @@ def process_images():
     date = request.json['date']
     radius_meters = request.json['radius_meters']
     year = request.json['year']
-    experimnent = request.json['experiment']
+    experiment = request.json['experiment']
+    sensor = request.json['sensor']
 
     prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, year, experimnent, location, population, date, 'Drone', 'Images')
+    image_folder = os.path.join(prefix, year, experiment, location, population, date, 'Drone', sensor, 'Images')
 
     print("Loading predefined locations from CSV file...")
 
     # Define the path to the predefined locations CSV file
-    predefined_locations_csv = os.path.join(prefix, location, population, 'gcp_locations.csv')
+    predefined_locations_csv = os.path.join(prefix, year, experiment, location, population, 'gcp_locations.csv')
 
     # Load predefined locations from CSV
     if not os.path.isfile(predefined_locations_csv):
