@@ -427,7 +427,6 @@ def train_model():
     
     # receive the parameters
     epochs = int(request.json['epochs'])
-    # epochs = 1 # testing
     batch_size = int(request.json['batchSize'])
     image_size = int(request.json['imageSize'])
     location = request.json['location']
@@ -435,25 +434,27 @@ def train_model():
     date = request.json['date']
     trait = request.json['trait']
     sensor = request.json['sensor']
-    # sensor = 'Rover' # testing
+    platform = request.json['platform']
+    year = request.json['year']
+    experiment = request.json['experiment']
     
     # extract labels
-    labels_path = data_root_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/annotations/labels/train'
+    labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels/labels/train'
     labels = get_labels(labels_path)
     labels_arg = " ".join(labels)
     
     # other training args
-    container_dir = '/app/mnt'
+    container_dir = Path('/app/mnt')
     pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir+'/Processed/'+location+'/'+population+'/models'
-    scan_save = data_root_dir+'/Processed/'+location+'/'+population+'/models'+f'/{trait}-det'
+    save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
+    scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
     scan_save = Path(scan_save)
     scan_save.mkdir(parents=True, exist_ok=True)
     latest_data['epoch'] = 0
     latest_data['map'] = 0
     training_stopped_event.clear()
     threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/annotations'
+    images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels'
     
     # run training
     cmd = (f"docker exec train "
