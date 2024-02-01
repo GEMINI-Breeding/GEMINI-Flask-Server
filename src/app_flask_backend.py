@@ -1,6 +1,7 @@
 from concurrent.futures import thread
 from math import e
 import os
+import re
 import subprocess
 import threading
 import uvicorn
@@ -432,25 +433,31 @@ def save_geojson():
     gdf = gpd.GeoDataFrame.from_features(geojson_data)
 
     # Construct file path based on GCP variables
-    prefix = data_root_dir+'/Processed'
+    prefix = data_root_dir+'/Intermediate'
     file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
-                             selected_population_gcp, filename) 
+                             selected_population_gcp, filename)
+    
+    if not os.path.exists(os.path.dirname(file_path)):
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     # Save GeoDataFrame to file
     gdf.to_file(file_path, driver='GeoJSON')
 
     return jsonify({"status": "success", "message": "GeoJSON data saved successfully"})
 
-@file_app.route('/load_geojson', methods=['GET'])
+@file_app.route('/load_geojson', methods=['POST'])
 def load_geojson():
-    selected_location_gcp = request.args.get('selectedLocationGcp')
-    selected_population_gcp = request.args.get('selectedPopulationGcp')
-    selected_year_gcp = request.args.get('selectedYearGcp')
-    selected_experiment_gcp = request.args.get('selectedExperimentGcp')
-    filename = request.args.get('filename')
+    data = request.json
+    selected_location_gcp = data.get('selectedLocationGcp')
+    selected_population_gcp = data.get('selectedPopulationGcp')
+    selected_year_gcp = data.get('selectedYearGcp')
+    selected_experiment_gcp = data.get('selectedExperimentGcp')
+    filename = data.get('filename')
+
+    print(data, flush=True)
 
     # Construct file path
-    prefix = data_root_dir+'/Processed'
+    prefix = data_root_dir+'/Intermediate'
     file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
                              selected_population_gcp, filename)
 
