@@ -32,9 +32,7 @@ from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_data = {'epoch': 0, 'map': 0}
-training_stopped_event = threading.Event()
-latest_data = {'epoch': 0, 'map': 0}
+latest_data = {'epoch': 0, 'map': 0, 'locate': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -558,7 +556,7 @@ def scan_for_new_folders(save_path):
 
         time.sleep(5)  # Check for new folders every 10 seconds
         
-@file_app.route('/get_training_progress', methods=['GET'])
+@file_app.route('/get_progress', methods=['GET'])
 def get_training_progress():
     return jsonify(latest_data)
 
@@ -622,38 +620,63 @@ def stop_training():
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
-        subprocess.run(f"rm -rf {new_folder}", check=True, shell=True)
+        subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 ### ROVER LOCATE PLANTS ###
+@file_app.route('/get_locate_progress', methods=['GET'])
+def get_locate_progress():
+    global save_locate
+    txt_file = save_locate/'locate_progress.txt'
+    
+    # Check if the file exists
+    if os.path.exists(txt_file):
+        with open(txt_file, 'r') as file:
+            number = file.read().strip()
+            latest_data['locate'] = int(number)
+        return jsonify(latest_data)
+    else:
+        return jsonify({'error': 'Locate progress not found'}), 404
+
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
-    global data_root_dir
+    global data_root_dir, save_locate
     
     # recieve parameters
     batch_size = int(request.json['batchSize'])
     location = request.json['location']
     population = request.json['population']
     date = request.json['date']
+    platform = request.json['platform']
     sensor = request.json['sensor']
+    year = request.json['year']
+    experiment = request.json['experiment']
     
     # other args
-    container_dir = '/root/app/mnt'
-    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/images'
-    # configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+sensor+'/configs'
-    configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+'Rover/T4' 
-    plotmap = container_dir+'/Processed/'+location+'/'+population+'/Plot-Attributes-WGS84.geojson' 
-    models = container_dir+'/temp/default/plant-det_yolov8_mAP76_640_20230620.pt'
-    save = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Results'
+    container_dir = Path('/app/mnt')
+    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson' 
+    model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/'Run 1'/'weights'/'best.pt'
+    
+    # generate save folder
+    base_name = f'Run '
+    version = 1
+    save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'
+    while (save_base / f'{base_name}{version}').exists():
+        version += 1
+    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'/f'{base_name}{version}'
+    save_locate.mkdir(parents=True, exist_ok=True)
+    save = container_dir/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'/f'{base_name}{version}'
     
     # run locate
     cmd = (
         f"docker exec locate-extract "
-        f"python -W ignore {container_dir}/locate.py "
-        f"--images {images} --configs {configs} --plotmap {plotmap} "
-        f"--batch-size {batch_size} --models {models} --save {save} "
+        f"python -W ignore /app/locate.py "
+        f"--images '{images}' --configs '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model}' --save '{save}' "
     )
     
     try:
@@ -664,128 +687,16 @@ def locate_plants():
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
     
-@file_app.route('/stop_event', methods=['POST'])
-def stop_event():
+@file_app.route('/stop_locate', methods=['POST'])
+def stop_locate():
+    global save_locate
     container_name = 'locate-extract'
     try:
         print('Locate-Extract stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
-        training_stopped_event.set()
-        return jsonify({"message": "Python process in container successfully stopped"}), 200
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": e.stderr.decode("utf-8")}), 500
-
-### ROVER MODEL TRAINING ###
-def get_labels(labels_path):
-    unique_labels = set()
-
-    # Iterate over the files in the directory
-    for filename in os.listdir(labels_path):
-        if filename.endswith(".txt"):
-            file_path = os.path.join(labels_path, filename)
-            with open(file_path, 'r') as file:
-                for line in file:
-                    label = line.split()[0]  # Extracting the label
-                    unique_labels.add(label)
-
-    sorted_unique_labels = sorted(unique_labels, key=lambda x: int(x))
-    return list(sorted_unique_labels)
-
-def scan_for_new_folders(save_path):
-    global latest_data, training_stopped_event, new_folder
-    known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
-
-    while not training_stopped_event.is_set():  # Continue while training is ongoing
-        # Check for new folders
-        for folder_name in os.listdir(save_path):
-            folder_path = os.path.join(save_path, folder_name)
-            if os.path.isdir(folder_path) and folder_path not in known_folders:
-                known_folders.add(folder_path)  # Add new folder to the set
-                new_folder = folder_path  # Update global variable
-                results_file = os.path.join(folder_path, 'results.csv')
-
-                # Continuously check results.csv for updates
-                while not os.path.isfile(results_file):
-                    time.sleep(5)  # Check every 5 seconds
-
-                # Periodically read results.csv for updates
-                while os.path.isfile(results_file):
-                    try:
-                        df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-                        latest_data['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
-                        latest_data['map'] = df['metrics/mAP50(B)'].iloc[-1]  # Update latest mAP
-                    except Exception as e:
-                        print(f"Error reading {results_file}: {e}")
-                    time.sleep(5)  # Update every 30 seconds
-
-        time.sleep(5)  # Check for new folders every 10 seconds
-        
-@file_app.route('/get_training_progress', methods=['GET'])
-def get_training_progress():
-    return jsonify(latest_data)
-
-@file_app.route('/train_model', methods=['POST'])
-def train_model():
-    global data_root_dir, latest_data, training_stopped_event
-    
-    # receive the parameters
-    epochs = int(request.json['epochs'])
-    # epochs = 1 # testing
-    batch_size = int(request.json['batchSize'])
-    image_size = int(request.json['imageSize'])
-    location = request.json['location']
-    population = request.json['population']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    date = request.json['date']
-    trait = request.json['trait']
-    # sensor = request.json['sensor']
-    sensor = 'Rover' # testing
-    
-    # extract labels
-    labels_path = data_root_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations/labels/train'
-    labels = get_labels(labels_path)
-    labels_arg = " ".join(labels)
-    
-    # other training args
-    container_dir = '/app/mnt'
-    pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/models/custom'
-    scan_save = data_root_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/models/custom'+f'/{trait}-det'
-    latest_data['epoch'] = 0
-    latest_data['map'] = 0
-    training_stopped_event.clear()
-    threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir+'/Processed/'+year+'/'+experiment+'/'+location+'/'+population+'/'+date+'/'+sensor+'/Annotations'
-    
-    # run training
-    cmd = (f"docker exec train "
-           f"python /app/train/train.py "
-           f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
-           f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
-           f"--batch-size {batch_size} --labels {labels_arg}")
-    
-    try:
-        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = process.stdout.decode('utf-8')
-        return jsonify({"message": "Training started", "output": output}), 202
-    except subprocess.CalledProcessError as e:
-        error_output = e.stderr.decode('utf-8')
-        return jsonify({"error": error_output}), 500
-    
-@file_app.route('/stop_training', methods=['POST'])
-def stop_training():
-    global training_stopped_event, new_folder
-    container_name = 'train'
-    try:
-        print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
-        training_stopped_event.set()
-        subprocess.run(f"rm -rf {new_folder}", check=True, shell=True)
+        subprocess.run(f"rm -rf '{save_locate}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
