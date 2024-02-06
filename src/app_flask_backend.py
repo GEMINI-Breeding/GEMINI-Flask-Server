@@ -8,6 +8,8 @@ import uvicorn
 import signal
 import flask
 import time
+import glob
+import yaml
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
@@ -81,6 +83,40 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+    
+@file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
+def check_runs(dir_path):
+    global data_root_dir
+    dir_path = os.path.join(data_root_dir, dir_path)
+    response_data = {}  # Initialize an empty dictionary for the response
+    
+    # For the Model task
+    if os.path.exists(dir_path) and 'Plant Detection' in dir_path:
+        check = f'{dir_path}/Run */weights/best.pt'
+        matched_paths = glob.glob(check)
+        
+        for path in matched_paths:
+            # Construct the path to the logs.yaml file in the same directory as best.pt
+            logs_yaml_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'logs.yaml')
+            
+            # Initialize an empty list for dates; it will remain empty if logs.yaml is not found or cannot be parsed
+            dates = []
+            
+            # Check if logs.yaml exists
+            if os.path.exists(logs_yaml_path):
+                try:
+                    # Open and parse the logs.yaml file
+                    with open(logs_yaml_path, 'r') as file:
+                        logs_data = yaml.safe_load(file)
+                        # Extract dates if available
+                        dates = logs_data.get('dates', [])
+                except yaml.YAMLError as exc:
+                    print(f"Error parsing YAML file {logs_yaml_path}: {exc}")
+            
+            # Update the response_data dictionary with the path and its corresponding dates
+            response_data[path] = dates
+    
+    return jsonify(response_data), 200
     
 @file_app.route('/upload', methods=['POST'])
 def upload_files():
