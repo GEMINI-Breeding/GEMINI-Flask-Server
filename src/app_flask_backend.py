@@ -90,7 +90,7 @@ def check_runs(dir_path):
     dir_path = os.path.join(data_root_dir, dir_path)
     response_data = {}  # Initialize an empty dictionary for the response
     
-    # For the Model task
+    # For the Model column of Locate Plants
     if os.path.exists(dir_path) and 'Plant Detection' in dir_path:
         check = f'{dir_path}/Run */weights/best.pt'
         matched_paths = glob.glob(check)
@@ -116,6 +116,11 @@ def check_runs(dir_path):
             # Update the response_data dictionary with the path and its corresponding dates
             response_data[path] = dates
     
+    # For the Locate column of Locate Plants
+    elif os.path.exists(dir_path) and 'Locate' in dir_path:
+        check = f'{dir_path}/Run */locate.csv'
+        response_data = glob.glob(check)
+        
     return jsonify(response_data), 200
     
 @file_app.route('/upload', methods=['POST'])
@@ -700,12 +705,12 @@ def locate_plants():
     # generate save folder
     base_name = f'Run '
     version = 1
-    save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'
+    save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'
     while (save_base / f'{base_name}{version}').exists():
         version += 1
-    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'/f'{base_name}{version}'
+    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
-    save = container_dir/'Intermediate'/year/experiment/location/population/f'{platform} {sensor} Locate'/f'{base_name}{version}'
+    save = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}'
     
     # run locate
     cmd = (
