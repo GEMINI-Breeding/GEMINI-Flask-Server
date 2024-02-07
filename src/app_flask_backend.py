@@ -42,7 +42,7 @@ training_stopped_event = threading.Event()
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
     global data_root_dir
-    return send_from_directory(os.path.join(data_root_dir, filename))
+    return send_from_directory(data_root_dir, filename)
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
