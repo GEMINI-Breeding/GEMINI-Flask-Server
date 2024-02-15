@@ -404,7 +404,46 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+
+@file_app.route('/query_images', methods=['POST'])
+def query_images():
+    data = request.get_json()
+    geojson_features = data['geoJSON']
+    year = data['selectedYearGCP']
+    experiment = data['selectedExperimentGCP']
+    location = data['selectedLocationGCP']
+    population = data['selectedPopulationGCP']
+    date = data['selectedDateQuery']
+    sensor = data['selectedSensorQuery']
+
+    global data_root_dir
+
+    # print(geojson, flush=True)
+
+    # Construct the CSV path from the state variables
+    csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
+                            population, date, 'msgs_synced.csv')
     
+    # Load the CSV with pandas
+    df = pd.read_csv(csv_path)
+
+    # Convert DataFrame to GeoDataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon_interp_adj, df.lat_interp_adj))
+
+    # Correctly format the geojson as a FeatureCollection
+    geojson = {'type': 'FeatureCollection', 'features': geojson_features}
+
+    # Load the GeoJSON as a GeoDataFrame
+    geojson_gdf = gpd.GeoDataFrame.from_features(geojson['features'])
+
+    # Perform spatial join to filter images within the GeoJSON polygons
+    filtered_gdf = gpd.sjoin(gdf, geojson_gdf, op='within')
+
+    # Extract the image names from the filtered GeoDataFrame
+    filtered_images = filtered_gdf[sensor+"_file"].tolist()
+
+    return jsonify(filtered_images)
+
 @file_app.route('/save_csv', methods=['POST'])
 def save_csv():
     data = request.json
