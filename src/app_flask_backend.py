@@ -572,24 +572,29 @@ def check_model_details(key):
     
     # get mAP of model
     df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = df['metrics/mAP50(B)'].max()
+    mAP = round(df['metrics/mAP50(B)'].max(), 2)
     values.extend([mAP])
     
     # get run name
     run = base_path.name
-
-    return run, values
+    match = re.search(r'\d+', run)
+    id = int(match.group())
+    
+    # collate details
+    details = {'id': id, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
+    
+    return details
 
 @file_app.route('/get_model_info', methods=['POST'])
 def get_model_info():
     data = request.json
-    details_data = {}
+    details_data = []
     
     # iterate through each existing model
     for key in data:
-        run, values = check_model_details(Path(key))
-        details_data[run] = values
-    print(details_data)
+        details = check_model_details(Path(key))
+        details_data.append(details)
+
     return jsonify(details_data)
 
 def get_labels(labels_path):
