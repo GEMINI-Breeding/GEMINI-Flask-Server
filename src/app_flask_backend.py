@@ -553,6 +553,45 @@ def run_odm_endpoint():
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
 ### ROVER MODEL TRAINING ###
+def check_model_details(key):
+    
+    # get base folder, args file and results file
+    base_path = key.parent.parent
+    args_file = base_path / 'args.yaml'
+    results_file = base_path / 'results.csv'
+    
+    # get epochs, batch size and image size
+    values = []
+    with open(args_file, 'r') as file:
+        args = yaml.safe_load(file)
+        epochs = args.get('epochs')
+        batch = args.get('batch')
+        imgsz = args.get('imgsz')
+        
+        values.extend([epochs, batch, imgsz])
+    
+    # get mAP of model
+    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+    mAP = df['metrics/mAP50(B)'].max()
+    values.extend([mAP])
+    
+    # get run name
+    run = base_path.name
+
+    return run, values
+
+@file_app.route('/get_model_info', methods=['POST'])
+def get_model_info():
+    data = request.json
+    details_data = {}
+    
+    # iterate through each existing model
+    for key in data:
+        run, values = check_model_details(Path(key))
+        details_data[run] = values
+    print(details_data)
+    return jsonify(details_data)
+
 def get_labels(labels_path):
     unique_labels = set()
 
@@ -698,6 +737,7 @@ def locate_plants():
     # other args
     container_dir = Path('/app/mnt')
     images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images')
     configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
     plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson' 
     model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/'Run 1'/'weights'/'best.pt'
@@ -719,7 +759,13 @@ def locate_plants():
         f"--images '{images}' --configs '{configs}' --plotmap '{plotmap}' "
         f"--batch-size '{batch_size}' --model '{model}' --save '{save}' "
     )
-    
+    if disparity.exists():
+        cmd = (
+        f"docker exec locate-extract "
+        f"python -W ignore /app/locate.py "
+        f"--images '{images}' --configs '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model}' --save '{save}' --skip-stereo"
+        )
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
