@@ -814,7 +814,7 @@ def locate_plants():
     
     # save logs file
     data = {"model": [id]}
-    with open(save/"logs.yaml", "w") as file:
+    with open(save_locate/"logs.yaml", "w") as file:
         yaml.dump(data, file, default_flow_style=False)
     
     # run locate
