@@ -613,7 +613,7 @@ def get_labels(labels_path):
     return list(sorted_unique_labels)
 
 def scan_for_new_folders(save_path):
-    global latest_data, training_stopped_event, new_folder
+    global latest_data, training_stopped_event, new_folder, results_file
     known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
 
     while not training_stopped_event.is_set():  # Continue while training is ongoing
@@ -643,11 +643,12 @@ def scan_for_new_folders(save_path):
         
 @file_app.route('/get_progress', methods=['GET'])
 def get_training_progress():
+    print(latest_data)
     return jsonify(latest_data)
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event
+    global data_root_dir, latest_data, training_stopped_event, new_folder
     
     # receive the parameters
     epochs = int(request.json['epochs'])
@@ -686,7 +687,7 @@ def train_model():
            f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
            f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
            f"--batch-size {batch_size} --labels {labels_arg}")
-    
+
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
@@ -706,6 +707,21 @@ def stop_training():
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
         subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+@file_app.route('/done_training', methods=['POST'])
+def done_training():
+    global training_stopped_event, new_folder, results_file
+    container_name = 'train'
+    try:
+        print('Training stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        training_stopped_event.set()
+        results_file = None
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
