@@ -727,6 +727,43 @@ def done_training():
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 ### ROVER LOCATE PLANTS ###
+def check_locate_details(key):
+    
+    # get base folder, args file and results file
+    base_path = key.parent
+    results_file = base_path / 'locate.csv'
+    
+    # get run name
+    run = base_path.name
+    match = re.search(r'\d+', run)
+    id = int(match.group())
+    
+    # get model id
+    with open(base_path/'logs.yaml', 'r') as file:
+        data = yaml.safe_load(file)
+    model_id = data['model']
+    
+    # get stand count
+    df = pd.read_csv(results_file)
+    stand_count = len(df)
+    
+    # collate details
+    details = {'id': id, 'model': model_id, 'count': stand_count}
+    
+    return details
+
+@file_app.route('/get_locate_info', methods=['POST'])
+def get_locate_info():
+    data = request.json
+    details_data = []
+    
+    # iterate through each existing model
+    for key in data:
+        details = check_locate_details(Path(key))
+        details_data.append(details)
+
+    return jsonify(details_data)
+
 @file_app.route('/get_locate_progress', methods=['GET'])
 def get_locate_progress():
     global save_locate
@@ -754,6 +791,8 @@ def locate_plants():
     sensor = request.json['sensor']
     year = request.json['year']
     experiment = request.json['experiment']
+    model = request.json['model']
+    id = request.json['id']
     
     # other args
     container_dir = Path('/app/mnt')
@@ -761,7 +800,6 @@ def locate_plants():
     disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images')
     configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
     plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson' 
-    model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/'Run 1'/'weights'/'best.pt'
     
     # generate save folder
     base_name = f'Run '
@@ -771,22 +809,29 @@ def locate_plants():
         version += 1
     save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
-    save = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}'
+    save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}')
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Run {id}'/'weights'/'best.pt'
+    
+    # save logs file
+    data = {"model": [id]}
+    with open(save/"logs.yaml", "w") as file:
+        yaml.dump(data, file, default_flow_style=False)
     
     # run locate
     cmd = (
         f"docker exec locate-extract "
         f"python -W ignore /app/locate.py "
-        f"--images '{images}' --configs '{configs}' --plotmap '{plotmap}' "
-        f"--batch-size '{batch_size}' --model '{model}' --save '{save}' "
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
     )
     if disparity.exists():
         cmd = (
         f"docker exec locate-extract "
         f"python -W ignore /app/locate.py "
-        f"--images '{images}' --configs '{configs}' --plotmap '{plotmap}' "
-        f"--batch-size '{batch_size}' --model '{model}' --save '{save}' --skip-stereo"
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
         )
+    print(cmd)
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
