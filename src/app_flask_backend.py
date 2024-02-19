@@ -10,6 +10,8 @@ import flask
 import time
 import glob
 import yaml
+import random
+import string
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
@@ -92,7 +94,7 @@ def check_runs(dir_path):
     
     # For the Model column of Locate Plants
     if os.path.exists(dir_path) and 'Plant Detection' in dir_path:
-        check = f'{dir_path}/Run */weights/best.pt'
+        check = f'{dir_path}/Plant-*/weights/best.pt'
         matched_paths = glob.glob(check)
         
         for path in matched_paths:
@@ -118,7 +120,7 @@ def check_runs(dir_path):
     
     # For the Locate column of Locate Plants
     elif os.path.exists(dir_path) and 'Locate' in dir_path:
-        check = f'{dir_path}/Run */locate.csv'
+        check = f'{dir_path}/Locate-*/locate.csv'
         response_data = glob.glob(check)
         
     return jsonify(response_data), 200
@@ -577,8 +579,8 @@ def check_model_details(key):
     
     # get run name
     run = base_path.name
-    match = re.search(r'\d+', run)
-    id = int(match.group())
+    match = re.search(r'-([A-Za-z0-9]+)$', run)
+    id = match.group(1)
     
     # collate details
     details = {'id': id, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
@@ -630,7 +632,7 @@ def scan_for_new_folders(save_path):
                     time.sleep(5)  # Check every 5 seconds
 
                 # Periodically read results.csv for updates
-                while os.path.isfile(results_file):
+                while os.path.exists(results_file) and os.path.isfile(results_file):
                     try:
                         df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
                         latest_data['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
@@ -650,45 +652,45 @@ def get_training_progress():
 def train_model():
     global data_root_dir, latest_data, training_stopped_event, new_folder
     
-    # receive the parameters
-    epochs = int(request.json['epochs'])
-    batch_size = int(request.json['batchSize'])
-    image_size = int(request.json['imageSize'])
-    location = request.json['location']
-    population = request.json['population']
-    date = request.json['date']
-    trait = request.json['trait']
-    sensor = request.json['sensor']
-    platform = request.json['platform']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    
-    # extract labels
-    labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels/labels/train'
-    labels = get_labels(labels_path)
-    labels_arg = " ".join(labels)
-    
-    # other training args
-    container_dir = Path('/app/mnt')
-    pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
-    scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
-    scan_save = Path(scan_save)
-    scan_save.mkdir(parents=True, exist_ok=True)
-    latest_data['epoch'] = 0
-    latest_data['map'] = 0
-    training_stopped_event.clear()
-    threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels'
-    
-    # run training
-    cmd = (f"docker exec train "
-           f"python /app/train/train.py "
-           f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
-           f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
-           f"--batch-size {batch_size} --labels {labels_arg}")
-
     try:
+        # receive the parameters
+        epochs = int(request.json['epochs'])
+        batch_size = int(request.json['batchSize'])
+        image_size = int(request.json['imageSize'])
+        location = request.json['location']
+        population = request.json['population']
+        date = request.json['date']
+        trait = request.json['trait']
+        sensor = request.json['sensor']
+        platform = request.json['platform']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        
+        # extract labels
+        labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
+        labels = get_labels(labels_path)
+        labels_arg = " ".join(labels)
+        
+        # other training args
+        container_dir = Path('/app/mnt')
+        pretrained = "/app/train/yolov8n.pt"
+        save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
+        scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
+        scan_save = Path(scan_save)
+        scan_save.mkdir(parents=True, exist_ok=True)
+        latest_data['epoch'] = 0
+        latest_data['map'] = 0
+        training_stopped_event.clear()
+        threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
+        images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
+        
+        # run training
+        cmd = (f"docker exec train "
+            f"python /app/train/train.py "
+            f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
+            f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
+            f"--batch-size '{batch_size}' --labels {labels_arg} ")
+
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
         return jsonify({"message": "Training started", "output": output}), 202
@@ -721,7 +723,7 @@ def done_training():
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
-        results_file = None
+        results_file = ''
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -735,8 +737,8 @@ def check_locate_details(key):
     
     # get run name
     run = base_path.name
-    match = re.search(r'\d+', run)
-    id = int(match.group())
+    match = re.search(r'-([A-Za-z0-9]+)$', run)
+    id = match.group(1)
     
     # get model id
     with open(base_path/'logs.yaml', 'r') as file:
@@ -761,7 +763,7 @@ def get_locate_info():
     for key in data:
         details = check_locate_details(Path(key))
         details_data.append(details)
-
+        
     return jsonify(details_data)
 
 @file_app.route('/get_locate_progress', methods=['GET'])
@@ -777,6 +779,17 @@ def get_locate_progress():
         return jsonify(latest_data)
     else:
         return jsonify({'error': 'Locate progress not found'}), 404
+
+def generate_hash(trait, length=6):
+    """Generate a hash for model where it starts with the trait followed by a random string of characters.
+
+    Args:
+        trait (str): trait to be analyzed (plant, flower, pod, etc.)
+        length (int, optional): Length for random sequence. Defaults to 5.
+    """
+    random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    hash_id = f"{trait}-{random_sequence}"
+    return hash_id
 
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
@@ -802,18 +815,17 @@ def locate_plants():
     plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson' 
     
     # generate save folder
-    base_name = f'Run '
-    version = 1
+    version = generate_hash(trait='Locate')
     save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'
-    while (save_base / f'{base_name}{version}').exists():
-        version += 1
-    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}'
+    while (save_base / f'{version}').exists():
+        version = generate_hash(trait='Locate')
+    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
-    save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{base_name}{version}')
-    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Run {id}'/'weights'/'best.pt'
+    save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}')
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'best.pt'
     
     # save logs file
-    data = {"model": [id]}
+    data = {"model": [id], "date": [date]}
     with open(save_locate/"logs.yaml", "w") as file:
         yaml.dump(data, file, default_flow_style=False)
     
@@ -831,7 +843,7 @@ def locate_plants():
         f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
         f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
         )
-    print(cmd)
+
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
