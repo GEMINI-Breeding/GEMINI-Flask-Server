@@ -123,6 +123,39 @@ def check_runs(dir_path):
         check = f'{dir_path}/Locate-*/locate.csv'
         response_data = glob.glob(check)
         
+    # For Labels Sets column of Teach Traits
+    elif os.path.exists(dir_path) and 'Labels' in dir_path:
+        date_pattern = r"\d{4}-\d{2}-\d{2}"
+        match = re.search(date_pattern, dir_path)
+        extracted_date = match.group(0) if match else None
+        response_data = {extracted_date: dir_path}
+        
+    # For Models column of Teach Traits
+    elif os.path.exists(dir_path) and any(x in dir_path for x in ['Pod', 'Flower', 'Leaf']):
+        check = f'{dir_path}/**/weights/best.pt'
+        matched_paths = glob.glob(check, recursive=True)
+        
+        for path in matched_paths:
+            # Construct the path to the logs.yaml file in the same directory as best.pt
+            logs_yaml_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'logs.yaml')
+            
+            # Initialize an empty list for dates; it will remain empty if logs.yaml is not found or cannot be parsed
+            dates = []
+            
+            # Check if logs.yaml exists
+            if os.path.exists(logs_yaml_path):
+                try:
+                    # Open and parse the logs.yaml file
+                    with open(logs_yaml_path, 'r') as file:
+                        logs_data = yaml.safe_load(file)
+                        # Extract dates if available
+                        dates = logs_data.get('dates', [])
+                except yaml.YAMLError as exc:
+                    print(f"Error parsing YAML file {logs_yaml_path}: {exc}")
+            
+            # Update the response_data dictionary with the path and its corresponding dates
+            response_data[path] = dates
+        
     return jsonify(response_data), 200
     
 @file_app.route('/upload', methods=['POST'])
