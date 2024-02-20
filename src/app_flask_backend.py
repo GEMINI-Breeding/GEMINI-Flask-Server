@@ -25,6 +25,7 @@ import geopandas as gpd
 
 from werkzeug.utils import secure_filename
 from pathlib import Path
+import concurrent.futures
 
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
@@ -55,16 +56,17 @@ def list_dirs(dir_path):
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
-@file_app.route('/list_dirs_nested', methods=['GET'])
-def list_dirs_nested():
+@file_app.route('/list_dirs_nested/<path:dir_path>', methods=['GET'])
+def list_dirs_nested(dir_path):
     global data_root_dir
-    base_dir = Path(data_root_dir) / 'Raw'
+    base_dir = Path(data_root_dir) / dir_path
 
     def build_nested_structure(path):
         structure = {}
-        for child in path.iterdir():
-            if child.is_dir():
-                structure[child.name] = build_nested_structure(child)
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    structure[entry.name] = build_nested_structure(entry.path)
         return structure
 
     nested_structure = build_nested_structure(base_dir)
