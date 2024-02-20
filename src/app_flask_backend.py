@@ -153,8 +153,11 @@ def check_runs(dir_path):
                 except yaml.YAMLError as exc:
                     print(f"Error parsing YAML file {logs_yaml_path}: {exc}")
             
+            details = check_model_details(Path(path))
+            details['dates'] = dates
+            
             # Update the response_data dictionary with the path and its corresponding dates
-            response_data[path] = dates
+            response_data[path] = details
         
     return jsonify(response_data), 200
     
