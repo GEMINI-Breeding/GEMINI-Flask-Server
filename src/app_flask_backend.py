@@ -846,9 +846,9 @@ def locate_plants():
     # other args
     container_dir = Path('/app/mnt')
     images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images')
+    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
     configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson' 
+    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
     
     # generate save folder
     version = generate_hash(trait='Locate')
@@ -866,18 +866,19 @@ def locate_plants():
         yaml.dump(data, file, default_flow_style=False)
     
     # run locate
-    cmd = (
-        f"docker exec locate-extract "
-        f"python -W ignore /app/locate.py "
-        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
-        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
-    )
     if disparity.exists():
         cmd = (
         f"docker exec locate-extract "
         f"python -W ignore /app/locate.py "
         f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
         f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
+        )
+    else:
+        cmd = (
+        f"docker exec locate-extract "
+        f"python -W ignore /app/locate.py "
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
         )
 
     try:
@@ -901,6 +902,65 @@ def stop_locate():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+### ROVER EXTRACT PLANTS ###
+@file_app.route('/extract_traits', methods=['POST'])
+def extract_traits():
+    global data_root_dir
+    
+    # recieve parameters
+    summary = request.json['summary']
+    batch_size = int(request.json['batchSize'])
+    model_path = request.json['model']
+    trait = request.json['trait']
+    date = request.json['date']
+    year = request.json['year']
+    experiment = request.json['experiment']
+    location = request.json['location']
+    population = request.json['population']
+    platform = request.json['platform']
+    sensor = request.json['sensor']
+    
+    # other args
+    container_dir = Path('/app/mnt')
+    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
+    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
+    metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
+    temp = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+    temp.mkdir(parents=True, exist_ok=True) #if it doesnt exists
+    
+    # check if date is emerging
+    emerging = date in location
+    
+    # run extract
+    if disparity.exists():
+        cmd = (
+        f"docker exec extract "
+        f"python -W ignore /app/extract.py "
+        f"--emerging '{emerging}' --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+        f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+        f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
+        )
+    else:
+        cmd = (
+        f"docker exec extract "
+        f"python -W ignore /app/extract.py "
+        f"--emerging '{emerging}' --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+        f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+        f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
+        )
+        
+    try:
+        # process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # output = process.stdout.decode('utf-8')
+        print(cmd)
+        output = 'test'
+        return jsonify({"message": "Extract has started", "output": output}), 202
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr.decode('utf-8')
+        return jsonify({"error": error_output}), 500
 
 # FastAPI app
 app = FastAPI()
