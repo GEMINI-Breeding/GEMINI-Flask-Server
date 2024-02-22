@@ -36,7 +36,7 @@ from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_data = {'epoch': 0, 'map': 0, 'locate': 0}
+latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -158,6 +158,12 @@ def check_runs(dir_path):
             
             # Update the response_data dictionary with the path and its corresponding dates
             response_data[path] = details
+            
+    elif os.path.exists(dir_path) and 'Processed' in dir_path:
+        logs = f'{dir_path}/logs.yaml'
+        with open(logs, 'r') as file:
+            data = yaml.safe_load(file)
+            response_data = {k: {'model': v['model'], 'locate': v['locate'], 'id': v['id']} for k, v in data.items()}
         
     return jsonify(response_data), 200
     
@@ -904,15 +910,39 @@ def stop_locate():
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 ### ROVER EXTRACT PLANTS ###
+def update_or_add_entry(data, key, new_values):
+    if key in data:
+        # Update existing entry
+        data[key].update(new_values)
+    else:
+        # Add new entry
+        data[key] = new_values
+        
+@file_app.route('/get_extract_progress', methods=['GET'])
+def get_extract_progress():
+    global save_extract
+    txt_file = save_locate/'extract_progress.txt'
+    
+    # Check if the file exists
+    if os.path.exists(txt_file):
+        with open(txt_file, 'r') as file:
+            number = file.read().strip()
+            latest_data['extract'] = int(number)
+        return jsonify(latest_data)
+    else:
+        return jsonify({'error': 'Locate progress not found'}), 404
+    
 @file_app.route('/extract_traits', methods=['POST'])
 def extract_traits():
-    global data_root_dir
+    global data_root_dir, save_extract, temp_extract, model_path_extract, trait_extract, summary
     
     # recieve parameters
     summary = request.json['summary']
     batch_size = int(request.json['batchSize'])
     model_path = request.json['model']
+    model_path_extract = request.json['model']
     trait = request.json['trait']
+    trait_extract = request.json['trait']
     date = request.json['date']
     year = request.json['year']
     experiment = request.json['experiment']
@@ -928,29 +958,50 @@ def extract_traits():
     plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
     metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
     save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
-    temp = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
-    temp.mkdir(parents=True, exist_ok=True) #if it doesnt exists
+    save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
+    temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+    temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+    temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
+    save_extract.mkdir(parents=True, exist_ok=True)
     
     # check if date is emerging
-    emerging = date in location
+    emerging = date in summary
     
     # run extract
-    if disparity.exists():
-        cmd = (
-        f"docker exec extract "
-        f"python -W ignore /app/extract.py "
-        f"--emerging '{emerging}' --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-        f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-        f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
-        )
+    if emerging:
+        if disparity.exists():
+            cmd = (
+            f"docker exec extract "
+            f"python -W ignore /app/extract.py "
+            f"--emerging --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
+            )
+        else:
+            cmd = (
+            f"docker exec extract "
+            f"python -W ignore /app/extract.py "
+            f"--emerging --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
+            )
     else:
-        cmd = (
-        f"docker exec extract "
-        f"python -W ignore /app/extract.py "
-        f"--emerging '{emerging}' --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-        f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-        f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
-        )
+        if disparity.exists():
+            cmd = (
+            f"docker exec extract "
+            f"python -W ignore /app/extract.py "
+            f"--summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
+            )
+        else:
+            cmd = (
+            f"docker exec extract "
+            f"python -W ignore /app/extract.py "
+            f"--summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
+            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
+            )
         
     try:
         # process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -961,6 +1012,60 @@ def extract_traits():
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
+    
+@file_app.route('/stop_extract', methods=['POST'])
+def stop_extract():
+    global save_extract, temp_extract
+    container_name = 'locate-extract'
+    try:
+        print('Locate-Extract stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        subprocess.run(f"rm -rf '{save_extract}/logs.yaml'", check=True, shell=True)
+        subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+@file_app.route('/done_extract', methods=['POST'])
+def done_extract():
+    global temp_extract, summary, save_extract, trait_extract, model_path_extract
+    container_name = 'locate-extract'
+    try:
+        # update logs file
+        logs_file = Path(save_extract)/'logs.yaml'
+        if logs_file.exists():
+            with open(logs_file, 'r') as file:
+                data = yaml.safe_load(file) or {} # use an empty dict if the file is empty
+        else:
+            data = {}
+        pattern = r"/[^/]+-([\w]+?)/weights"
+        date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
+        locate_pattern = r"Locate-(\w+)/"
+        match = re.search(pattern, str(model_path_extract))
+        id = match.group(1)
+        match_date = re.search(date_pattern, str(summary))
+        match_locate_id = re.search(locate_pattern, str(summary))
+        summary_date = match_date.group()
+        locate_id = match_locate_id.group(1)
+        new_values = {
+            "model": id,
+            "locate": summary_date,
+            "id": locate_id
+        }
+        update_or_add_entry(data, trait_extract, new_values)
+        with open(logs_file, 'w') as file:
+            yaml.dump(data, file, default_flow_style=False, sort_keys=False)
+        
+        print('Training stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 # FastAPI app
 app = FastAPI()
