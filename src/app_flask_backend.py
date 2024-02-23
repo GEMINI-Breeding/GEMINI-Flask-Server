@@ -921,7 +921,7 @@ def update_or_add_entry(data, key, new_values):
 @file_app.route('/get_extract_progress', methods=['GET'])
 def get_extract_progress():
     global save_extract
-    txt_file = save_locate/'extract_progress.txt'
+    txt_file = save_extract/'extract_progress.txt'
     
     # Check if the file exists
     if os.path.exists(txt_file):
@@ -934,13 +934,12 @@ def get_extract_progress():
     
 @file_app.route('/extract_traits', methods=['POST'])
 def extract_traits():
-    global data_root_dir, save_extract, temp_extract, model_path_extract, trait_extract, summary
+    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract
     
     # recieve parameters
     summary = request.json['summary']
     batch_size = int(request.json['batchSize'])
-    model_path = request.json['model']
-    model_path_extract = request.json['model']
+    model = request.json['model']
     trait = request.json['trait']
     trait_extract = request.json['trait']
     date = request.json['date']
@@ -951,8 +950,21 @@ def extract_traits():
     platform = request.json['platform']
     sensor = request.json['sensor']
     
+    # extract model and summary information
+    pattern = r"/[^/]+-([\w]+?)/weights"
+    date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
+    locate_pattern = r"Locate-(\w+)/"
+    match = re.search(pattern, str(model))
+    match_date = re.search(date_pattern, str(summary))
+    match_locate_id = re.search(locate_pattern, str(summary))
+    model_id = match.group(1)
+    summary_date = match_date.group()
+    locate_id = match_locate_id.group(1)
+    
     # other args
     container_dir = Path('/app/mnt')
+    summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'best.pt'
     images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
     disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
     plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
@@ -971,43 +983,51 @@ def extract_traits():
     if emerging:
         if disparity.exists():
             cmd = (
-            f"docker exec extract "
-            f"python -W ignore /app/extract.py "
-            f"--emerging --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
             )
         else:
             cmd = (
-            f"docker exec extract "
-            f"python -W ignore /app/extract.py "
-            f"--emerging --summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
             )
     else:
         if disparity.exists():
             cmd = (
-            f"docker exec extract "
-            f"python -W ignore /app/extract.py "
-            f"--summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo"
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
             )
         else:
             cmd = (
-            f"docker exec extract "
-            f"python -W ignore /app/extract.py "
-            f"--summary '{summary}' --images '{images}' --plotmap '{plotmap}' "
-            f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-            f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' "
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
             )
         
     try:
-        # process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # output = process.stdout.decode('utf-8')
-        print(cmd)
-        output = 'test'
+        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = process.stdout.decode('utf-8')
+        # print(cmd)
+        # output = 'test'
         return jsonify({"message": "Extract has started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
@@ -1030,7 +1050,7 @@ def stop_extract():
     
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
-    global temp_extract, summary, save_extract, trait_extract, model_path_extract
+    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract
     container_name = 'locate-extract'
     try:
         # update logs file
@@ -1040,17 +1060,8 @@ def done_extract():
                 data = yaml.safe_load(file) or {} # use an empty dict if the file is empty
         else:
             data = {}
-        pattern = r"/[^/]+-([\w]+?)/weights"
-        date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
-        locate_pattern = r"Locate-(\w+)/"
-        match = re.search(pattern, str(model_path_extract))
-        id = match.group(1)
-        match_date = re.search(date_pattern, str(summary))
-        match_locate_id = re.search(locate_pattern, str(summary))
-        summary_date = match_date.group()
-        locate_id = match_locate_id.group(1)
         new_values = {
-            "model": id,
+            "model": model_id,
             "locate": summary_date,
             "id": locate_id
         }
