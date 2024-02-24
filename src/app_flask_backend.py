@@ -1,4 +1,5 @@
 from concurrent.futures import thread
+from enum import unique
 from math import e
 import os
 import re
@@ -9,11 +10,12 @@ import signal
 import flask
 import time
 
-from flask import Flask, send_from_directory, jsonify, request
+from flask import Flask, send_from_directory, jsonify, request, send_file
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from subprocess import CalledProcessError
+import shutil
 
 import csv
 import json
@@ -406,6 +408,46 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+    
+def select_middle(df):
+    middle_index = len(df) // 2  # Find the middle index
+    return df.iloc[[middle_index]]  # Use iloc to select the middle row
+
+def filter_images(geojson_features, year, experiment, location, population, date, sensor, middle_image=False):
+
+    global data_root_dir
+
+    # Construct the CSV path from the state variables
+    csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
+                            population, date, 'msgs_synced.csv')
+    df = pd.read_csv(csv_path)
+
+    # Convert DataFrame to GeoDataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon_interp_adj, df.lat_interp_adj))
+
+    # Convert GeoJSON features to GeoDataFrame
+    geojson = {'type': 'FeatureCollection', 'features': geojson_features}
+    geojson_gdf = gpd.GeoDataFrame.from_features(geojson['features'])
+
+    # Perform spatial join to filter images within the GeoJSON polygons
+    filtered_gdf = gpd.sjoin(gdf, geojson_gdf, op='within')
+
+    # If the middle image is specified, only return the middle image per plot
+    if middle_image:
+        filtered_gdf = filtered_gdf.sort_values(by=sensor+"_time")
+        filtered_gdf = filtered_gdf.groupby('Plot').apply(select_middle).reset_index(drop=True)
+
+    # Extract the image names and labels from the filtered GeoDataFrame
+    filtered_images = filtered_gdf[sensor+"_file"].tolist()
+    filtered_labels = filtered_gdf['Label'].tolist()
+    filtered_plots = filtered_gdf['Plot'].tolist()
+
+    filtered_images = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images, filtered_labels, filtered_plots)]
+
+    # Sort the filtered_images by label
+    filtered_images = sorted(filtered_images, key=lambda x: x['label'])
+
+    return filtered_images
 
 @file_app.route('/query_images', methods=['POST'])
 def query_images():
@@ -417,34 +459,58 @@ def query_images():
     population = data['selectedPopulationGCP']
     date = data['selectedDateQuery']
     sensor = data['selectedSensorQuery']
+    middle_image = data['middleImage']
 
-    global data_root_dir
-
-    # print(geojson, flush=True)
-
-    # Construct the CSV path from the state variables
-    csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
-                            population, date, 'msgs_synced.csv')
-    
-    # Load the CSV with pandas
-    df = pd.read_csv(csv_path)
-
-    # Convert DataFrame to GeoDataFrame
-    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon_interp_adj, df.lat_interp_adj))
-
-    # Correctly format the geojson as a FeatureCollection
-    geojson = {'type': 'FeatureCollection', 'features': geojson_features}
-
-    # Load the GeoJSON as a GeoDataFrame
-    geojson_gdf = gpd.GeoDataFrame.from_features(geojson['features'])
-
-    # Perform spatial join to filter images within the GeoJSON polygons
-    filtered_gdf = gpd.sjoin(gdf, geojson_gdf, op='within')
-
-    # Extract the image names from the filtered GeoDataFrame
-    filtered_images = filtered_gdf[sensor+"_file"].tolist()
+    filtered_images = filter_images(geojson_features, year, experiment, location, 
+                                    population, date, sensor, middle_image)
 
     return jsonify(filtered_images)
+
+@file_app.route('/dload_zipped', methods=['POST'])
+def dload_zipped():
+    data = request.get_json()
+    geojson_features = data['geoJSON']
+    year = data['selectedYearGCP']
+    experiment = data['selectedExperimentGCP']
+    location = data['selectedLocationGCP']
+    population = data['selectedPopulationGCP']
+    platform = data['selectedPlatformQuery']
+    date = data['selectedDateQuery']
+    sensor = data['selectedSensorQuery']
+    middle_image = data['middleImage']
+
+    filtered_images = filter_images(geojson_features, year, experiment, location,
+                                    population, date, sensor, middle_image)
+
+    # Move the images to a temporary directory
+    temp_dir = '/tmp/filtered_images'
+
+    # Clean up the temporary directory
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # Create subdirectories for each label
+    unique_labels = set([image['label'] for image in filtered_images])
+    for label in unique_labels:
+        os.makedirs(os.path.join(temp_dir, label), exist_ok=True)
+    
+    # Copy the images to the subdirectories
+    for image in filtered_images:
+        image_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, 
+                                  date, platform, sensor, image['imageName'])
+        
+        label_dir = os.path.join(temp_dir, image['label'])
+        output_name = image['label'] + '_' + image['plot'] + '_' + image['imageName']
+        output_path = os.path.join(label_dir, output_name)
+
+        shutil.copy(image_path, output_path)
+    
+    # Zip the temporary directory
+    shutil.make_archive('/tmp/filtered', 'zip', temp_dir)
+
+    # Return the zipped file
+    return send_file('/tmp/filtered.zip', as_attachment=True)
 
 @file_app.route('/save_csv', methods=['POST'])
 def save_csv():
