@@ -12,6 +12,7 @@ import glob
 import yaml
 import random
 import string
+import shutil
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
@@ -117,7 +118,7 @@ def check_runs(dir_path):
             
             # Update the response_data dictionary with the path and its corresponding dates
             response_data[path] = dates
-    
+            
     # For the Locate column of Locate Plants
     elif os.path.exists(dir_path) and 'Locate' in dir_path:
         check = f'{dir_path}/Locate-*/locate.csv'
@@ -595,6 +596,113 @@ def run_odm_endpoint():
     thread.start()
 
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
+
+### ROVER LABELS PREPARATION ###
+def separate_files(files):
+    random.shuffle(files)
+    images = [file for file in files if file.endswith(('.jpg', '.jpeg', '.png'))]
+    labels = [file for file in files if file.endswith('.txt')]
+    return images, labels
+
+def split_data(labels, images, test_size=0.2):
+    # Calculate split index
+    split_index = int(len(labels) * (1 - test_size))
+    
+    # Split the labels and images into train and validation sets
+    labels_train = labels[:split_index]
+    labels_val = labels[split_index:]
+    
+    images_train = images[:split_index]
+    images_val = images[split_index:]
+    
+    return labels_train, labels_val, images_train, images_val
+
+@file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
+def check_labels(dir_path):
+    global data_root_dir
+    data = []
+    
+    # get labels path
+    labels_path = Path(data_root_dir)/dir_path
+    
+    if labels_path.exists() and labels_path.is_dir():
+        # get folders in path
+        folders = [f for f in labels_path.iterdir() if f.is_dir()]
+        # check if images and labels are in folders
+        for folder in folders:
+            if "images" in str(folder) or "labels" in str(folder):
+                data.append(str(folder))
+
+    return jsonify(data)
+
+@file_app.route('/prepare_labels', methods=['POST'])
+def prepare_labels():
+    
+    try:
+        global data_root_dir
+        location = request.json['location']
+        population = request.json['population']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        annotations = request.json['annotations']
+        date = request.json['date']
+        platform = request.json['platform']
+        sensor = request.json['sensor']
+        trait = request.json['trait']
+        
+        # grab annotations
+        annotation_files = [annotation['path'] for annotation in annotations]
+        images, labels = separate_files(annotation_files)
+        
+        # split dataset
+        source_dir = Path(data_root_dir).parent/'GEMINI-Data'/year/experiment/location/population/date/ \
+            platform/sensor/'Labels'/f'{trait} Detection'/'obj_train_data'
+        if not source_dir.exists() or not source_dir.is_dir():
+            print('Source directory does not exist...')
+            return jsonify({'message': 'Source directory does not exist...'}), 404
+        
+        target_dir = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/ \
+            sensor/f'Labels/{trait} Detection'
+        labels_train, labels_val, images_train, images_val = split_data(labels, images)
+        labels_train = [source_dir/label for label in labels_train]
+        labels_val = [source_dir/label for label in labels_val]
+        images_train = [source_dir/image for image in images_train]
+        images_val = [source_dir/image for image in images_val]
+        
+        # Replace the folder if it already exists
+        if target_dir.exists() and target_dir.is_dir():
+            shutil.rmtree(target_dir)
+        
+        # Copy files to their respective directories
+        labels_train_dir = target_dir/'labels'/'train'
+        labels_train_dir.mkdir(parents=True, exist_ok=True)
+        print(f'Copying ')
+        for label in labels_train:
+            shutil.copy(source_dir/label, labels_train_dir)
+
+        labels_val_dir = target_dir/'labels'/'val'
+        labels_val_dir.mkdir(parents=True, exist_ok=True)
+        for label in labels_val:
+            shutil.copy(source_dir/label, labels_val_dir)
+
+        images_train_dir = target_dir/'images'/'train'
+        images_train_dir.mkdir(parents=True, exist_ok=True)
+        for image in images_train:
+            shutil.copy(source_dir/image, images_train_dir)
+
+        images_val_dir = target_dir/'images'/'val'
+        images_val_dir.mkdir(parents=True, exist_ok=True)
+        for image in images_val:
+            shutil.copy(source_dir/image, images_val_dir)
+        
+        dataset = {
+            'images': {'train': str(images_train_dir), 'val': str(images_val_dir)},
+            'labels': {'train': str(labels_train_dir), 'val': str(labels_val_dir)}
+        }
+        
+        return jsonify(dataset)
+    except Exception as e:
+        return jsonify({'Error': str(e)}), 500
 
 ### ROVER MODEL TRAINING ###
 def check_model_details(key):
