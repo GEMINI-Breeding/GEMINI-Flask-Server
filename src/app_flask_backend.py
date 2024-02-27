@@ -624,7 +624,7 @@ def check_labels(dir_path):
     
     # get labels path
     labels_path = Path(data_root_dir)/dir_path
-    
+
     if labels_path.exists() and labels_path.is_dir():
         # get folders in path
         folders = [f for f in labels_path.iterdir() if f.is_dir()]
@@ -839,7 +839,7 @@ def train_model():
             f"python /app/train/train.py "
             f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
             f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
-            f"--batch-size '{batch_size}' --labels {labels_arg} ")
+            f"--batch-size {batch_size} --labels {labels_arg} ")
 
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
@@ -1130,6 +1130,7 @@ def extract_traits():
                 f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
                 f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
             )
+    print(cmd)
         
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
