@@ -598,11 +598,56 @@ def run_odm_endpoint():
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
 ### ROVER LABELS PREPARATION ###
-def separate_files(files):
-    random.shuffle(files)
-    images = [file for file in files if file.endswith(('.jpg', '.jpeg', '.png'))]
-    labels = [file for file in files if file.endswith('.txt')]
-    return images, labels
+@file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
+def check_labels(dir_path):
+    global data_root_dir
+    data = []
+    
+    # get labels path
+    labels_path = Path(data_root_dir)/dir_path
+
+    if labels_path.exists() and labels_path.is_dir():
+        # Use glob to find all .txt files in the directory
+        txt_files = list(labels_path.glob('*.txt'))
+        
+        # Check if there are more than one .txt files
+        if len(txt_files) > 1:
+            data.append(str(labels_path))
+
+    return jsonify(data)
+
+@file_app.route('/check_existing_labels', methods=['POST'])
+def check_existing_labels():
+    global data_root_dir
+    
+    data = request.json
+    fileList = data['fileList']
+    dirPath = data['dirPath']
+    full_dir_path = os.path.join(data_root_dir, dirPath)
+
+    # existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
+    existing_files = [file.name for file in Path(full_dir_path).rglob('*.txt')]
+    new_files = [file for file in fileList if file not in existing_files]
+
+    print(f"Uploading {str(len(new_files))} out of {str(len(fileList))} files to {dirPath}")
+
+    return jsonify(new_files), 200
+
+@file_app.route('/upload_trait_labels', methods=['POST'])
+def upload_trait_labels():
+    global data_root_dir
+    
+    dir_path = request.form.get('dirPath')
+    full_dir_path = os.path.join(data_root_dir, dir_path)
+    os.makedirs(full_dir_path, exist_ok=True)
+
+    for file in request.files.getlist("files"):
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(full_dir_path, filename)
+        print(f'Saving {file_path}...')
+        file.save(file_path)
+
+    return jsonify({'message': 'Files uploaded successfully'}), 200
 
 def split_data(labels, images, test_size=0.2):
     # Calculate split index
@@ -617,92 +662,49 @@ def split_data(labels, images, test_size=0.2):
     
     return labels_train, labels_val, images_train, images_val
 
-@file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
-def check_labels(dir_path):
-    global data_root_dir
-    data = []
-    
-    # get labels path
-    labels_path = Path(data_root_dir)/dir_path
+def copy_files_to_folder(source_files, target_folder):
+    for source_file in source_files:
+        target_file = target_folder / source_file.name
+        if not target_file.exists():
+            shutil.copy(source_file, target_file)
+            
+def remove_files_from_folder(folder):
+    for file in folder.iterdir():
+        if file.is_file():
+            file.unlink()
 
-    if labels_path.exists() and labels_path.is_dir():
-        # get folders in path
-        folders = [f for f in labels_path.iterdir() if f.is_dir()]
-        # check if images and labels are in folders
-        for folder in folders:
-            if "images" in str(folder) or "labels" in str(folder):
-                data.append(str(folder))
-
-    return jsonify(data)
-
-@file_app.route('/prepare_labels', methods=['POST'])
-def prepare_labels():
+def prepare_labels(annotations, images_path):
     
     try:
-        global data_root_dir
-        location = request.json['location']
-        population = request.json['population']
-        year = request.json['year']
-        experiment = request.json['experiment']
-        annotations = request.json['annotations']
-        date = request.json['date']
-        platform = request.json['platform']
-        sensor = request.json['sensor']
-        trait = request.json['trait']
+        global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
         
-        # grab annotations
-        annotation_files = [annotation['path'] for annotation in annotations]
-        images, labels = separate_files(annotation_files)
-        
-        # split dataset
-        source_dir = Path(data_root_dir).parent/'GEMINI-Data'/year/experiment/location/population/date/ \
-            platform/sensor/'Labels'/f'{trait} Detection'/'obj_train_data'
-        if not source_dir.exists() or not source_dir.is_dir():
-            print('Source directory does not exist...')
-            return jsonify({'message': 'Source directory does not exist...'}), 404
-        
-        target_dir = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/ \
-            sensor/f'Labels/{trait} Detection'
-        labels_train, labels_val, images_train, images_val = split_data(labels, images)
-        labels_train = [source_dir/label for label in labels_train]
-        labels_val = [source_dir/label for label in labels_val]
-        images_train = [source_dir/image for image in images_train]
-        images_val = [source_dir/image for image in images_val]
-        
-        # Replace the folder if it already exists
-        if target_dir.exists() and target_dir.is_dir():
-            shutil.rmtree(target_dir)
-        
-        # Copy files to their respective directories
-        labels_train_dir = target_dir/'labels'/'train'
-        labels_train_dir.mkdir(parents=True, exist_ok=True)
-        print(f'Copying ')
-        for label in labels_train:
-            shutil.copy(source_dir/label, labels_train_dir)
+        # path to labels
+        labels_train_folder = annotations.parent/'labels'/'train'
+        labels_val_folder = annotations.parent/'labels'/'val'
+        images_train_folder = annotations.parent/'images'/'train'
+        images_val_folder = annotations.parent/'images'/'val'
+        labels_train_folder.mkdir(parents=True, exist_ok=True)
+        labels_val_folder.mkdir(parents=True, exist_ok=True)
+        images_train_folder.mkdir(parents=True, exist_ok=True)
+        images_val_folder.mkdir(parents=True, exist_ok=True)
 
-        labels_val_dir = target_dir/'labels'/'val'
-        labels_val_dir.mkdir(parents=True, exist_ok=True)
-        for label in labels_val:
-            shutil.copy(source_dir/label, labels_val_dir)
-
-        images_train_dir = target_dir/'images'/'train'
-        images_train_dir.mkdir(parents=True, exist_ok=True)
-        for image in images_train:
-            shutil.copy(source_dir/image, images_train_dir)
-
-        images_val_dir = target_dir/'images'/'val'
-        images_val_dir.mkdir(parents=True, exist_ok=True)
-        for image in images_val:
-            shutil.copy(source_dir/image, images_val_dir)
+        # obtain path to images
+        images = list(images_path.rglob('*.jpg')) + list(images_path.rglob('*.png'))
         
-        dataset = {
-            'images': {'train': str(images_train_dir), 'val': str(images_val_dir)},
-            'labels': {'train': str(labels_train_dir), 'val': str(labels_val_dir)}
-        }
+        # split images to train and val
+        labels = list(annotations.glob('*.txt'))
+        label_stems = set(Path(label).stem for label in labels)
+        filtered_images = [image for image in images if Path(image).stem in label_stems]
+        labels_train, labels_val, images_train, images_val = split_data(labels, filtered_images)
+
+        # link images and labels to folder
+        copy_files_to_folder(labels_train, labels_train_folder)
+        copy_files_to_folder(labels_val, labels_val_folder)
+        copy_files_to_folder(images_train, images_train_folder)
+        copy_files_to_folder(images_val, images_val_folder)
         
-        return jsonify(dataset)
     except Exception as e:
-        return jsonify({'Error': str(e)}), 500
+        print(f'Error preparing labels for training: {e}')
 
 ### ROVER MODEL TRAINING ###
 def check_model_details(key):
@@ -800,7 +802,7 @@ def get_training_progress():
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event, new_folder
+    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels
     
     try:
         # receive the parameters
@@ -815,6 +817,12 @@ def train_model():
         platform = request.json['platform']
         year = request.json['year']
         experiment = request.json['experiment']
+        
+        # prepare labels
+        annotations = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
+        all_images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        # all_images = Path('/home/gemini/mnt/d/Annotations/Plant Detection/obj_train_data')
+        prepare_labels(annotations, all_images)
         
         # extract labels
         labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
@@ -840,9 +848,12 @@ def train_model():
             f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
             f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
             f"--batch-size {batch_size} --labels {labels_arg} ")
+        
+        print(cmd)
 
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
+        # output = 'test'
         return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
@@ -850,30 +861,44 @@ def train_model():
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
-    global training_stopped_event, new_folder
+    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
     container_name = 'train'
-    try:
+    try:        
+        # stop training
         print('Training stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
         subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        
+        # unlink files
+        remove_files_from_folder(labels_train_folder)
+        remove_files_from_folder(labels_val_folder)
+        remove_files_from_folder(images_train_folder)
+        remove_files_from_folder(images_val_folder)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 @file_app.route('/done_training', methods=['POST'])
 def done_training():
-    global training_stopped_event, new_folder, results_file
+    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
     container_name = 'train'
     try:
+        # stop training
         print('Training stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
         results_file = ''
+        
+        # unlink files
+        remove_files_from_folder(labels_train_folder)
+        remove_files_from_folder(labels_val_folder)
+        remove_files_from_folder(images_train_folder)
+        remove_files_from_folder(images_val_folder)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
