@@ -72,9 +72,12 @@ def _process_outputs(args):
     shutil.copy(dem_file, os.path.join(output_folder, 'dem.tif'))
 
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
-    if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
-        os.makedirs(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
-    shutil.move(os.path.join(pth, 'code'), os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
+    # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
+    #     os.makedirs(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
+    # shutil.move(os.path.join(pth, 'code'), os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
+
+    # Delete the temporary directory
+    shutil.rmtree(pth)
     
 def run_odm(args):
     '''
