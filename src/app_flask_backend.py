@@ -1,4 +1,4 @@
-from concurrent.futures import thread
+# from concurrent.futures import thread
 from math import e
 import os
 import re
@@ -13,12 +13,14 @@ import yaml
 import random
 import string
 import shutil
+import asyncio
 
 from flask import Flask, send_from_directory, jsonify, request
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from subprocess import CalledProcessError
+# from subprocess import CalledProcessError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import csv
 import json
@@ -58,20 +60,52 @@ def list_dirs(dir_path):
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
-@file_app.route('/list_dirs_nested', methods=['GET'])
-def list_dirs_nested():
-    global data_root_dir
+def build_nested_structure_sync(path, current_depth=0, max_depth=2):
+    if current_depth >= max_depth:
+        return {}
+    
+    structure = {}
+    for child in path.iterdir():
+        if child.is_dir():
+            structure[child.name] = build_nested_structure_sync(child, current_depth+1, max_depth)
+    return structure
+
+async def build_nested_structure(path, current_depth=0, max_depth=2):
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as pool:
+        return await loop.run_in_executor(pool, build_nested_structure_sync, path, current_depth, max_depth)
+
+async def process_directories_in_parallel(base_dir, max_depth=2):
+    directories = [d for d in base_dir.iterdir() if d.is_dir()]
+    tasks = [build_nested_structure(d, 0, max_depth) for d in directories]
+    nested_structures = await asyncio.gather(*tasks)
+    
+    combined_structure = {}
+    for d, structure in zip(directories, nested_structures):
+        combined_structure[d.name] = structure
+    
+    return combined_structure
+
+@file_app.get("/list_dirs_nested")
+async def list_dirs_nested():
     base_dir = Path(data_root_dir) / 'Raw'
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
+    return jsonify(combined_structure), 200
 
-    def build_nested_structure(path):
-        structure = {}
-        for child in path.iterdir():
-            if child.is_dir():
-                structure[child.name] = build_nested_structure(child)
-        return structure
+# @file_app.route('/list_dirs_nested', methods=['GET'])
+# def list_dirs_nested():
+#     global data_root_dir
+#     base_dir = Path(data_root_dir) / 'Raw'
 
-    nested_structure = build_nested_structure(base_dir)
-    return jsonify(nested_structure), 200
+#     def build_nested_structure(path):
+#         structure = {}
+#         for child in path.iterdir():
+#             if child.is_dir():
+#                 structure[child.name] = build_nested_structure(child)
+#         return structure
+
+#     nested_structure = build_nested_structure(base_dir)
+#     return jsonify(nested_structure), 200
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
