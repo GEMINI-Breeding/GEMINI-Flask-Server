@@ -9,11 +9,18 @@ import uvicorn
 import signal
 import flask
 import time
+import glob
+import yaml
+import random
+import string
+import shutil
+import asyncio
 
 from flask import Flask, send_from_directory, jsonify, request, send_file
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from subprocess import CalledProcessError
 import shutil
 
@@ -35,9 +42,7 @@ from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_data = {'epoch': 0, 'map': 0}
-training_stopped_event = threading.Event()
-latest_data = {'epoch': 0, 'map': 0}
+latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -58,21 +63,37 @@ def list_dirs(dir_path):
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
-@file_app.route('/list_dirs_nested/<path:dir_path>', methods=['GET'])
-def list_dirs_nested(dir_path):
-    global data_root_dir
-    base_dir = Path(data_root_dir) / dir_path
+def build_nested_structure_sync(path, current_depth=0, max_depth=2):
+    if current_depth >= max_depth:
+        return {}
+    
+    structure = {}
+    for child in path.iterdir():
+        if child.is_dir():
+            structure[child.name] = build_nested_structure_sync(child, current_depth+1, max_depth)
+    return structure
 
-    def build_nested_structure(path):
-        structure = {}
-        with os.scandir(path) as it:
-            for entry in it:
-                if entry.is_dir(follow_symlinks=False):
-                    structure[entry.name] = build_nested_structure(entry.path)
-        return structure
+async def build_nested_structure(path, current_depth=0, max_depth=2):
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as pool:
+        return await loop.run_in_executor(pool, build_nested_structure_sync, path, current_depth, max_depth)
 
-    nested_structure = build_nested_structure(base_dir)
-    return jsonify(nested_structure), 200
+async def process_directories_in_parallel(base_dir, max_depth=2):
+    directories = [d for d in base_dir.iterdir() if d.is_dir()]
+    tasks = [build_nested_structure(d, 0, max_depth) for d in directories]
+    nested_structures = await asyncio.gather(*tasks)
+    
+    combined_structure = {}
+    for d, structure in zip(directories, nested_structures):
+        combined_structure[d.name] = structure
+    
+    return combined_structure
+
+@file_app.get("/list_dirs_nested")
+async def list_dirs_nested():
+    base_dir = Path(data_root_dir) / 'Raw'
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
+    return jsonify(combined_structure), 200
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
@@ -87,6 +108,87 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+    
+@file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
+def check_runs(dir_path):
+    global data_root_dir
+    dir_path = os.path.join(data_root_dir, dir_path)
+    response_data = {}  # Initialize an empty dictionary for the response
+    
+    # For the Model column of Locate Plants
+    if os.path.exists(dir_path) and 'Plant Detection' in dir_path:
+        check = f'{dir_path}/Plant-*/weights/best.pt'
+        matched_paths = glob.glob(check)
+        
+        for path in matched_paths:
+            # Construct the path to the logs.yaml file in the same directory as best.pt
+            logs_yaml_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'logs.yaml')
+            
+            # Initialize an empty list for dates; it will remain empty if logs.yaml is not found or cannot be parsed
+            dates = []
+            
+            # Check if logs.yaml exists
+            if os.path.exists(logs_yaml_path):
+                try:
+                    # Open and parse the logs.yaml file
+                    with open(logs_yaml_path, 'r') as file:
+                        logs_data = yaml.safe_load(file)
+                        # Extract dates if available
+                        dates = logs_data.get('dates', [])
+                except yaml.YAMLError as exc:
+                    print(f"Error parsing YAML file {logs_yaml_path}: {exc}")
+            
+            # Update the response_data dictionary with the path and its corresponding dates
+            response_data[path] = dates
+            
+    # For the Locate column of Locate Plants
+    elif os.path.exists(dir_path) and 'Locate' in dir_path:
+        check = f'{dir_path}/Locate-*/locate.csv'
+        response_data = glob.glob(check)
+        
+    # For Labels Sets column of Teach Traits
+    elif os.path.exists(dir_path) and 'Labels' in dir_path:
+        date_pattern = r"\d{4}-\d{2}-\d{2}"
+        match = re.search(date_pattern, dir_path)
+        extracted_date = match.group(0) if match else None
+        response_data = {extracted_date: dir_path}
+        
+    # For Models column of Teach Traits
+    elif os.path.exists(dir_path) and any(x in dir_path for x in ['Pod', 'Flower', 'Leaf']):
+        check = f'{dir_path}/**/weights/best.pt'
+        matched_paths = glob.glob(check, recursive=True)
+        
+        for path in matched_paths:
+            # Construct the path to the logs.yaml file in the same directory as best.pt
+            logs_yaml_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'logs.yaml')
+            
+            # Initialize an empty list for dates; it will remain empty if logs.yaml is not found or cannot be parsed
+            dates = []
+            
+            # Check if logs.yaml exists
+            if os.path.exists(logs_yaml_path):
+                try:
+                    # Open and parse the logs.yaml file
+                    with open(logs_yaml_path, 'r') as file:
+                        logs_data = yaml.safe_load(file)
+                        # Extract dates if available
+                        dates = logs_data.get('dates', [])
+                except yaml.YAMLError as exc:
+                    print(f"Error parsing YAML file {logs_yaml_path}: {exc}")
+            
+            details = check_model_details(Path(path))
+            details['dates'] = dates
+            
+            # Update the response_data dictionary with the path and its corresponding dates
+            response_data[path] = details
+            
+    elif os.path.exists(dir_path) and 'Processed' in dir_path:
+        logs = f'{dir_path}/logs.yaml'
+        with open(logs, 'r') as file:
+            data = yaml.safe_load(file)
+            response_data = {k: {'model': v['model'], 'locate': v['locate'], 'id': v['id']} for k, v in data.items()}
+        
+    return jsonify(response_data), 200
     
 @file_app.route('/upload', methods=['POST'])
 def upload_files():
@@ -620,7 +722,160 @@ def run_odm_endpoint():
 
     return jsonify({"status": "success", "message": "ODM processing started successfully"})
 
+### ROVER LABELS PREPARATION ###
+@file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
+def check_labels(dir_path):
+    global data_root_dir
+    data = []
+    
+    # get labels path
+    labels_path = Path(data_root_dir)/dir_path
+
+    if labels_path.exists() and labels_path.is_dir():
+        # Use glob to find all .txt files in the directory
+        txt_files = list(labels_path.glob('*.txt'))
+        
+        # Check if there are more than one .txt files
+        if len(txt_files) > 1:
+            data.append(str(labels_path))
+
+    return jsonify(data)
+
+@file_app.route('/check_existing_labels', methods=['POST'])
+def check_existing_labels():
+    global data_root_dir
+    
+    data = request.json
+    fileList = data['fileList']
+    dirPath = data['dirPath']
+    full_dir_path = os.path.join(data_root_dir, dirPath)
+
+    # existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
+    existing_files = [file.name for file in Path(full_dir_path).rglob('*.txt')]
+    new_files = [file for file in fileList if file not in existing_files]
+
+    print(f"Uploading {str(len(new_files))} out of {str(len(fileList))} files to {dirPath}")
+
+    return jsonify(new_files), 200
+
+@file_app.route('/upload_trait_labels', methods=['POST'])
+def upload_trait_labels():
+    global data_root_dir
+    
+    dir_path = request.form.get('dirPath')
+    full_dir_path = os.path.join(data_root_dir, dir_path)
+    os.makedirs(full_dir_path, exist_ok=True)
+
+    for file in request.files.getlist("files"):
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(full_dir_path, filename)
+        print(f'Saving {file_path}...')
+        file.save(file_path)
+
+    return jsonify({'message': 'Files uploaded successfully'}), 200
+
+def split_data(labels, images, test_size=0.2):
+    # Calculate split index
+    split_index = int(len(labels) * (1 - test_size))
+    
+    # Split the labels and images into train and validation sets
+    labels_train = labels[:split_index]
+    labels_val = labels[split_index:]
+    
+    images_train = images[:split_index]
+    images_val = images[split_index:]
+    
+    return labels_train, labels_val, images_train, images_val
+
+def copy_files_to_folder(source_files, target_folder):
+    for source_file in source_files:
+        target_file = target_folder / source_file.name
+        if not target_file.exists():
+            shutil.copy(source_file, target_file)
+            
+def remove_files_from_folder(folder):
+    for file in folder.iterdir():
+        if file.is_file():
+            file.unlink()
+
+def prepare_labels(annotations, images_path):
+    
+    try:
+        global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
+        
+        # path to labels
+        labels_train_folder = annotations.parent/'labels'/'train'
+        labels_val_folder = annotations.parent/'labels'/'val'
+        images_train_folder = annotations.parent/'images'/'train'
+        images_val_folder = annotations.parent/'images'/'val'
+        labels_train_folder.mkdir(parents=True, exist_ok=True)
+        labels_val_folder.mkdir(parents=True, exist_ok=True)
+        images_train_folder.mkdir(parents=True, exist_ok=True)
+        images_val_folder.mkdir(parents=True, exist_ok=True)
+
+        # obtain path to images
+        images = list(images_path.rglob('*.jpg')) + list(images_path.rglob('*.png'))
+        
+        # split images to train and val
+        labels = list(annotations.glob('*.txt'))
+        label_stems = set(Path(label).stem for label in labels)
+        filtered_images = [image for image in images if Path(image).stem in label_stems]
+        labels_train, labels_val, images_train, images_val = split_data(labels, filtered_images)
+
+        # link images and labels to folder
+        copy_files_to_folder(labels_train, labels_train_folder)
+        copy_files_to_folder(labels_val, labels_val_folder)
+        copy_files_to_folder(images_train, images_train_folder)
+        copy_files_to_folder(images_val, images_val_folder)
+        
+    except Exception as e:
+        print(f'Error preparing labels for training: {e}')
+
 ### ROVER MODEL TRAINING ###
+def check_model_details(key):
+    
+    # get base folder, args file and results file
+    base_path = key.parent.parent
+    args_file = base_path / 'args.yaml'
+    results_file = base_path / 'results.csv'
+    
+    # get epochs, batch size and image size
+    values = []
+    with open(args_file, 'r') as file:
+        args = yaml.safe_load(file)
+        epochs = args.get('epochs')
+        batch = args.get('batch')
+        imgsz = args.get('imgsz')
+        
+        values.extend([epochs, batch, imgsz])
+    
+    # get mAP of model
+    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    values.extend([mAP])
+    
+    # get run name
+    run = base_path.name
+    match = re.search(r'-([A-Za-z0-9]+)$', run)
+    id = match.group(1)
+    
+    # collate details
+    details = {'id': id, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
+    
+    return details
+
+@file_app.route('/get_model_info', methods=['POST'])
+def get_model_info():
+    data = request.json
+    details_data = []
+    
+    # iterate through each existing model
+    for key in data:
+        details = check_model_details(Path(key))
+        details_data.append(details)
+
+    return jsonify(details_data)
+
 def get_labels(labels_path):
     unique_labels = set()
 
@@ -637,7 +892,7 @@ def get_labels(labels_path):
     return list(sorted_unique_labels)
 
 def scan_for_new_folders(save_path):
-    global latest_data, training_stopped_event, new_folder
+    global latest_data, training_stopped_event, new_folder, results_file
     known_folders = {os.path.join(save_path, f) for f in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, f))}
 
     while not training_stopped_event.is_set():  # Continue while training is ongoing
@@ -654,7 +909,7 @@ def scan_for_new_folders(save_path):
                     time.sleep(5)  # Check every 5 seconds
 
                 # Periodically read results.csv for updates
-                while os.path.isfile(results_file):
+                while os.path.exists(results_file) and os.path.isfile(results_file):
                     try:
                         df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
                         latest_data['epoch'] = int(df['epoch'].iloc[-1])  # Update latest epoch
@@ -665,55 +920,65 @@ def scan_for_new_folders(save_path):
 
         time.sleep(5)  # Check for new folders every 10 seconds
         
-@file_app.route('/get_training_progress', methods=['GET'])
+@file_app.route('/get_progress', methods=['GET'])
 def get_training_progress():
+    print(latest_data)
     return jsonify(latest_data)
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event
-    
-    # receive the parameters
-    epochs = int(request.json['epochs'])
-    batch_size = int(request.json['batchSize'])
-    image_size = int(request.json['imageSize'])
-    location = request.json['location']
-    population = request.json['population']
-    date = request.json['date']
-    trait = request.json['trait']
-    sensor = request.json['sensor']
-    platform = request.json['platform']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    
-    # extract labels
-    labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels/labels/train'
-    labels = get_labels(labels_path)
-    labels_arg = " ".join(labels)
-    
-    # other training args
-    container_dir = Path('/app/mnt')
-    pretrained = "/app/train/yolov8n.pt"
-    save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
-    scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
-    scan_save = Path(scan_save)
-    scan_save.mkdir(parents=True, exist_ok=True)
-    latest_data['epoch'] = 0
-    latest_data['map'] = 0
-    training_stopped_event.clear()
-    threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-    images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/'Labels'
-    
-    # run training
-    cmd = (f"docker exec train "
-           f"python /app/train/train.py "
-           f"--pretrained {pretrained} --images {images} --save {save_train_model} --sensor {sensor} "
-           f"--date {date} --trait {trait} --image-size {image_size} --epochs {epochs} "
-           f"--batch-size {batch_size} --labels {labels_arg}")
+    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels
     
     try:
+        # receive the parameters
+        epochs = int(request.json['epochs'])
+        batch_size = int(request.json['batchSize'])
+        image_size = int(request.json['imageSize'])
+        location = request.json['location']
+        population = request.json['population']
+        date = request.json['date']
+        trait = request.json['trait']
+        sensor = request.json['sensor']
+        platform = request.json['platform']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        
+        # prepare labels
+        annotations = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
+        all_images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        # all_images = Path('/home/gemini/mnt/d/Annotations/Plant Detection/obj_train_data')
+        prepare_labels(annotations, all_images)
+        
+        # extract labels
+        labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
+        labels = get_labels(labels_path)
+        labels_arg = " ".join(labels)
+        
+        # other training args
+        container_dir = Path('/app/mnt')
+        pretrained = "/app/train/yolov8n.pt"
+        save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
+        scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
+        scan_save = Path(scan_save)
+        scan_save.mkdir(parents=True, exist_ok=True)
+        latest_data['epoch'] = 0
+        latest_data['map'] = 0
+        training_stopped_event.clear()
+        threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
+        images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
+        
+        # run training
+        cmd = (f"docker exec train "
+            f"python /app/train/train.py "
+            f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
+            f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
+            f"--batch-size {batch_size} --labels {labels_arg} ")
+        
+        print(cmd)
+
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
+        # output = 'test'
         return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
@@ -721,48 +986,165 @@ def train_model():
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
-    global training_stopped_event, new_folder
+    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
     container_name = 'train'
-    try:
+    try:        
+        # stop training
         print('Training stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
-        subprocess.run(f"rm -rf {new_folder}", check=True, shell=True)
+        subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        
+        # unlink files
+        remove_files_from_folder(labels_train_folder)
+        remove_files_from_folder(labels_val_folder)
+        remove_files_from_folder(images_train_folder)
+        remove_files_from_folder(images_val_folder)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+@file_app.route('/done_training', methods=['POST'])
+def done_training():
+    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
+    container_name = 'train'
+    try:
+        # stop training
+        print('Training stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        training_stopped_event.set()
+        results_file = ''
+        
+        # unlink files
+        remove_files_from_folder(labels_train_folder)
+        remove_files_from_folder(labels_val_folder)
+        remove_files_from_folder(images_train_folder)
+        remove_files_from_folder(images_val_folder)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
 ### ROVER LOCATE PLANTS ###
+def check_locate_details(key):
+    
+    # get base folder, args file and results file
+    base_path = key.parent
+    results_file = base_path / 'locate.csv'
+    
+    # get run name
+    run = base_path.name
+    match = re.search(r'-([A-Za-z0-9]+)$', run)
+    id = match.group(1)
+    
+    # get model id
+    with open(base_path/'logs.yaml', 'r') as file:
+        data = yaml.safe_load(file)
+    model_id = data['model']
+    
+    # get stand count
+    df = pd.read_csv(results_file)
+    stand_count = len(df)
+    
+    # collate details
+    details = {'id': id, 'model': model_id, 'count': stand_count}
+    
+    return details
+
+@file_app.route('/get_locate_info', methods=['POST'])
+def get_locate_info():
+    data = request.json
+    details_data = []
+    
+    # iterate through each existing model
+    for key in data:
+        details = check_locate_details(Path(key))
+        details_data.append(details)
+        
+    return jsonify(details_data)
+
+@file_app.route('/get_locate_progress', methods=['GET'])
+def get_locate_progress():
+    global save_locate
+    txt_file = save_locate/'locate_progress.txt'
+    
+    # Check if the file exists
+    if os.path.exists(txt_file):
+        with open(txt_file, 'r') as file:
+            number = file.read().strip()
+            latest_data['locate'] = int(number)
+        return jsonify(latest_data)
+    else:
+        return jsonify({'error': 'Locate progress not found'}), 404
+
+def generate_hash(trait, length=6):
+    """Generate a hash for model where it starts with the trait followed by a random string of characters.
+
+    Args:
+        trait (str): trait to be analyzed (plant, flower, pod, etc.)
+        length (int, optional): Length for random sequence. Defaults to 5.
+    """
+    random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    hash_id = f"{trait}-{random_sequence}"
+    return hash_id
+
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
-    global data_root_dir
+    global data_root_dir, save_locate
     
     # recieve parameters
     batch_size = int(request.json['batchSize'])
     location = request.json['location']
     population = request.json['population']
     date = request.json['date']
+    platform = request.json['platform']
     sensor = request.json['sensor']
+    year = request.json['year']
+    experiment = request.json['experiment']
+    model = request.json['model']
+    id = request.json['id']
     
     # other args
-    container_dir = '/root/app/mnt'
-    images = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/images'
-    # configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+sensor+'/configs'
-    configs = container_dir+'/Raw/'+location+'/'+population+'/'+date+'/'+'Rover/T4' 
-    plotmap = container_dir+'/Processed/'+location+'/'+population+'/Plot-Attributes-WGS84.geojson' 
-    models = container_dir+'/temp/default/plant-det_yolov8_mAP76_640_20230620.pt'
-    save = container_dir+'/Processed/'+location+'/'+population+'/'+date+'/'+sensor+'/Results'
+    container_dir = Path('/app/mnt')
+    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
+    configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
+    
+    # generate save folder
+    version = generate_hash(trait='Locate')
+    save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'
+    while (save_base / f'{version}').exists():
+        version = generate_hash(trait='Locate')
+    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
+    save_locate.mkdir(parents=True, exist_ok=True)
+    save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}')
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'best.pt'
+    
+    # save logs file
+    data = {"model": [id], "date": [date]}
+    with open(save_locate/"logs.yaml", "w") as file:
+        yaml.dump(data, file, default_flow_style=False)
     
     # run locate
-    cmd = (
+    if disparity.exists():
+        cmd = (
         f"docker exec locate-extract "
-        f"python -W ignore {container_dir}/locate.py "
-        f"--images {images} --configs {configs} --plotmap {plotmap} "
-        f"--batch-size {batch_size} --models {models} --save {save} "
-    )
-    
+        f"python -W ignore /app/locate.py "
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
+        )
+    else:
+        cmd = (
+        f"docker exec locate-extract "
+        f"python -W ignore /app/locate.py "
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
+        )
+
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
@@ -771,15 +1153,186 @@ def locate_plants():
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
     
-@file_app.route('/stop_event', methods=['POST'])
-def stop_event():
+@file_app.route('/stop_locate', methods=['POST'])
+def stop_locate():
+    global save_locate
     container_name = 'locate-extract'
     try:
         print('Locate-Extract stopped by user.')
         kill_cmd = f"docker exec {container_name} pkill -9 -f python"
         subprocess.run(kill_cmd, shell=True)
         print(f"Sent SIGKILL to Python process in {container_name} container.")
-        training_stopped_event.set()
+        subprocess.run(f"rm -rf '{save_locate}'", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+### ROVER EXTRACT PLANTS ###
+def update_or_add_entry(data, key, new_values):
+    if key in data:
+        # Update existing entry
+        data[key].update(new_values)
+    else:
+        # Add new entry
+        data[key] = new_values
+        
+@file_app.route('/get_extract_progress', methods=['GET'])
+def get_extract_progress():
+    global save_extract
+    txt_file = save_extract/'extract_progress.txt'
+    
+    # Check if the file exists
+    if os.path.exists(txt_file):
+        with open(txt_file, 'r') as file:
+            number = file.read().strip()
+            latest_data['extract'] = int(number)
+        return jsonify(latest_data)
+    else:
+        return jsonify({'error': 'Locate progress not found'}), 404
+    
+@file_app.route('/extract_traits', methods=['POST'])
+def extract_traits():
+    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract
+    
+    # recieve parameters
+    summary = request.json['summary']
+    batch_size = int(request.json['batchSize'])
+    model = request.json['model']
+    trait = request.json['trait']
+    trait_extract = request.json['trait']
+    date = request.json['date']
+    year = request.json['year']
+    experiment = request.json['experiment']
+    location = request.json['location']
+    population = request.json['population']
+    platform = request.json['platform']
+    sensor = request.json['sensor']
+    
+    # extract model and summary information
+    pattern = r"/[^/]+-([\w]+?)/weights"
+    date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
+    locate_pattern = r"Locate-(\w+)/"
+    match = re.search(pattern, str(model))
+    match_date = re.search(date_pattern, str(summary))
+    match_locate_id = re.search(locate_pattern, str(summary))
+    model_id = match.group(1)
+    summary_date = match_date.group()
+    locate_id = match_locate_id.group(1)
+    
+    # other args
+    container_dir = Path('/app/mnt')
+    summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'best.pt'
+    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
+    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
+    metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
+    save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
+    temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+    temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+    temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
+    save_extract.mkdir(parents=True, exist_ok=True)
+    
+    # check if date is emerging
+    emerging = date in summary
+    
+    # run extract
+    if emerging:
+        if disparity.exists():
+            cmd = (
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+            )
+        else:
+            cmd = (
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+            )
+    else:
+        if disparity.exists():
+            cmd = (
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+            )
+        else:
+            cmd = (
+                f"docker exec locate-extract /bin/sh -c \""
+                f". /miniconda/etc/profile.d/conda.sh && "
+                f"conda activate env && "
+                f"exec python -W ignore /app/extract.py "
+                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+            )
+    print(cmd)
+        
+    try:
+        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = process.stdout.decode('utf-8')
+        # print(cmd)
+        # output = 'test'
+        return jsonify({"message": "Extract has started", "output": output}), 202
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr.decode('utf-8')
+        return jsonify({"error": error_output}), 500
+    
+@file_app.route('/stop_extract', methods=['POST'])
+def stop_extract():
+    global save_extract, temp_extract
+    container_name = 'locate-extract'
+    try:
+        print('Locate-Extract stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        subprocess.run(f"rm -rf '{save_extract}/logs.yaml'", check=True, shell=True)
+        subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
+        return jsonify({"message": "Python process in container successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
+@file_app.route('/done_extract', methods=['POST'])
+def done_extract():
+    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract
+    container_name = 'locate-extract'
+    try:
+        # update logs file
+        logs_file = Path(save_extract)/'logs.yaml'
+        if logs_file.exists():
+            with open(logs_file, 'r') as file:
+                data = yaml.safe_load(file) or {} # use an empty dict if the file is empty
+        else:
+            data = {}
+        new_values = {
+            "model": model_id,
+            "locate": summary_date,
+            "id": locate_id
+        }
+        update_or_add_entry(data, trait_extract, new_values)
+        with open(logs_file, 'w') as file:
+            yaml.dump(data, file, default_flow_style=False, sort_keys=False)
+        
+        print('Training stopped by user.')
+        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        subprocess.run(kill_cmd, shell=True)
+        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500

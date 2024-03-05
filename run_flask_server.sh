@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-pushd ../GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
+pushd /home/gemini/scratch/GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
 # bash ./install_flask_server.sh
 
 # Activate conda env
-source /media/data/miniconda3/bin/activate .conda/
+source /home/gemini/miniconda3/bin/activate .conda/
 
 # Use default arguments when they are not provided (data_root_dir, port)
 if [ -z "$1" ]; then
-    data_root_dir="/home/GEMINI/GEMINI-Data"
+    data_root_dir="/home/gemini/data/GEMINI-App-Data"
 else
     data_root_dir=$1
 fi
+echo $data_root_dir
 
 if [ -z "$2" ]; then
-    port=5000
+    port=5003
 else
     port=$2
 fi
