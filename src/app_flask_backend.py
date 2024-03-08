@@ -223,6 +223,47 @@ def check_files():
 
     return jsonify(new_files), 200
 
+@file_app.route('/upload_chunk', methods=['POST'])
+def upload_chunk():
+    chunk = request.files['fileChunk']
+    chunk_index = request.form['chunkIndex']
+    total_chunks = request.form['totalChunks']
+    file_name = secure_filename(request.form['fileIdentifier'])
+    dir_path = request.form['dirPath']
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    cache_dir_path = os.path.join(full_dir_path, 'cache')
+    os.makedirs(full_dir_path, exist_ok=True)
+    os.makedirs(cache_dir_path, exist_ok=True)
+    
+    chunk_save_path = os.path.join(cache_dir_path, f"{file_name}.part{chunk_index}")
+    chunk.save(chunk_save_path)
+    
+    # Check if all parts are uploaded
+    if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
+        # Reassemble file
+        with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
+            for i in range(int(total_chunks)):
+                with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
+                    full_file.write(part_file.read())
+                os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))  # Clean up chunk
+
+        os.remove(os.path.join(full_dir_path, 'cache'))  # Clean up cache directory
+        return "File reassembled and saved successfully", 200
+    else:
+        return f"Chunk {chunk_index} of {total_chunks} received", 202
+    
+@file_app.route('/check_uploaded_chunks', methods=['POST'])
+def check_uploaded_chunks():
+    data = request.json
+    file_identifier = data['fileIdentifier']
+    dir_path = data['dirPath']
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    cache_dir_path = os.path.join(full_dir_path, 'cache')
+    
+    uploaded_chunks = [f for f in os.listdir(cache_dir_path) if f.startswith(file_identifier)]
+    uploaded_chunks_count = len(uploaded_chunks)
+
+    return jsonify({'uploadedChunksCount': uploaded_chunks_count}), 200
 
 #### SCRIPT SERVING ENDPOINTS ####
 # endpoint to run script
@@ -396,7 +437,7 @@ def save_array():
 
     # Extracting the directory path based on the first element in the array 
     base_image_path = data['array'][0]['image_path']
-    processed_path = base_image_path.replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
+    processed_path = base_image_path.replace('/Raw/', 'Intermediate/').split('/Drone')[0] + '/Drone'
     save_directory = os.path.join(data_root_dir+'/', processed_path)
     print(save_directory, flush=True)
 
@@ -693,13 +734,14 @@ def run_odm_endpoint():
     date = data.get('date')
     year = data.get('year')
     experiment = data.get('experiment')
+    platform = data.get('platform')
     sensor = data.get('sensor')
     temp_dir = data.get('temp_dir')
     reconstruction_quality = data.get('reconstruction_quality')
     custom_options = data.get('custom_options')
 
     if not temp_dir:
-        temp_dir = '/home/GEMINI/temp/project'
+        temp_dir = os.path.join(data_root_dir, 'temp/project')
     if not reconstruction_quality:
         reconstruction_quality = 'Low'
 
@@ -711,6 +753,7 @@ def run_odm_endpoint():
     args.date = date
     args.year = year
     args.experiment = experiment
+    args.platform = platform
     args.sensor = sensor
     args.temp_dir = temp_dir
     args.reconstruction_quality = reconstruction_quality
