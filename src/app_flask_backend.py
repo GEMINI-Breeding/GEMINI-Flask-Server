@@ -823,15 +823,15 @@ def monitor_log_updates(logs_path, progress_file):
     try:
         progress_points = [
             "Running opensfm stage",
-            "Starting incremental reconstruction",
             "Export reconstruction stats",
-            "Finished opensfm stage",
             "Estimated depth-maps",
             "Geometric-consistent estimated depth-maps",
             "Filtered depth-maps",
             "Fused depth-maps",
             "Point visibility checks",
-            "Decimated faces"
+            "Decimated faces",
+            "Running odm_georeferencing stage",
+            "running pdal translate"
         ]
         
         completed_stages = set()
