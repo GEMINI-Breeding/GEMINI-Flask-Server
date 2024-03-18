@@ -42,7 +42,7 @@ from scripts.orthomosaic_generation import run_odm
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0}
+latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -298,9 +298,10 @@ def process_images():
     year = request.json['year']
     experiment = request.json['experiment']
     sensor = request.json['sensor']
+    platform = request.json['platform']
 
     prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, year, experiment, location, population, date, 'Drone', sensor, 'Images')
+    image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
 
     print("Loading predefined locations from CSV file...")
 
@@ -437,8 +438,10 @@ def save_array():
 
     # Extracting the directory path based on the first element in the array 
     base_image_path = data['array'][0]['image_path']
-    processed_path = base_image_path.replace('/Raw/', 'Intermediate/').split('/Drone')[0] + '/Drone'
-    save_directory = os.path.join(data_root_dir+'/', processed_path)
+    platform = data['platform']
+    sensor = data['sensor']
+    processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
+    save_directory = os.path.join(data_root_dir, processed_path)
     print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
@@ -497,8 +500,10 @@ def initialize_file():
     if 'basePath' not in data:
         return jsonify({"message": "Missing basePath in data"}), 400
 
-    processed_path = data['basePath'].replace('/Raw/', 'Processed/').split('/Drone')[0] + '/Drone'
-    save_directory = os.path.join(data_root_dir+'/', processed_path)
+    platform = data['platform']
+    sensor = data['sensor']
+    processed_path = os.path.join(data['basePath'].replace('/Raw/', 'Intermediate/').split(f'/{sensor}')[0], sensor)
+    save_directory = os.path.join(data_root_dir, processed_path)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -759,11 +764,107 @@ def run_odm_endpoint():
     args.reconstruction_quality = reconstruction_quality
     args.custom_options = custom_options
     
-    # Run ODM in a separate thread
-    thread = threading.Thread(target=run_odm, args=(args,))
-    thread.start()
+    try:
+        # Reset ODM
+        reset_odm()
+        
+        # Run ODM in a separate thread
+        thread = threading.Thread(target=run_odm, args=(args,))
+        thread.start()
+        
+        # Run progress tracker
+        logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
+        progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
+        os.makedirs(os.path.dirname(progress_file), exist_ok=True)
+        thread_prog = threading.Thread(target=monitor_log_updates, args=(logs_path, progress_file), daemon=True)
+        thread_prog.start()
 
-    return jsonify({"status": "success", "message": "ODM processing started successfully"})
+        return jsonify({"status": "success", "message": "ODM processing started successfully"})
+    except Exception as e:
+        print('Error has occured: ', e)
+        # Signal threads to stop
+        stop_event = threading.Event()
+        stop_event.set()
+        
+        # Optionally, wait for threads to finish if needed
+        thread_prog.join()
+        thread.join()
+        return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 400)
+
+def reset_odm():
+    # Delete existing folders
+    temp_path = os.path.join(data_root_dir, 'temp')
+    while os.path.exists(temp_path):
+        shutil.rmtree(temp_path)
+        
+@file_app.route('/stop_odm', methods=['POST'])
+def stop_odm():
+    try:
+        print('ODM processed stopped by user.')
+        stop_event = threading.Event()
+        stop_event.set()
+        reset_odm()
+        return jsonify({"message": "ODM process stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+
+@file_app.route('/get_ortho_progress', methods=['GET'])
+def get_ortho_progress():
+    return jsonify(latest_data)
+
+def update_progress_file(progress_file, progress):
+    with open(progress_file, 'w') as pf:
+        pf.write(f"{progress}%")
+        latest_data['ortho'] = progress
+        print('Ortho progress updated:', progress)
+               
+def monitor_log_updates(logs_path, progress_file):
+    
+    try:
+        progress_points = [
+            "Running opensfm stage",
+            "Starting incremental reconstruction",
+            "Export reconstruction stats",
+            "Finished opensfm stage",
+            "Estimated depth-maps",
+            "Geometric-consistent estimated depth-maps",
+            "Filtered depth-maps",
+            "Fused depth-maps",
+            "Point visibility checks",
+            "Decimated faces"
+        ]
+        
+        completed_stages = set()
+        progress_increment = 10  # Each stage completion increases progress by 10%
+        with open(progress_file, 'w') as file:
+                    file.write("0")
+        
+        # Wait for the log file to be created
+        while not os.path.exists(logs_path):
+            print("Waiting for log file to be created...")
+            time.sleep(5)  # Check every 5 seconds
+        
+        print("Log file found. Monitoring for updates.")
+        
+        # Log file exists, start monitoring
+        with open(logs_path, 'r') as file:
+            # Start by reading the file from the beginning
+            file.seek(0)
+            
+            while True:
+                line = file.readline()
+                if line:
+                    for point in progress_points:
+                        if point in line and point not in completed_stages:
+                            completed_stages.add(point)
+                            current_progress = len(completed_stages) * progress_increment
+                            update_progress_file(progress_file, current_progress)
+                            print(f"Progress updated: {current_progress}%")
+                else:
+                    time.sleep(1)  # Sleep briefly to avoid busy waiting
+    except Exception as e:
+        # Handle exception: log it, set a flag, etc.
+        print(f"Error in thread: {e}")
 
 ### ROVER LABELS PREPARATION ###
 @file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
