@@ -130,6 +130,7 @@ dependencies:
   - xz=5.2.6=h166bdaf_0
   - zlib=1.2.13=hd590300_5
   - zstd=1.5.2=hfc55251_7
+  - pillow
   - pip:
       - affine==2.4.0
       - anyio==3.7.1
@@ -163,6 +164,7 @@ dependencies:
       - numexpr==2.8.4
       - packaging==23.1
       - pandas==2.0.3
+      - pillow==10.0.0
       - pydantic==1.10.11
       - pyparsing==3.1.0
       - pyproj==3.5.0
@@ -193,3 +195,5 @@ dependencies:
       - uvicorn==0.23.1
       - werkzeug==2.3.6
       - zipp==3.16.2
+      - opencv-python
+      - tqdm
