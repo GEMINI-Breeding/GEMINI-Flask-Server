@@ -15,7 +15,8 @@ def _copy_image(src_folder, dest_folder, image_name):
     src_path = os.path.join(src_folder, image_name)
     dest_path = os.path.join(dest_folder, image_name)
 
-    shutil.copy(src_path, dest_path)
+    if not os.path.exists(dest_path):
+        shutil.copy(src_path, dest_path)
 
 def _create_directory_structure(args):
     
@@ -30,14 +31,15 @@ def _create_directory_structure(args):
     if pth[-1] == '/':
         pth = pth[:-1]
     if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')    
+        pth = os.path.join(pth, 'project')
 
     if not os.path.exists(pth):
         os.makedirs(pth)
         os.makedirs(os.path.join(pth, 'code', 'images'))
 
     # Copy the images to the temporary directory
-    image_pth = os.path.join(args.data_root_dir, 'Raw', args.location, args.population, args.date, args.sensor, 'Images')
+    image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+    print(f"Image Path: {image_pth}")
     images = os.listdir(os.path.join(image_pth))
     images = [x for x in images if x.endswith('.JPG') or x.endswith('.jpg') or x.endswith('.tif') or x.endswith('.TIF')]
 
@@ -49,7 +51,8 @@ def _create_directory_structure(args):
                                 images)
 
     # Copy the gcp_list.txt to the temporary directory
-    gcp_pth = os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.sensor, 'gcp_list.txt')
+    gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
+    print(f"GCP Path: {gcp_pth}")
     shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
 
 def _process_outputs(args):
@@ -64,12 +67,13 @@ def _process_outputs(args):
     ortho_file = os.path.join(pth, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
     dem_file = os.path.join(pth, 'code', 'odm_dem', 'dsm.tif')
 
-    output_folder = os.path.join(args.data_root_dir, 'Processed', args.location, args.population, args.date, args.sensor)
+    output_folder = os.path.join(args.data_root_dir, 'Processed', args.year, args. experiment, args.location, args.population, args.date, args.platform, args.sensor)
+    print(f"Output folder: {output_folder}")
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
-    shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-'+'.tif'))
-    shutil.copy(dem_file, os.path.join(output_folder, 'dem.tif'))
+    shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-RGB.tif'))
+    shutil.copy(dem_file, os.path.join(output_folder, args.date+'-DEM.tif'))
 
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
     # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
@@ -83,32 +87,41 @@ def run_odm(args):
     '''
     Run ODM on the temporary directory.
     '''
-
-    _create_directory_structure(args)
-
-    # Run ODM
-    pth = args.temp_dir
-
-    if pth[-1] == '/':
-        pth = pth[:-1]
-    if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')
     
-    log_file = os.path.join(pth, 'code', 'logs.txt')
+    try:
 
-    with open(log_file, 'w') as f:
-        if args.reconstruction_quality == 'Custom':
-            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options], stdout=f, stderr=subprocess.STDOUT)
-        elif args.reconstruction_quality == 'Low':
-            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000'], stdout=f, stderr=subprocess.STDOUT)
-        elif args.reconstruction_quality == 'High':
-            process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000'], stdout=f, stderr=subprocess.STDOUT)
-        else:
-            raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
-        process.wait()
+        _create_directory_structure(args)
+
+        # Run ODM
+        pth = args.temp_dir
+
+        if pth[-1] == '/':
+            pth = pth[:-1]
+        if os.path.basename(pth) != 'project':
+            pth = os.path.join(pth, 'project')
+        
+        log_file = os.path.join(pth, 'code', 'logs.txt')
+        print('Project Path: ', pth)
+
+        with open(log_file, 'w') as f:
+            if args.reconstruction_quality == 'Custom':
+                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                print('Starting ODM with custom options...')
+            elif args.reconstruction_quality == 'Low':
+                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                print('Starting ODM with low options...')
+            elif args.reconstruction_quality == 'High':
+                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                print('Starting ODM with high options...')
+            else:
+                raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+            process.wait()
+        
+        _process_outputs(args)
     
-    _process_outputs(args)
-    
+    except Exception as e:
+        # Handle exception: log it, set a flag, etc.
+        print(f"Error in thread: {e}")
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
