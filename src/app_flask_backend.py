@@ -192,6 +192,7 @@ def check_runs(dir_path):
     
 @file_app.route('/upload', methods=['POST'])
 def upload_files():
+    data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
@@ -199,6 +200,11 @@ def upload_files():
 
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
+        if data_type == 'fieldDesign':
+            filename = 'field_design.csv'
+        elif data_type == 'gcpLocations':
+            filename = 'gcp_locations.csv'
+        
         file_path = os.path.join(full_dir_path, filename)
 
         if upload_new_files_only and os.path.isfile(file_path):
