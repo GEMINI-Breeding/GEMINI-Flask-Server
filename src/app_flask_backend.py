@@ -192,6 +192,7 @@ def check_runs(dir_path):
     
 @file_app.route('/upload', methods=['POST'])
 def upload_files():
+    data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
@@ -199,6 +200,11 @@ def upload_files():
 
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
+        if data_type == 'fieldDesign':
+            filename = 'field_design.csv'
+        elif data_type == 'gcpLocations':
+            filename = 'gcp_locations.csv'
+        
         file_path = os.path.join(full_dir_path, filename)
 
         if upload_new_files_only and os.path.isfile(file_path):
@@ -1098,7 +1104,7 @@ def train_model():
         labels_arg = " ".join(labels)
         
         # other training args
-        container_dir = Path('/app/mnt')
+        container_dir = Path('/app/mnt/GEMINI-App-Data')
         pretrained = "/app/train/yolov8n.pt"
         save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
         scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
@@ -1251,7 +1257,7 @@ def locate_plants():
     id = request.json['id']
     
     # other args
-    container_dir = Path('/app/mnt')
+    container_dir = Path('/app/mnt/GEMINI-App-Data')
     images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
     disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
     configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
@@ -1265,12 +1271,16 @@ def locate_plants():
     save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
     save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}')
-    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'best.pt'
+    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt'
     
     # save logs file
     data = {"model": [id], "date": [date]}
     with open(save_locate/"logs.yaml", "w") as file:
         yaml.dump(data, file, default_flow_style=False)
+        
+    # create progress file
+    with open(save_locate/"locate_progress.txt", "w") as file:
+        pass
     
     # run locate
     if disparity.exists():
@@ -1280,13 +1290,14 @@ def locate_plants():
         f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
         f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
         )
-    else:
+    else:   
         cmd = (
         f"docker exec locate-extract "
         f"python -W ignore /app/locate.py "
         f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
         f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
         )
+    print(cmd)
 
     try:
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1337,103 +1348,102 @@ def get_extract_progress():
 def extract_traits():
     global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract
     
-    # recieve parameters
-    summary = request.json['summary']
-    batch_size = int(request.json['batchSize'])
-    model = request.json['model']
-    trait = request.json['trait']
-    trait_extract = request.json['trait']
-    date = request.json['date']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    location = request.json['location']
-    population = request.json['population']
-    platform = request.json['platform']
-    sensor = request.json['sensor']
-    
-    # extract model and summary information
-    pattern = r"/[^/]+-([\w]+?)/weights"
-    date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
-    locate_pattern = r"Locate-(\w+)/"
-    match = re.search(pattern, str(model))
-    match_date = re.search(date_pattern, str(summary))
-    match_locate_id = re.search(locate_pattern, str(summary))
-    model_id = match.group(1)
-    summary_date = match_date.group()
-    locate_id = match_locate_id.group(1)
-    
-    # other args
-    container_dir = Path('/app/mnt')
-    summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'best.pt'
-    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
-    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
-    metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-    save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
-    save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
-    temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
-    temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
-    temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
-    save_extract.mkdir(parents=True, exist_ok=True)
-    
-    # check if date is emerging
-    emerging = date in summary
-    
-    # run extract
-    if emerging:
-        if disparity.exists():
-            cmd = (
-                f"docker exec locate-extract /bin/sh -c \""
-                f". /miniconda/etc/profile.d/conda.sh && "
-                f"conda activate env && "
-                f"exec python -W ignore /app/extract.py "
-                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
-            )
-        else:
-            cmd = (
-                f"docker exec locate-extract /bin/sh -c \""
-                f". /miniconda/etc/profile.d/conda.sh && "
-                f"conda activate env && "
-                f"exec python -W ignore /app/extract.py "
-                f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
-            )
-    else:
-        if disparity.exists():
-            cmd = (
-                f"docker exec locate-extract /bin/sh -c \""
-                f". /miniconda/etc/profile.d/conda.sh && "
-                f"conda activate env && "
-                f"exec python -W ignore /app/extract.py "
-                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
-            )
-        else:
-            cmd = (
-                f"docker exec locate-extract /bin/sh -c \""
-                f". /miniconda/etc/profile.d/conda.sh && "
-                f"conda activate env && "
-                f"exec python -W ignore /app/extract.py "
-                f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
-            )
-    print(cmd)
-        
     try:
+        # recieve parameters
+        summary = request.json['summary']
+        batch_size = int(request.json['batchSize'])
+        model = request.json['model']
+        trait = request.json['trait']
+        trait_extract = request.json['trait']
+        date = request.json['date']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        location = request.json['location']
+        population = request.json['population']
+        platform = request.json['platform']
+        sensor = request.json['sensor']
+        
+        # extract model and summary information
+        pattern = r"/[^/]+-([\w]+?)/weights"
+        date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
+        locate_pattern = r"Locate-(\w+)/"
+        match = re.search(pattern, str(model))
+        match_date = re.search(date_pattern, str(summary))
+        match_locate_id = re.search(locate_pattern, str(summary))
+        model_id = match.group(1)
+        summary_date = match_date.group()
+        locate_id = match_locate_id.group(1)
+        
+        # other args
+        container_dir = Path('/app/mnt/GEMINI-App-Data')
+        summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+        model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'best.pt'
+        images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
+        plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
+        metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+        save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
+        save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
+        temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
+        save_extract.mkdir(parents=True, exist_ok=True)
+        
+        # check if date is emerging
+        emerging = date in summary
+        
+        # run extract
+        if emerging:
+            if disparity.exists():
+                cmd = (
+                    f"docker exec locate-extract /bin/sh -c \""
+                    f". /miniconda/etc/profile.d/conda.sh && "
+                    f"conda activate env && "
+                    f"exec python -W ignore /app/extract.py "
+                    f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                )
+            else:
+                cmd = (
+                    f"docker exec locate-extract /bin/sh -c \""
+                    f". /miniconda/etc/profile.d/conda.sh && "
+                    f"conda activate env && "
+                    f"exec python -W ignore /app/extract.py "
+                    f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+                )
+        else:
+            if disparity.exists():
+                cmd = (
+                    f"docker exec locate-extract /bin/sh -c \""
+                    f". /miniconda/etc/profile.d/conda.sh && "
+                    f"conda activate env && "
+                    f"exec python -W ignore /app/extract.py "
+                    f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                )
+            else:
+                cmd = (
+                    f"docker exec locate-extract /bin/sh -c \""
+                    f". /miniconda/etc/profile.d/conda.sh && "
+                    f"conda activate env && "
+                    f"exec python -W ignore /app/extract.py "
+                    f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                )
+        print(cmd)
+        
         process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.stdout.decode('utf-8')
-        # print(cmd)
-        # output = 'test'
         return jsonify({"message": "Extract has started", "output": output}), 202
+    
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
-        return jsonify({"error": error_output}), 500
+        return jsonify({"status": "error", "message": str(error_output)}), 400
     
 @file_app.route('/stop_extract', methods=['POST'])
 def stop_extract():

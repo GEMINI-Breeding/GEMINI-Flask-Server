@@ -197,3 +197,4 @@ dependencies:
       - zipp==3.16.2
       - opencv-python
       - tqdm
+      - pyyaml
