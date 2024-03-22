@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+pushd /home/gemini/GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
+# bash ./install_flask_server.sh
 
 # echo current directory
 echo "Current directory: $(pwd)"
