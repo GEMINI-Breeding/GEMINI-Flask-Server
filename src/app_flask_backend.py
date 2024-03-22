@@ -342,7 +342,6 @@ def process_images():
 
     if len(files) == 0:
         raise Exception("Invalid selections: no files found in folder.")
-
     for filename in files:
         if filename.lower().endswith((".jpg", ".jpeg", ".png")):
             # print("Processing image: " + filename)
