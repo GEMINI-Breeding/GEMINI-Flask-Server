@@ -39,6 +39,13 @@ import concurrent.futures
 import argparse
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
 from scripts.orthomosaic_generation import run_odm
+from tqdm import tqdm
+import numpy as np
+import multiprocessing
+from multiprocessing import active_children
+
+import base64
+import io
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -51,6 +58,13 @@ training_stopped_event = threading.Event()
 def serve_files(filename):
     global data_root_dir
     return send_from_directory(data_root_dir, filename)
+
+# endpoint to serve image in memory
+@file_app.route('/images/<path:filename>')
+def serve_image(filename):
+    global image_dict
+    return image_dict[filename]
+    
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
@@ -293,18 +307,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     _, _, distance = geod.inv(lon1, lat1, lon2, lat2)
     return distance
 
-@file_app.route('/process_images', methods=['POST'])
-def process_images():
-    global data_root_dir
-    # receive the parameters
-    location = request.json['location']
-    population = request.json['population']
-    date = request.json['date']
-    radius_meters = request.json['radius_meters']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    sensor = request.json['sensor']
-    platform = request.json['platform']
+def collect_gcp_candidate(radius_meters, year, experiment, location, population, date, platform, sensor):
+    global image_dict
 
     prefix = data_root_dir+'/Raw'
     image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
@@ -338,18 +342,45 @@ def process_images():
 
     # Process each image in the folder
     files = os.listdir(image_folder)
-    files.sort()
+    
+    file_filtered = []
+    for filename in files:
+        if 'mask' not in filename:
+            file_ext = os.path.splitext(filename)[1]
+            if file_ext.lower() in ['.jpg', '.jpeg', '.png']:
+                file_filtered.append(filename)
+    file_filtered.sort()
+    files = file_filtered
 
     if len(files) == 0:
         raise Exception("Invalid selections: no files found in folder.")
-    for filename in files:
-        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+    # Check if there are npy file that contains the image names
+
+    npy_path = os.path.join(image_folder, '../image_names_final.npy')
+    if os.path.exists(npy_path):
+        saved_dict = np.load(npy_path, allow_pickle=True).item()
+        saved_files = saved_dict['files']
+        # Check if the files are the same
+        if len(saved_files) == len(files):
+            # Then just use the saved files
+            selected_images = saved_dict['selected_images']
+
+    if selected_images == []:
+        #image_dict = {}
+        for filename in tqdm(files):
             # print("Processing image: " + filename)
             image_path = os.path.join(image_folder, filename)
 
             # Extract GPS coordinates from EXIF data
             image = Image.open(image_path)
-
+            
+            if 0:
+                buf = io.BytesIO()
+                image.save(buf, format='PNG')
+                image_bytes = buf.getvalue()
+                base64_encoded_result = base64.b64encode(image_bytes)
+                image_dict[image_path] = base64_encoded_result
+            
             # Get image dimensions
             width, height = image.size
 
@@ -384,10 +415,87 @@ def process_images():
                         'naturalHeight': height
                     })
 
+                    # Save the selected images to a dict
+                    if selected_images != []:
+                        # rename the older file if it exists
+                        np.save(npy_path, {'files': files, 'selected_images': selected_images})
+
+    # Save the selected images to a dict
+    if selected_images != []:
+        if os.path.exists(npy_path):
+            last_npy_path = os.path.join(image_folder, '../image_names_final.npy')
+            os.rename(npy_path, last_npy_path) 
+
+
+@file_app.route('/process_images', methods=['POST'])
+def process_images():
+    global data_root_dir
+    # receive the parameters
+    location = request.json['location']
+    population = request.json['population']
+    date = request.json['date']
+    radius_meters = request.json['radius_meters']
+    year = request.json['year']
+    experiment = request.json['experiment']
+    sensor = request.json['sensor']
+    platform = request.json['platform']
+
+    prefix = data_root_dir+'/Raw'
+    image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+
+    # Check if the process is already running
+    is_running = False
+    for p in active_children():
+        if p.name == 'collect_gcp_candidate':
+            is_running = True
+
+    if is_running==False:
+        # Remove previous npy files for debugging
+        if 0:
+            npy_path = os.path.join(image_folder, '../image_names.npy')
+            if os.path.exists(npy_path):
+                os.remove(npy_path)
+            npy_path = npy_path.replace(".npy", "_prev.npy")
+            if os.path.exists(npy_path):
+                os.remove(npy_path)
+            if os.path.exists(npy_path.replace("prev", "final")):
+                os.remove(npy_path.replace("prev", "final"))
+            
+
+        # Run the function to load the images in using process deamon
+        p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(radius_meters, year, experiment, location, population, date, platform, sensor))
+        p.start()
+        print("Process started")
+
+    # Check if there are npy file that contains the image names
+    npy_path = os.path.join(image_folder, '../image_names_final.npy')
+    if os.path.exists(npy_path):
+        p.join()
+        status = "DONE"
+        pass
+    else:
+        npy_path = npy_path.replace("final.npy", ".npy")
+        if os.path.exists(npy_path):
+            status = "RUNNING"
+        else:
+            selected_images = []
+            files = []
+            status = "DONE"
+
+    try:
+        saved_dict = np.load(npy_path, allow_pickle=True).item()
+        files = saved_dict['files']
+        selected_images = saved_dict['selected_images']
+    except Exception as e:
+        print(e)
+        selected_images = []
+        files = []
+        status = "DONE"
+
     # Return the selected images and their corresponding GPS coordinates
     return jsonify({'selected_images': selected_images,
-                    'num_total': len(files)}), 200
-
+                    'num_total': len(files),
+                    'status':status}), 200
 
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff(dir_path):
@@ -1513,7 +1621,7 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-App-Data',required=False)
-    parser.add_argument('--port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
     args = parser.parse_args()
 
     # Print the arguments to the console
