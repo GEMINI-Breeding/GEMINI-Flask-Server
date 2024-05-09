@@ -43,7 +43,7 @@ from tqdm import tqdm
 import numpy as np
 import multiprocessing
 from multiprocessing import active_children
-
+import re
 
 # GEMINI Functions
 from scripts.utils import process_directories_in_parallel
@@ -1468,20 +1468,32 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 # app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
+    if 0:
+        # Get current script dir
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        # Get default data_root_dir
+        with open(f'{script_dir}/../../gemini-app/package.json', 'r') as file:
+            content = file.read()
+            match = re.search(r'run_flask_server.sh (\S+) \d+', content)
+            if match:
+                print(match.group(1))
+                # data_root_dir = match.group(1)
 
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-App-Data',required=False)
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
     parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"data_root_dir: {args.data_root_dir}")
     print(f"port: {args.port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
     data_root_dir = args.data_root_dir
+    if "~" in data_root_dir:
+        data_root_dir = os.path.expanduser(data_root_dir)
+    print(f"data_root_dir: {data_root_dir}")
 
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
