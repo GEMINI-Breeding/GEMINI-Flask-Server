@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-pushd /home/gemini/GEMINI-Flask-Server # Change to the directory of GEMINI-Flask-Server
-# bash ./install_flask_server.sh
-
 # echo current directory
 echo "Current directory: $(pwd)"
-
 # Change to the directory of GEMINI-Flask-Server
 pushd $(pwd)/../GEMINI-Flask-Server 
+# bash ./install_flask_server.sh
 
 # Read conda path from your ~/.bashrc and parse the conda path before :$PATH
 conda_path=$(grep -oP 'export PATH="\K[^:]+/bin' ~/.bashrc)
@@ -21,7 +18,7 @@ if [ -z "$1" ]; then
     if [ ! -d "$data_root_dir" ]; then
         echo "The data_root_dir does not exist: $data_root_dir"
         # Try default data_root_dir
-        data_root_dir="/home/GEMINI/GEMINI-Data"
+        data_root_dir="/home/GEMINI/GEMINI-App-Data"
     fi
 else
     data_root_dir=$1

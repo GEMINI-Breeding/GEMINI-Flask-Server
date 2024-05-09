@@ -9,14 +9,21 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 from numpy import std
+from tqdm import tqdm
 
 def _copy_image(src_folder, dest_folder, image_name):
     
     src_path = os.path.join(src_folder, image_name)
     dest_path = os.path.join(dest_folder, image_name)
 
-    if not os.path.exists(dest_path):
-        shutil.copy(src_path, dest_path)
+    if 1:
+        if not os.path.exists(dest_path):
+            shutil.copy(src_path, dest_path)
+    else:
+        # Just run symlink
+        if not os.path.exists(dest_path):
+            os.symlink(src_path, dest_path)
+            
 
 def _create_directory_structure(args):
     
@@ -41,14 +48,19 @@ def _create_directory_structure(args):
     image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
     print(f"Image Path: {image_pth}")
     images = os.listdir(os.path.join(image_pth))
-    images = [x for x in images if x.endswith('.JPG') or x.endswith('.jpg') or x.endswith('.tif') or x.endswith('.TIF')]
+    extensions = ('.jpg', '.tif','.png')
+    images = [x for x in images if x.lower().endswith(extensions)]
 
-    # Copy the images to the temporary directory
-    with ThreadPoolExecutor() as executor:
-        executor.map(lambda im_name: _copy_image(image_pth, 
-                                            os.path.join(pth, 'code', 'images'), 
-                                            im_name), 
-                                images)
+    if 0:
+        # Copy the images to the temporary directory
+        with ThreadPoolExecutor() as executor:
+            executor.map(lambda im_name: _copy_image(image_pth, 
+                                                os.path.join(pth, 'code', 'images'), 
+                                                im_name), 
+                                    images)
+    else:
+        for im_name in tqdm(images):
+            _copy_image(image_pth, os.path.join(pth, 'code', 'images'), im_name)
 
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
@@ -108,7 +120,15 @@ def run_odm(args):
                 process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Low':
-                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                if 0:
+                    process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                else:
+                    #command = f"docker run -i --rm -v {pth} --gpus 1 opendronemap/odm:gpu --project-path {pth} --pc-quality medium --min-num-features 8000 --dsm"
+                    command = f"docker run -i --rm -v {os.path.join(pth,'code')} opendronemap/odm --project-path {pth} --pc-quality medium --min-num-features 8000 --dsm"
+                    print(command)
+                    # Parse this with space to list
+                    command = command.split()
+                    process = subprocess.Popen(command,stdout=f, stderr=subprocess.STDOUT)
                 print('Starting ODM with low options...')
             elif args.reconstruction_quality == 'High':
                 process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
