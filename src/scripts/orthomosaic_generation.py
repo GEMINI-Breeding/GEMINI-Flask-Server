@@ -126,6 +126,9 @@ def run_odm(args):
             elif args.reconstruction_quality == 'Low':
                 options = "--pc-quality medium --min-num-features 8000 --dsm" 
                 print('Starting ODM with low options...')
+            elif args.reconstruction_quality == 'Lowest':
+                options = "--fast-orthophoto"
+                print('Starting ODM with Lowest options...')
             elif args.reconstruction_quality == 'High':
                 options = "--pc-quality high --min-num-features 16000 --dsm"
                 print('Starting ODM with high options...')
