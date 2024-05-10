@@ -981,7 +981,7 @@ def prepare_labels(annotations, images_path):
         print(f'Error preparing labels for training: {e}')
 
 ### ROVER MODEL TRAINING ###
-def check_model_details(key):
+def check_model_details(key, value = None):
     
     # get base folder, args file and results file
     base_path = key.parent.parent
@@ -1008,8 +1008,20 @@ def check_model_details(key):
     match = re.search(r'-([A-Za-z0-9]+)$', run)
     id = match.group(1)
     
+    # get date(s)
+    if value is not None:
+        date = ', '.join(value)
+    else:
+        date = None
+    
+    # get platform
+    platform = base_path.parts[-3]
+    
+    # get sensor
+    sensor = base_path.parts[-2].split()[0]
+    
     # collate details
-    details = {'id': id, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
+    details = {'id': id, 'dates': date, 'platform': platform, 'sensor': sensor, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
     
     return details
 
@@ -1020,7 +1032,7 @@ def get_model_info():
     
     # iterate through each existing model
     for key in data:
-        details = check_model_details(Path(key))
+        details = check_model_details(Path(key), value = data[key])
         details_data.append(details)
 
     return jsonify(details_data)
@@ -1167,6 +1179,7 @@ def done_training():
         print(f"Sent SIGKILL to Python process in {container_name} container.")
         training_stopped_event.set()
         results_file = ''
+        subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
         
         # unlink files
         remove_files_from_folder(labels_train_folder)
@@ -1194,12 +1207,32 @@ def check_locate_details(key):
         data = yaml.safe_load(file)
     model_id = data['model']
     
+    
     # get stand count
     df = pd.read_csv(results_file)
     stand_count = len(df)
     
+    # get date
+    date = data['date']
+    
+    # get platform
+    platform = base_path.parts[-4]
+    
+    # get sensor
+    sensor = base_path.parts[-3]
+    
+    # get mAP of model
+    date_index = base_path.parts.index(date[0]) if date[0] in base_path.parts else None
+    if date_index and date_index > 0:
+        # Construct a new path from the parts up to the folder before the known date
+        root_path = Path(*base_path.parts[:date_index])
+        results_file = root_path / 'Training' / platform / f'{sensor} Plant Detection' / f'Plant-{model_id[0]}' / 'results.csv'
+    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    # values.extend([mAP])
+    
     # collate details
-    details = {'id': id, 'model': model_id, 'count': stand_count}
+    details = {'id': id, 'model': model_id, 'count': stand_count, 'date': date, 'platform': platform, 'sensor': sensor, 'performance': mAP}
     
     return details
 
@@ -1377,7 +1410,7 @@ def extract_traits():
         # other args
         container_dir = Path('/app/mnt/GEMINI-App-Data')
         summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-        model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'best.pt'
+        model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
         images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
         disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
         plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
@@ -1433,13 +1466,14 @@ def extract_traits():
                     f"exec python -W ignore /app/extract.py "
                     f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
                 )
         print(cmd)
         
-        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = process.stdout.decode('utf-8')
-        return jsonify({"message": "Extract has started", "output": output}), 202
+        with open(save_extract/"output.txt", "w") as file:
+            process = subprocess.run(cmd, shell=True, check=True, stdout=file, stderr=subprocess.PIPE)
+            output = process.stdout.decode('utf-8')
+            return jsonify({"message": "Extract has started", "output": output}), 202
     
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
