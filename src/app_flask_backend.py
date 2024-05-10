@@ -109,6 +109,12 @@ async def list_dirs_nested():
     combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
     return jsonify(combined_structure), 200
 
+@file_app.get("/list_dirs_nested_processed")
+async def list_dirs_nested_processed():
+    base_dir = Path(data_root_dir) / 'Processed'
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
+    return jsonify(combined_structure), 200
+
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
