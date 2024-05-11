@@ -43,9 +43,11 @@ from tqdm import tqdm
 import numpy as np
 import multiprocessing
 from multiprocessing import active_children
+import re
 
-import base64
-import io
+# GEMINI Functions
+from scripts.utils import process_directories_in_parallel
+from scripts.gcp_picker import collect_gcp_candidate
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -72,36 +74,11 @@ def list_dirs(dir_path):
     global data_root_dir
     dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
     if os.path.exists(dir_path):
-        dirs = next(os.walk(dir_path))[1]
-        return jsonify(dirs), 200
+        dirs = (entry.name for entry in os.scandir(dir_path) if entry.is_dir())
+        return jsonify(list(dirs)), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
-def build_nested_structure_sync(path, current_depth=0, max_depth=2):
-    if current_depth >= max_depth:
-        return {}
-    
-    structure = {}
-    for child in path.iterdir():
-        if child.is_dir():
-            structure[child.name] = build_nested_structure_sync(child, current_depth+1, max_depth)
-    return structure
-
-async def build_nested_structure(path, current_depth=0, max_depth=2):
-    loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor() as pool:
-        return await loop.run_in_executor(pool, build_nested_structure_sync, path, current_depth, max_depth)
-
-async def process_directories_in_parallel(base_dir, max_depth=2):
-    directories = [d for d in base_dir.iterdir() if d.is_dir()]
-    tasks = [build_nested_structure(d, 0, max_depth) for d in directories]
-    nested_structures = await asyncio.gather(*tasks)
-    
-    combined_structure = {}
-    for d, structure in zip(directories, nested_structures):
-        combined_structure[d.name] = structure
-    
-    return combined_structure
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
@@ -306,135 +283,9 @@ def run_script():
 
     return jsonify({'message': 'Script started'}), 200
 
-#### IMAGE PROCESSING ENDPOINTS ####
-# Function to calculate the distance between two coordinates using pyproj
-def calculate_distance(lat1, lon1, lat2, lon2):
-    geod = Geod(ellps='WGS84')
-    _, _, distance = geod.inv(lon1, lat1, lon2, lat2)
-    return distance
-
-def collect_gcp_candidate(radius_meters, year, experiment, location, population, date, platform, sensor):
-    global image_dict
-
-    prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
-
-    print("Loading predefined locations from CSV file...")
-
-    # Define the path to the predefined locations CSV file
-    predefined_locations_csv = os.path.join(prefix, year, experiment, location, population, 'gcp_locations.csv')
-
-    # Load predefined locations from CSV
-    if not os.path.isfile(predefined_locations_csv):
-        raise Exception("Invalid selections: no gcp_locations.csv file found.")
-
-    df = pd.read_csv(predefined_locations_csv)
-    labels = df['Label'].tolist()
-    latitudes = df['Lat_dec'].tolist()
-    longitudes = df['Lon_dec'].tolist()
-    predefined_locations = []
-    for i in range(len(labels)):
-        predefined_locations.append({
-            'label': labels[i],
-            'latitude': latitudes[i],
-            'longitude': longitudes[i]
-        })
-
-    # Select the image folder
-    if not os.path.isdir(image_folder):
-        raise Exception("Invalid selections: no image folder.")
-
-    selected_images = []
-
-    # Process each image in the folder
-    files = os.listdir(image_folder)
-    
-    file_filtered = []
-    for filename in files:
-        if 'mask' not in filename:
-            file_ext = os.path.splitext(filename)[1]
-            if file_ext.lower() in ['.jpg', '.jpeg', '.png']:
-                file_filtered.append(filename)
-    file_filtered.sort()
-    files = file_filtered
-
-    if len(files) == 0:
-        raise Exception("Invalid selections: no files found in folder.")
-    # Check if there are npy file that contains the image names
-
-    npy_path = os.path.join(image_folder, '../image_names_final.npy')
-    if os.path.exists(npy_path):
-        saved_dict = np.load(npy_path, allow_pickle=True).item()
-        saved_files = saved_dict['files']
-        # Check if the files are the same
-        if len(saved_files) == len(files):
-            # Then just use the saved files
-            selected_images = saved_dict['selected_images']
-
-    if selected_images == []:
-        #image_dict = {}
-        for filename in tqdm(files):
-            # print("Processing image: " + filename)
-            image_path = os.path.join(image_folder, filename)
-
-            # Extract GPS coordinates from EXIF data
-            image = Image.open(image_path)
-            
-            if 0:
-                buf = io.BytesIO()
-                image.save(buf, format='PNG')
-                image_bytes = buf.getvalue()
-                base64_encoded_result = base64.b64encode(image_bytes)
-                image_dict[image_path] = base64_encoded_result
-            
-            # Get image dimensions
-            width, height = image.size
-
-            exif_data = image._getexif()
-            if exif_data is not None and 34853 in exif_data:
-                gps_info = exif_data[34853]
-                latitude = gps_info[2][0] + gps_info[2][1] / 60 + gps_info[2][2] / 3600
-                longitude = gps_info[4][0] + gps_info[4][1] / 60 + gps_info[4][2] / 3600
-                latitude = float(latitude)
-                longitude = float(longitude) * -1
-
-                # Check if the image is within the predefined locations
-                closest_dist = float('inf')
-                closest_location = None
-                for location in predefined_locations:
-                    dist = calculate_distance(latitude, longitude, location['latitude'], location['longitude'])
-                    if dist <= radius_meters and dist < closest_dist:
-                        closest_dist = dist
-                        closest_location = location
-
-                if closest_location is not None:
-
-                    # Remove the first part of the image path
-                    image_path = image_path.replace(data_root_dir, '')
-
-                    selected_images.append({
-                        'image_path': image_path,
-                        'gcp_lat': closest_location['latitude'],
-                        'gcp_lon': closest_location['longitude'],
-                        'gcp_label': closest_location['label'],
-                        'naturalWidth': width,
-                        'naturalHeight': height
-                    })
-
-                    # Save the selected images to a dict
-                    if selected_images != []:
-                        # rename the older file if it exists
-                        np.save(npy_path, {'files': files, 'selected_images': selected_images})
-
-    # Save the selected images to a dict
-    if selected_images != []:
-        if os.path.exists(npy_path):
-            last_npy_path = os.path.join(image_folder, '../image_names_final.npy')
-            os.rename(npy_path, last_npy_path) 
-
 
 @file_app.route('/process_images', methods=['POST'])
-def process_images():
+def get_gcp_selcted_images():
     global data_root_dir
     # receive the parameters
     location = request.json['location']
@@ -467,31 +318,31 @@ def process_images():
             if os.path.exists(npy_path.replace("prev", "final")):
                 os.remove(npy_path.replace("prev", "final"))
             
-
         # Run the function to load the images in using process deamon
-        p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(radius_meters, year, experiment, location, population, date, platform, sensor))
+        p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
         p.start()
         print("Process started")
 
+    p.join()
     # Check if there are npy file that contains the image names
-    npy_path = os.path.join(image_folder, '../image_names_final.npy')
-    if os.path.exists(npy_path):
-        p.join()
-        status = "DONE"
-        pass
-    else:
-        npy_path = npy_path.replace("final.npy", ".npy")
-        if os.path.exists(npy_path):
-            status = "RUNNING"
-        else:
-            selected_images = []
-            files = []
-            status = "DONE"
-
+    npy_list = ["image_names_final.npy", "image_names.npy"]
     try:
-        saved_dict = np.load(npy_path, allow_pickle=True).item()
-        files = saved_dict['files']
-        selected_images = saved_dict['selected_images']
+        for npy_file in npy_list:
+            npy_path = os.path.join(image_folder, '../'+npy_file)
+            if os.path.exists(npy_path):
+                if "final" in npy_file:
+                    status = "DONE"
+                else:
+                    status = "RUNNING"
+                saved_dict = np.load(npy_path, allow_pickle=True).item()
+                files = saved_dict['files']
+                selected_images = saved_dict['selected_images']
+                break
+            else:
+                status = "RUNNING"
+                selected_images = []
+                files = []
+    
     except Exception as e:
         print(e)
         selected_images = []
@@ -1657,20 +1508,32 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 # app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
+    if 0:
+        # Get current script dir
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        # Get default data_root_dir
+        with open(f'{script_dir}/../../gemini-app/package.json', 'r') as file:
+            content = file.read()
+            match = re.search(r'run_flask_server.sh (\S+) \d+', content)
+            if match:
+                print(match.group(1))
+                # data_root_dir = match.group(1)
 
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='/home/GEMINI/GEMINI-App-Data',required=False)
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
     parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"data_root_dir: {args.data_root_dir}")
     print(f"port: {args.port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
     data_root_dir = args.data_root_dir
+    if "~" in data_root_dir:
+        data_root_dir = os.path.expanduser(data_root_dir)
+    print(f"data_root_dir: {data_root_dir}")
 
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 

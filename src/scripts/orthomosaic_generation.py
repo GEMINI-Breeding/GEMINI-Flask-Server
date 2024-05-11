@@ -9,6 +9,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 from numpy import std
+from tqdm import tqdm
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -35,20 +36,33 @@ def _create_directory_structure(args):
 
     if not os.path.exists(pth):
         os.makedirs(pth)
+        os.makedirs(os.path.join(pth, 'code'))
+
+ 
+    if 0:
+        # Copy the images to the temporary directory
+        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        print(f"Image Path: {image_pth}")
         os.makedirs(os.path.join(pth, 'code', 'images'))
+        images = os.listdir(os.path.join(image_pth))
+        extensions = ('.jpg', '.tif','.png')
+        images = [x for x in images if x.lower().endswith(extensions)]
+        if 0:
+            # Copy the images to the temporary directory
+            with ThreadPoolExecutor() as executor:
+                executor.map(lambda im_name: _copy_image(image_pth, 
+                                                    os.path.join(pth, 'code', 'images'), 
+                                                    im_name), 
+                                        images)
+        else:
+            print("Copying images")
+            for im_name in tqdm(images):
+                _copy_image(image_pth, os.path.join(pth, 'code', 'images'), im_name)
+    else:
+        # Do nothing because docker will mount the image folder to the container
+        pass
 
-    # Copy the images to the temporary directory
-    image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
-    print(f"Image Path: {image_pth}")
-    images = os.listdir(os.path.join(image_pth))
-    images = [x for x in images if x.endswith('.JPG') or x.endswith('.jpg') or x.endswith('.tif') or x.endswith('.TIF')]
-
-    # Copy the images to the temporary directory
-    with ThreadPoolExecutor() as executor:
-        executor.map(lambda im_name: _copy_image(image_pth, 
-                                            os.path.join(pth, 'code', 'images'), 
-                                            im_name), 
-                                images)
+    
 
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
@@ -102,19 +116,33 @@ def run_odm(args):
         
         log_file = os.path.join(pth, 'code', 'logs.txt')
         print('Project Path: ', pth)
-
+        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        options = ""
         with open(log_file, 'w') as f:
             if args.reconstruction_quality == 'Custom':
-                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                options = f"{args.custom_options} --dsm"
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Low':
-                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'medium', '--min-num-features', '8000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                options = "--pc-quality medium --min-num-features 8000 --dsm" 
                 print('Starting ODM with low options...')
+            elif args.reconstruction_quality == 'Lowest':
+                options = "--fast-orthophoto"
+                print('Starting ODM with Lowest options...')
             elif args.reconstruction_quality == 'High':
-                process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, '--pc-quality', 'high', '--min-num-features', '16000', '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                options = "--pc-quality high --min-num-features 16000 --dsm"
                 print('Starting ODM with high options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+            # Create the command
+            # It will mount pth to /datasets and image_pth to /datasets/code/images
+            # 'code' is the default project name
+            command = f"docker run -i --rm -v {pth}:/datasets -v {image_pth}:/datasets/code/images opendronemap/odm --project-path /datasets code {options}"
+            print(command)
+            # Parse this with space to list
+            command = command.split()
+            # Run the command
+            process = subprocess.Popen(command,stdout=f, stderr=subprocess.STDOUT)
             process.wait()
         
         _process_outputs(args)
