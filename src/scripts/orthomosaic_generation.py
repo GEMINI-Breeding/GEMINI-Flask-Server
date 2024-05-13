@@ -95,13 +95,13 @@ def _process_outputs(args):
     
  
     # Copy the orthomosaic and DEM to the output folder
-    shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-P4-RGB.tif'))
-    shutil.copy(dem_file, os.path.join(output_folder, args.date+'-P4-DEM.tif'))
+    shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-RGB.tif'))
+    shutil.copy(dem_file, os.path.join(output_folder, args.date+'-DEM.tif'))
     
     # Process pyramids
     print("Processing pyramids")
-    create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-P4-RGB-Pyramid.tif'))
-    create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-P4-DEM-Pyramid.tif'))
+    create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
+    create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
 
 
     # Copy the recipe file to the output folder

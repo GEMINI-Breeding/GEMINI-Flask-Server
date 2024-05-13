@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from werkzeug.utils import secure_filename
 
 # Local application/library specific imports
-from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
+from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
@@ -363,7 +363,7 @@ def process_drone_tiff():
         rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
         geojson_path = os.path.join(image_folder,'../../../Plot-Attributes-WGS84.geojson')
         date = image_folder.split("/")[-3]
-        output_geojson = os.path.join(image_folder,f"{date}-{sensor}-Traits-WGS84.geojson")
+        output_geojson = os.path.join(image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
         process_tiff(tiff_files_rgb=rgb_tif_file,
                      tiff_files_dem=dem_tif_file,
                      tiff_files_thermal=thermal_tif_file,
@@ -545,12 +545,19 @@ def filter_images(geojson_features, year, experiment, location, population, date
     filtered_labels = filtered_gdf['Label'].tolist()
     filtered_plots = filtered_gdf['Plot'].tolist()
 
-    filtered_images = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images, filtered_labels, filtered_plots)]
+    # Create a list of dictionaries for the filtered images
+    filtered_images_new = []
+    for image_name in  filtered_images:
+        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, sensor, image_name)
+        image_path_rel_to_data_root = os.path.relpath(image_path_abs, data_root_dir)
+        filtered_images_new.append(image_path_rel_to_data_root)
+
+    imageDataQuery = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images_new, filtered_labels, filtered_plots)]
 
     # Sort the filtered_images by label
-    filtered_images = sorted(filtered_images, key=lambda x: x['label'])
+    imageDataQuery = sorted(imageDataQuery, key=lambda x: x['label'])
 
-    return filtered_images
+    return imageDataQuery
 
 @file_app.route('/query_images', methods=['POST'])
 def query_images():
@@ -563,9 +570,14 @@ def query_images():
     date = data['selectedDateQuery']
     sensor = data['selectedSensorQuery']
     middle_image = data['middleImage']
+    platform = data['selectedPlatformQuery']
 
-    filtered_images = filter_images(geojson_features, year, experiment, location, 
-                                    population, date, sensor, middle_image)
+    if platform == 'Drone':
+        # Do Drone Image query
+        filtered_images = query_drone_images(data,data_root_dir)
+    else:
+        filtered_images = filter_images(geojson_features, year, experiment, location, 
+                                        population, date, sensor, middle_image)
 
     return jsonify(filtered_images)
 
