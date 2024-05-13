@@ -1,51 +1,34 @@
-from concurrent.futures import thread
-from enum import unique
-from math import e
+# Standard library imports
 import os
 import re
 import subprocess
 import threading
-import uvicorn
-import signal
-import flask
 import time
 import glob
 import yaml
 import random
 import string
 import shutil
-import asyncio
+import argparse
+import multiprocessing
+from multiprocessing import active_children
+from pathlib import Path
 
-from flask import Flask, send_from_directory, jsonify, request, send_file
+# Third-party library imports
+import uvicorn
+import json
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+from flask import Flask, make_response, send_from_directory, jsonify, request, send_file
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from subprocess import CalledProcessError
-import shutil
-
-import csv
-import json
-import traceback
-from PIL import Image
-from pyproj import Geod
-import pandas as pd
-import geopandas as gpd
-
 from werkzeug.utils import secure_filename
-from pathlib import Path
-import concurrent.futures
 
-import argparse
+# Local application/library specific imports
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
-from scripts.orthomosaic_generation import run_odm
-from tqdm import tqdm
-import numpy as np
-import multiprocessing
-from multiprocessing import active_children
-import re
-
-# GEMINI Functions
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 
@@ -715,22 +698,21 @@ def run_odm_endpoint():
         reconstruction_quality = 'Low'
 
     # Run ODM
-    args = argparse.Namespace()
-    args.data_root_dir = data_root_dir
-    args.location = location
-    args.population = population
-    args.date = date
-    args.year = year
-    args.experiment = experiment
-    args.platform = platform
-    args.sensor = sensor
-    args.temp_dir = temp_dir
-    args.reconstruction_quality = reconstruction_quality
-    args.custom_options = custom_options
+    args = make_odm_args(data_root_dir, 
+                         location, 
+                         population, 
+                         date, 
+                         year, 
+                         experiment, 
+                         platform, 
+                         sensor, 
+                         temp_dir, 
+                         reconstruction_quality, 
+                         custom_options)
     
     try:
         # Reset ODM
-        reset_odm()
+        reset_odm(data_root_dir)
         
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,))
@@ -755,19 +737,16 @@ def run_odm_endpoint():
         thread.join()
         return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 400)
 
-def reset_odm():
-    # Delete existing folders
-    temp_path = os.path.join(data_root_dir, 'temp')
-    while os.path.exists(temp_path):
-        shutil.rmtree(temp_path)
+
         
 @file_app.route('/stop_odm', methods=['POST'])
 def stop_odm():
+    global data_root_dir
     try:
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
-        reset_odm()
+        reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500

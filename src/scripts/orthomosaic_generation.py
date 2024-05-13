@@ -1,15 +1,23 @@
-from glob import glob
-from math import log
+# Standard library imports
 import os
 import shutil
 import subprocess
 import sys
-import cv2
 import argparse
+from glob import glob
+from math import log
 from concurrent.futures import ThreadPoolExecutor
 
+# Third-party library imports
+import cv2
 from numpy import std
 from tqdm import tqdm
+import yaml
+
+# Local application/library specific imports
+# Add current directory to path
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from create_geotiff_pyramid import create_tiled_pyramid
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -62,12 +70,11 @@ def _create_directory_structure(args):
         # Do nothing because docker will mount the image folder to the container
         pass
 
-    
-
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
     print(f"GCP Path: {gcp_pth}")
     shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
+
 
 def _process_outputs(args):
 
@@ -86,24 +93,126 @@ def _process_outputs(args):
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
+ 
+    # Copy the orthomosaic and DEM to the output folder
     shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-RGB.tif'))
     shutil.copy(dem_file, os.path.join(output_folder, args.date+'-DEM.tif'))
+    
+    # Process pyramids
+    print("Processing pyramids")
+    create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
+    create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
+
+
+    # Copy the recipe file to the output folder
+    shutil.copy(os.path.join(pth, 'code', 'recipe.yaml'), os.path.join(output_folder, 'recipe.yaml'))
 
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
     # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
     #     os.makedirs(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
     # shutil.move(os.path.join(pth, 'code'), os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
-
-    # Delete the temporary directory
-    shutil.rmtree(pth)
     
+    # Delete the temporary directory
+    # shutil.rmtree(pth)
+    print("Processing complete.")
+    return True
+
+
+
+
+def check_nvidia_smi():
+    '''
+    Check if nvidia-smi is installed on the system.
+    '''
+    if shutil.which('nvidia-smi') is None:
+        print("nvidia-smi is not installed. Use CPU for processing.")
+        sys.exit(1)
+        return False
+    else:
+        print("nvidia-smi is installed. Use GPU for processing if nvidia-docker is installed.")
+        return True
+    
+def make_odm_args_from_path(path):
+    '''
+    Generate an argparse.Namespace object from a path to the images.
+    Example path string: Raw/2022/GEMINI/Davis/Legumes/2022-06-20/Drone/RGB/Images
+    '''
+    parts = path.split('/')
+    sensor = parts[-2]
+    platform = parts[-3]
+    date = parts[-4]
+    population = parts[-5]
+    location = parts[-6]
+    experiment = parts[-7]
+    year = parts[-8]
+    data_root_dir = parts[-9]
+    temp_dir = os.path.join(data_root_dir, 'temp', 'project')
+
+    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, 'Low', [])
+
+
+
+def make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options):
+    # Run ODM
+    args = argparse.Namespace()
+    args.data_root_dir = data_root_dir
+    args.location = location
+    args.population = population
+    args.date = date
+    args.year = year
+    args.experiment = experiment
+    args.platform = platform
+    args.sensor = sensor
+    args.temp_dir = temp_dir
+    args.reconstruction_quality = reconstruction_quality
+    args.custom_options = custom_options
+
+    return args
+
+def reset_odm(data_root_dir):
+    # Delete existing folders
+    temp_path = os.path.join(data_root_dir, 'temp')
+    while os.path.exists(temp_path):
+        shutil.rmtree(temp_path)
+
+def odm_args_checker(arg1, arg2):
+    """
+    Check if two argparse.Namespace objects are equal based on certain attributes.
+    """
+    return all([
+        arg1.location == arg2.location,
+        arg1.population == arg2.population,
+        arg1.date == arg2.date,
+        arg1.platform == arg2.platform,
+        arg1.sensor == arg2.sensor
+    ])
+
+
 def run_odm(args):
     '''
     Run ODM on the temporary directory.
     '''
     
+    # 이미 처리된 데이터가 있는데 Processed 폴더에는 없는지 확인
+    # temp를 지우지 말고 Processed에 복사 하고 끝낸다.
+    # Check if the log file exists
+    pth = args.temp_dir
+    recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+    if os.path.exists(recipe_file):
+        # Read the recipe file
+        with open(recipe_file, 'r') as file:
+            data = yaml.load(file, Loader=yaml.FullLoader)
+            image_pth = data['image_pth']
+            prev_arg = make_odm_args_from_path(image_pth)
+            if odm_args_checker(prev_arg, args):
+                try:
+                    _process_outputs(args)
+                    print("Already processed. Copying to Processed folder.")
+                    return
+                except Exception as e:
+                    print(f"Error in thread: {e}")
+                
     try:
-
         _create_directory_structure(args)
 
         # Run ODM
@@ -114,10 +223,11 @@ def run_odm(args):
         if os.path.basename(pth) != 'project':
             pth = os.path.join(pth, 'project')
         
-        log_file = os.path.join(pth, 'code', 'logs.txt')
+        
         print('Project Path: ', pth)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         options = ""
+        log_file = os.path.join(pth, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
             if args.reconstruction_quality == 'Custom':
                 #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
@@ -127,7 +237,7 @@ def run_odm(args):
                 options = "--pc-quality medium --min-num-features 8000 --dsm" 
                 print('Starting ODM with low options...')
             elif args.reconstruction_quality == 'Lowest':
-                options = "--fast-orthophoto"
+                options = "--fast-orthophoto --dsm"
                 print('Starting ODM with Lowest options...')
             elif args.reconstruction_quality == 'High':
                 options = "--pc-quality high --min-num-features 16000 --dsm"
@@ -136,9 +246,27 @@ def run_odm(args):
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            # 'code' is the default project name
-            command = f"docker run -i --rm -v {pth}:/datasets -v {image_pth}:/datasets/code/images opendronemap/odm --project-path /datasets code {options}"
-            print(command)
+            volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro" 
+            docker_image = "opendronemap/odm"
+            command = f"docker run --memory 65536M -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # Save image_pth and  docker command to recipe yaml file
+            data = {
+                'year': args.year,
+                'experiment': args.experiment,
+                'location': args.location,
+                'population': args.population,
+                'date': args.date,
+                'platform': args.platform,
+                'sensor': args.sensor,
+                'reconstruction_quality': args.reconstruction_quality,
+                'custom_options': args.custom_options,
+                'image_pth': image_pth,
+                'command': command,
+            }
+            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            with open(recipe_file, 'w') as file:
+                yaml.dump(data, file, sort_keys=False)
+
             # Parse this with space to list
             command = command.split()
             # Run the command
