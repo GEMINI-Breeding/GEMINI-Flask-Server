@@ -338,20 +338,22 @@ def get_gcp_selcted_images():
                     'status':status}), 200
 
 @file_app.route('/process_drone_tiff', methods=['POST'])
-def process_drone_tiff(dir_path):
+def process_drone_tiff():
+    global now_drone_processing
+    
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
     date = request.json['date']
     year = request.json['year']
     experimnent = request.json['experiment']
+    platform = request.json['platform']
+    sensor = request.json['sensor']
 
     prefix = data_root_dir+'/Processed'
-    image_folder = os.path.join(prefix, year, experimnent, location, population, date, 'Drone')
-    dir_path = os.path.join(prefix, year, experimnent, location, population, date)
+    image_folder = os.path.join(prefix, year, experimnent, location, population, date, platform, sensor)
 
     # Check if already in processing
-    global now_drone_processing
     if now_drone_processing:
         return jsonify({'message': 'Already in processing'}), 400
     
@@ -359,13 +361,12 @@ def process_drone_tiff(dir_path):
     
     try: 
         rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
-        geojson_path = os.path.join(dir_path,'Plot-Attributes-WGS84.geojson')
-        date = dir_path.split("/")[-1]
-        sensor = "Drone"
-        output_geojson = os.path.join(os.path.dirname(image_folder),"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
-        process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tif_file),
-                     tiff_files_dem=os.path.join(image_folder,dem_tif_file),
-                     tiff_files_thermal=os.path.join(image_folder,thermal_tif_file),
+        geojson_path = os.path.join(image_folder,'../../../Plot-Attributes-WGS84.geojson')
+        date = image_folder.split("/")[-3]
+        output_geojson = os.path.join(image_folder,f"{date}-{sensor}-Traits-WGS84.geojson")
+        process_tiff(tiff_files_rgb=rgb_tif_file,
+                     tiff_files_dem=dem_tif_file,
+                     tiff_files_thermal=thermal_tif_file,
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
@@ -373,6 +374,7 @@ def process_drone_tiff(dir_path):
 
     except Exception as e:
         now_drone_processing = False
+        print(e)
         return jsonify({'message': str(e)}), 400
 
 

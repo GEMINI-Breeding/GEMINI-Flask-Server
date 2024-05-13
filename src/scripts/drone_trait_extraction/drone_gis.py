@@ -24,7 +24,7 @@ def find_drone_tiffs(image_folder:str) -> [str, str]:
     rgb_tiff_file = None
     for file in files:
         if "RGB" in file and "FLIR" not in file:
-            rgb_tiff_file = file
+            rgb_tiff_file = os.path.join(image_folder, file)
             break
 
     if rgb_tiff_file is None:
@@ -36,7 +36,7 @@ def find_drone_tiffs(image_folder:str) -> [str, str]:
     dem_tiff_file = None
     for file in files:
         if "DEM" in file:
-            dem_tiff_file = file
+            dem_tiff_file = os.path.join(image_folder, file)
             break
     
     if dem_tiff_file is None:
@@ -50,7 +50,7 @@ def find_drone_tiffs(image_folder:str) -> [str, str]:
     thermal_tiff_file = None
     for file in files:
         if "FLIR" in file:
-            thermal_tiff_file = file
+            thermal_tiff_file = os.path.join(image_folder, file)
             break
 
     if thermal_tiff_file is None:
@@ -457,6 +457,8 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             print(f"Load thermal... {tiff_thermal}",flush=True)
             dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
             data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
+        else:
+            print("No thermal file found. Skipping thermal analysis.")
         
         print("Load images --- %s seconds ---" % (time.time() - start_time))
         start_time = time.time()
@@ -482,7 +484,6 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             for img_idx in tqdm(range(len(data_rgb))):
                 rgb = data_rgb[img_idx]
                 depth = data_depth[img_idx]
-                thermal = data_thermal[img_idx]
 
                 # Extract
                 rgb_img = rgb['img']
@@ -490,7 +491,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                 rgb_resized = cv2.resize(rgb_img,dsize=(depth_img.shape[1],depth_img.shape[0]))
                 mask = get_mask(rgb_resized)
                 
-                Vegetation_Fraction = np.sum(mask) / mask.size
+                Vegetation_Fraction = round(np.sum(mask) / mask.size,4)
                 total_vf.append(Vegetation_Fraction)
 
                 if tiff_dem:
@@ -518,22 +519,21 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                     depth_pixel_values = masked_depth_img[np.where(masked_depth_img != 0)].tolist()
                     base = np.quantile(depth_pixel_values,0.05)
                     height = np.quantile(depth_pixel_values,0.95)
-                    crop_height = height - base
-                    total_height.append(height - base)
+                    crop_height = round(height - base,4)
+                    total_height.append(crop_height)
                 else:
                     print("No depth file found. Skipping depth analysis.")
 
                 if tiff_thermal:
                     # Thermal Analysis
+                    thermal = data_thermal[img_idx]
                     thermal_img = thermal['img']
                     # Resize mask to thermal image size
                     thermal_mask = cv2.resize(mask,dsize=(thermal_img.shape[1],thermal_img.shape[0]))
                     masked_thermal_img = cv2.bitwise_and(thermal_img, thermal_img, mask=thermal_mask)
                     thermal_pixel_values = masked_thermal_img[np.where(masked_thermal_img != 0)].tolist()
-                    avg_temp = np.mean(thermal_pixel_values) 
+                    avg_temp = round(np.mean(thermal_pixel_values),2)
                     total_temperature.append(avg_temp)
-                else:
-                    print("No thermal file found. Skipping thermal analysis.")
 
 
                 bed_no = rgb['Bed']
