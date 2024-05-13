@@ -1,51 +1,34 @@
-from concurrent.futures import thread
-from enum import unique
-from math import e
+# Standard library imports
 import os
 import re
 import subprocess
 import threading
-import uvicorn
-import signal
-import flask
 import time
 import glob
 import yaml
 import random
 import string
 import shutil
-import asyncio
+import argparse
+import multiprocessing
+from multiprocessing import active_children
+from pathlib import Path
 
-from flask import Flask, send_from_directory, jsonify, request, send_file
+# Third-party library imports
+import uvicorn
+import json
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+from flask import Flask, make_response, send_from_directory, jsonify, request, send_file
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from subprocess import CalledProcessError
-import shutil
-
-import csv
-import json
-import traceback
-from PIL import Image
-from pyproj import Geod
-import pandas as pd
-import geopandas as gpd
-
 from werkzeug.utils import secure_filename
-from pathlib import Path
-import concurrent.futures
 
-import argparse
-from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs
-from scripts.orthomosaic_generation import run_odm
-from tqdm import tqdm
-import numpy as np
-import multiprocessing
-from multiprocessing import active_children
-import re
-
-# GEMINI Functions
+# Local application/library specific imports
+from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 
@@ -355,20 +338,22 @@ def get_gcp_selcted_images():
                     'status':status}), 200
 
 @file_app.route('/process_drone_tiff', methods=['POST'])
-def process_drone_tiff(dir_path):
+def process_drone_tiff():
+    global now_drone_processing
+    
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
     date = request.json['date']
     year = request.json['year']
     experimnent = request.json['experiment']
+    platform = request.json['platform']
+    sensor = request.json['sensor']
 
     prefix = data_root_dir+'/Processed'
-    image_folder = os.path.join(prefix, year, experimnent, location, population, date, 'Drone')
-    dir_path = os.path.join(prefix, year, experimnent, location, population, date)
+    image_folder = os.path.join(prefix, year, experimnent, location, population, date, platform, sensor)
 
     # Check if already in processing
-    global now_drone_processing
     if now_drone_processing:
         return jsonify({'message': 'Already in processing'}), 400
     
@@ -376,13 +361,12 @@ def process_drone_tiff(dir_path):
     
     try: 
         rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
-        geojson_path = os.path.join(dir_path,'Plot-Attributes-WGS84.geojson')
-        date = dir_path.split("/")[-1]
-        sensor = "Drone"
-        output_geojson = os.path.join(os.path.dirname(image_folder),"Results",f"{date}-{sensor}-Traits-WGS84.geojson")
-        process_tiff(tiff_files_rgb=os.path.join(image_folder,rgb_tif_file),
-                     tiff_files_dem=os.path.join(image_folder,dem_tif_file),
-                     tiff_files_thermal=os.path.join(image_folder,thermal_tif_file),
+        geojson_path = os.path.join(image_folder,'../../../Plot-Attributes-WGS84.geojson')
+        date = image_folder.split("/")[-3]
+        output_geojson = os.path.join(image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
+        process_tiff(tiff_files_rgb=rgb_tif_file,
+                     tiff_files_dem=dem_tif_file,
+                     tiff_files_thermal=thermal_tif_file,
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
@@ -390,6 +374,7 @@ def process_drone_tiff(dir_path):
 
     except Exception as e:
         now_drone_processing = False
+        print(e)
         return jsonify({'message': str(e)}), 400
 
 
@@ -560,12 +545,19 @@ def filter_images(geojson_features, year, experiment, location, population, date
     filtered_labels = filtered_gdf['Label'].tolist()
     filtered_plots = filtered_gdf['Plot'].tolist()
 
-    filtered_images = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images, filtered_labels, filtered_plots)]
+    # Create a list of dictionaries for the filtered images
+    filtered_images_new = []
+    for image_name in  filtered_images:
+        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, sensor, image_name)
+        image_path_rel_to_data_root = os.path.relpath(image_path_abs, data_root_dir)
+        filtered_images_new.append(image_path_rel_to_data_root)
+
+    imageDataQuery = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images_new, filtered_labels, filtered_plots)]
 
     # Sort the filtered_images by label
-    filtered_images = sorted(filtered_images, key=lambda x: x['label'])
+    imageDataQuery = sorted(imageDataQuery, key=lambda x: x['label'])
 
-    return filtered_images
+    return imageDataQuery
 
 @file_app.route('/query_images', methods=['POST'])
 def query_images():
@@ -578,9 +570,14 @@ def query_images():
     date = data['selectedDateQuery']
     sensor = data['selectedSensorQuery']
     middle_image = data['middleImage']
+    platform = data['selectedPlatformQuery']
 
-    filtered_images = filter_images(geojson_features, year, experiment, location, 
-                                    population, date, sensor, middle_image)
+    if platform == 'Drone':
+        # Do Drone Image query
+        filtered_images = query_drone_images(data,data_root_dir)
+    else:
+        filtered_images = filter_images(geojson_features, year, experiment, location, 
+                                        population, date, sensor, middle_image)
 
     return jsonify(filtered_images)
 
@@ -721,22 +718,21 @@ def run_odm_endpoint():
         reconstruction_quality = 'Low'
 
     # Run ODM
-    args = argparse.Namespace()
-    args.data_root_dir = data_root_dir
-    args.location = location
-    args.population = population
-    args.date = date
-    args.year = year
-    args.experiment = experiment
-    args.platform = platform
-    args.sensor = sensor
-    args.temp_dir = temp_dir
-    args.reconstruction_quality = reconstruction_quality
-    args.custom_options = custom_options
+    args = make_odm_args(data_root_dir, 
+                         location, 
+                         population, 
+                         date, 
+                         year, 
+                         experiment, 
+                         platform, 
+                         sensor, 
+                         temp_dir, 
+                         reconstruction_quality, 
+                         custom_options)
     
     try:
         # Reset ODM
-        reset_odm()
+        reset_odm(data_root_dir)
         
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,))
@@ -761,19 +757,16 @@ def run_odm_endpoint():
         thread.join()
         return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 400)
 
-def reset_odm():
-    # Delete existing folders
-    temp_path = os.path.join(data_root_dir, 'temp')
-    while os.path.exists(temp_path):
-        shutil.rmtree(temp_path)
+
         
 @file_app.route('/stop_odm', methods=['POST'])
 def stop_odm():
+    global data_root_dir
     try:
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
-        reset_odm()
+        reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
