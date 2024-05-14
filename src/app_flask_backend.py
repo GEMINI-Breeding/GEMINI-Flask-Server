@@ -516,7 +516,7 @@ def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
     return df.iloc[[middle_index]]  # Use iloc to select the middle row
 
-def filter_images(geojson_features, year, experiment, location, population, date, sensor, middle_image=False):
+def filter_images(geojson_features, year, experiment, location, population, date, platform, sensor, middle_image=False):
 
     global data_root_dir
 
@@ -548,7 +548,7 @@ def filter_images(geojson_features, year, experiment, location, population, date
     # Create a list of dictionaries for the filtered images
     filtered_images_new = []
     for image_name in  filtered_images:
-        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, sensor, image_name)
+        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, platform, sensor, image_name)
         image_path_rel_to_data_root = os.path.relpath(image_path_abs, data_root_dir)
         filtered_images_new.append(image_path_rel_to_data_root)
 
@@ -577,7 +577,7 @@ def query_images():
         filtered_images = query_drone_images(data,data_root_dir)
     else:
         filtered_images = filter_images(geojson_features, year, experiment, location, 
-                                        population, date, sensor, middle_image)
+                                        population, date, platform, sensor, middle_image)
 
     return jsonify(filtered_images)
 
