@@ -495,7 +495,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             print(f"Load thermal... {tiff_thermal}",flush=True)
             dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
             data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
-            loaded_gdal_dict = data_thermal
+            loaded_gdal_dict["data_thermal"] = data_thermal
         else:
             print("No thermal file found. Skipping thermal analysis.")
         
