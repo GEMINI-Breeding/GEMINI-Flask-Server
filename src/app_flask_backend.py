@@ -731,9 +731,6 @@ def run_odm_endpoint():
                          custom_options)
     
     try:
-        # Reset ODM
-        reset_odm(data_root_dir)
-        
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,))
         thread.start()
@@ -766,7 +763,7 @@ def stop_odm():
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
-        reset_odm(data_root_dir)
+        # reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500

@@ -95,8 +95,23 @@ def _process_outputs(args):
     
  
     # Copy the orthomosaic and DEM to the output folder
-    shutil.copy(ortho_file, os.path.join(output_folder, args.date+'-RGB.tif'))
-    shutil.copy(dem_file, os.path.join(output_folder, args.date+'-DEM.tif'))
+    # Check if the files exist
+    if os.path.exists(ortho_file):
+        output_path = os.path.join(output_folder, args.date+'-RGB.tif')
+        os.system(f'cp {ortho_file} {output_path}')
+    else:
+        print(f"Error: Orthomosaic file {ortho_file} does not exist.")
+        return False
+
+    if os.path.exists(dem_file):
+        output_path = os.path.join(output_folder, args.date+'-DEM.tif')
+        os.system(f'cp {dem_file} {output_path}')
+    else:
+        print(f"Error: DEM file {dem_file} does not exist.")
+        return False
+
+    
+    
     
     # Process pyramids
     print("Processing pyramids")
@@ -124,13 +139,15 @@ def check_nvidia_smi():
     '''
     Check if nvidia-smi is installed on the system.
     '''
-    if shutil.which('nvidia-smi') is None:
-        print("nvidia-smi is not installed. Use CPU for processing.")
-        sys.exit(1)
+    # Check the output of "docker run --rm --gpus all nvidia/cuda:11.0.3-base nvidia-smi"
+    try:
+        output = subprocess.check_output(['docker', 'run', '--rm', '--gpus', 'all', 'nvidia/cuda:11.0.3-base', 'nvidia-smi'])
+        if 'NVIDIA-SMI' in output.decode('utf-8'):
+            return True
+        else:
+            return False
+    except Exception as e:
         return False
-    else:
-        print("nvidia-smi is installed. Use GPU for processing if nvidia-docker is installed.")
-        return True
     
 def make_odm_args_from_path(path):
     '''
@@ -193,11 +210,13 @@ def run_odm(args):
     Run ODM on the temporary directory.
     '''
     
-    # 이미 처리된 데이터가 있는데 Processed 폴더에는 없는지 확인
-    # temp를 지우지 말고 Processed에 복사 하고 끝낸다.
+    # Check if the already processed data is not in the Processed folder
+    # Copy the temp to the Processed folder without deleting the temp, and finish
     # Check if the log file exists
+
     pth = args.temp_dir
     recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+    reset_odm_temp = False
     if os.path.exists(recipe_file):
         # Read the recipe file
         with open(recipe_file, 'r') as file:
@@ -205,13 +224,19 @@ def run_odm(args):
             image_pth = data['image_pth']
             prev_arg = make_odm_args_from_path(image_pth)
             if odm_args_checker(prev_arg, args):
-                try:
-                    _process_outputs(args)
-                    print("Already processed. Copying to Processed folder.")
-                    return
-                except Exception as e:
-                    print(f"Error in thread: {e}")
-                
+                _process_outputs(args)
+                print("Already processed. Copying to Processed folder.")
+                return
+            else:
+                # Reset the ODM if the arguments are different
+                reset_odm_temp = True
+    else:
+        reset_odm_temp = True
+
+    if reset_odm_temp:
+        # Reset the ODM
+        reset_odm(args.data_root_dir)
+
     try:
         _create_directory_structure(args)
 
@@ -229,26 +254,33 @@ def run_odm(args):
         options = ""
         log_file = os.path.join(pth, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
+            # See options from https://docs.opendronemap.org/arguments/
+            #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            common_options = "--dsm --orthophoto-resolution 2.0" # orthophoto-resolution gsd is usually 0.27cm/pixel
             if args.reconstruction_quality == 'Custom':
                 #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
-                options = f"{args.custom_options} --dsm"
+                options = f"{args.custom_options} {common_options}"
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Low':
-                options = "--pc-quality medium --min-num-features 8000 --dsm" 
+                options = f"--pc-quality medium --min-num-features 8000 {common_options}" 
                 print('Starting ODM with low options...')
             elif args.reconstruction_quality == 'Lowest':
-                options = "--fast-orthophoto --dsm"
+                options = f"--fast-orthophoto --dsm {common_options}"
                 print('Starting ODM with Lowest options...')
             elif args.reconstruction_quality == 'High':
-                options = "--pc-quality high --min-num-features 16000 --dsm"
+                options = f"--pc-quality high --min-num-features 16000 {common_options}"
                 print('Starting ODM with high options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro" 
-            docker_image = "opendronemap/odm"
-            command = f"docker run --memory 65536M -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            if check_nvidia_smi():
+                docker_image = "--gpus all opendronemap/odm:gpu"
+            else:
+                docker_image = "opendronemap/odm"
+
+            command = f"docker run -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
