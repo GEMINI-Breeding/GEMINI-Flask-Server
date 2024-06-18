@@ -292,10 +292,10 @@ def crop_geojson(dataset, mask_ds, image_type='rgb', plots = None, debug = False
             label = feature.items()['accession']
 
         data_dict = {
-            "Bed": feature.items()['Bed'],
-            "Tier": feature.items()['Tier'],
-            "Plot": feature.items()['Plot'],
-            "Label": feature.items()['Label'],
+            "Bed": bed,
+            "Tier": tier,
+            "Plot": plot,
+            "Label": label,
             "img": cropped_img,
             "minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY,
             "pixel_width": abs(pixel_width), "pixel_height": abs(pixel_height),
