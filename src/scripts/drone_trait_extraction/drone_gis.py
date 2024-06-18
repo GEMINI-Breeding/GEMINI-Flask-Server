@@ -261,6 +261,36 @@ def crop_geojson(dataset, mask_ds, image_type='rgb', plots = None, debug = False
 
         cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY, image_type=image_type)
 
+        # Check if bed key exists
+        if 'Bed' in feature.items():
+            bed = feature.items()['Bed']
+        elif 'column' in feature.items():
+            bed = feature.items()['column']
+        else:
+            bed = None
+
+        # Check if tier key exists
+        if 'Tier' in feature.items():
+            tier = feature.items()['Tier']
+        elif 'row' in feature.items():
+            tier = feature.items()['row']
+        else:
+            tier = None
+
+        # Check if Plot key exists
+        if 'Plot' in feature.items():
+            plot = feature.items()['Plot']
+        elif 'plot' in feature.items():
+            plot = feature.items()['plot']
+        else:
+            plot = None
+
+        # Check if Label key exists
+        if 'Label' in feature.items():
+            label = feature.items()['Label']
+        elif 'accession' in feature.items():
+            label = feature.items()['accession']
+
         data_dict = {
             "Bed": feature.items()['Bed'],
             "Tier": feature.items()['Tier'],
