@@ -31,6 +31,7 @@ from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_ti
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
+from scripts.bin_to_images.bin_to_images import extract_binary
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -209,6 +210,52 @@ def check_files():
 
     return jsonify(new_files), 200
 
+
+@file_app.route('/extract_binary_file', methods=['POST'])
+def extract_binary_file():
+    data = request.json
+    # files = secure_filename(data['files'])
+    files = data['files']  # Assuming this is a list of filenames
+    files = [secure_filename(file) for file in files]  # Secure each filename individually
+    dir_path = data['dirPath']
+    
+    # parameters
+    # file_names = os.path.join(UPLOAD_BASE_DIR, dir_path, file)
+    file_names = [Path(os.path.join(UPLOAD_BASE_DIR, dir_path, file)) for file in files]
+    output_path = Path(os.path.join(UPLOAD_BASE_DIR, dir_path))
+    
+    # run extraction
+    print("Extracting binary file...")
+    extract_binary(file_names, output_path)
+    
+    # delete the binary file
+    for file_name in file_names:
+        os.remove(file_name)
+    return jsonify({'status': 'success'}), 200
+
+@file_app.route('/get_binary_progress', methods=['POST'])
+def get_binary_progress():
+    dir_path = request.json['dirPath']
+    dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    try:
+        # Traverse through the directory and its subdirectories
+        for root, dirs, files in os.walk(dir_path):
+            if 'progress.txt' in files:
+                progress_file_path = os.path.join(root, 'progress.txt')
+                # print(f'progress.txt found in {progress_file_path}')
+                with open(progress_file_path, 'r') as file:
+                    progress = int(file.read().strip())
+                print(f'Binary extraction progress: {progress}%')
+                return jsonify({'progress': progress}), 200
+        
+        # If no progress.txt is found
+        print(f'progress.txt not found in {progress_file_path}')
+        return jsonify({'progress': 0, 'error': 'progress.txt not found'}), 404
+    
+    except Exception as e:
+        return jsonify({'progress': 0, 'error': str(e)}), 500
+
 @file_app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     chunk = request.files['fileChunk']
@@ -234,6 +281,7 @@ def upload_chunk():
                 os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))  # Clean up chunk
 
         os.remove(os.path.join(full_dir_path, 'cache'))  # Clean up cache directory
+        time.sleep(60)  # Wait for 60 seconds
         return "File reassembled and saved successfully", 200
     else:
         return f"Chunk {chunk_index} of {total_chunks} received", 202
@@ -1534,7 +1582,7 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8090"
+    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
