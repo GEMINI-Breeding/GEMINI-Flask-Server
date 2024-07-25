@@ -564,7 +564,7 @@ def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
     return df.iloc[[middle_index]]  # Use iloc to select the middle row
 
-def filter_images(geojson_features, year, experiment, location, population, date, sensor, middle_image=False):
+def filter_images(geojson_features, year, experiment, location, population, date, platform, sensor, middle_image=False):
 
     global data_root_dir
 
@@ -596,7 +596,7 @@ def filter_images(geojson_features, year, experiment, location, population, date
     # Create a list of dictionaries for the filtered images
     filtered_images_new = []
     for image_name in  filtered_images:
-        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, sensor, image_name)
+        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, platform, sensor, image_name)
         image_path_rel_to_data_root = os.path.relpath(image_path_abs, data_root_dir)
         filtered_images_new.append(image_path_rel_to_data_root)
 
@@ -625,7 +625,7 @@ def query_images():
         filtered_images = query_drone_images(data,data_root_dir)
     else:
         filtered_images = filter_images(geojson_features, year, experiment, location, 
-                                        population, date, sensor, middle_image)
+                                        population, date, platform, sensor, middle_image)
 
     return jsonify(filtered_images)
 
@@ -779,9 +779,6 @@ def run_odm_endpoint():
                          custom_options)
     
     try:
-        # Reset ODM
-        reset_odm(data_root_dir)
-        
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,))
         thread.start()
@@ -814,7 +811,7 @@ def stop_odm():
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
-        reset_odm(data_root_dir)
+        # reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
