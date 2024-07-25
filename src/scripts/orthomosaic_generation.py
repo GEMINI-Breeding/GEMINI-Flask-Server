@@ -73,7 +73,14 @@ def _create_directory_structure(args):
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
     print(f"GCP Path: {gcp_pth}")
-    shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
+    # Check if the file has more than 1 lines
+    filtered_gcp_list = []
+    with open(gcp_pth, 'r') as f:
+        lines = f.readlines()
+        if len(lines) < 2:
+            print("GCP file has less than 2 lines...Ignoring")
+        else:
+            shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
 
 
 def _process_outputs(args):

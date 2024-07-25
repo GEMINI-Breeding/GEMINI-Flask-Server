@@ -18,32 +18,9 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
     global image_dict
 
-    print("Loading predefined locations from CSV file...")
-
-    # Define the path to the predefined locations CSV file
-    predefined_locations_csv = os.path.join(image_folder, '../../../../gcp_locations.csv')
-    print(predefined_locations_csv)
-    # Load predefined locations from CSV
-    if not os.path.isfile(predefined_locations_csv):
-        raise Exception("Invalid selections: no gcp_locations.csv file found.")
-
-    df = pd.read_csv(predefined_locations_csv)
-    labels = df['Label'].tolist()
-    latitudes = df['Lat_dec'].tolist()
-    longitudes = df['Lon_dec'].tolist()
-    predefined_locations = []
-    for i in range(len(labels)):
-        predefined_locations.append({
-            'label': labels[i],
-            'latitude': latitudes[i],
-            'longitude': longitudes[i]
-        })
-
     # Select the image folder
     if not os.path.isdir(image_folder):
         raise Exception("Invalid selections: no image folder.")
-
-    selected_images = []
 
     # Process each image in the folder
     files = os.listdir(image_folder)
@@ -60,6 +37,28 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
     if len(files) == 0:
         raise Exception("Invalid selections: no files found in folder.")
     # Check if there are npy file that contains the image names
+
+    selected_images = []
+    print("Loading predefined locations from CSV file...")
+
+    # Define the path to the predefined locations CSV file
+    predefined_locations_csv = os.path.join(image_folder, '../../../../gcp_locations.csv')
+    print(predefined_locations_csv)
+    # Load predefined locations from CSV
+    predefined_locations = []
+    if not os.path.isfile(predefined_locations_csv):
+        print("ERROR: Invalid selections: no gcp_locations.csv file found.")
+    else:
+        df = pd.read_csv(predefined_locations_csv)
+        labels = df['Label'].tolist()
+        latitudes = df['Lat_dec'].tolist()
+        longitudes = df['Lon_dec'].tolist()
+        for i in range(len(labels)):
+            predefined_locations.append({
+                'label': labels[i],
+                'latitude': latitudes[i],
+                'longitude': longitudes[i]
+            })
 
     npy_path = os.path.join(image_folder, '../image_names_final.npy')
     if os.path.exists(npy_path):
@@ -97,33 +96,45 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
                 latitude = float(latitude)
                 longitude = float(longitude) * -1
 
-                # Check if the image is within the predefined locations
-                closest_dist = float('inf')
-                closest_location = None
-                for location in predefined_locations:
-                    dist = calculate_distance(latitude, longitude, location['latitude'], location['longitude'])
-                    if dist <= radius_meters and dist < closest_dist:
-                        closest_dist = dist
-                        closest_location = location
+                if len(predefined_locations) > 0:
+                    # Check if the image is within the predefined locations
+                    closest_dist = float('inf')
+                    closest_location = None
+                    for location in predefined_locations:
+                        dist = calculate_distance(latitude, longitude, location['latitude'], location['longitude'])
+                        if dist <= radius_meters and dist < closest_dist:
+                            closest_dist = dist
+                            closest_location = location
 
-                if closest_location is not None:
+                    if closest_location is not None:
+                        # Remove the first part of the image path
+                        image_path = image_path.replace(data_root_dir, '')
+                        selected_images.append({
+                            'image_path': image_path,
+                            'gcp_lat': closest_location['latitude'],
+                            'gcp_lon': closest_location['longitude'],
+                            'gcp_label': closest_location['label'],
+                            'naturalWidth': width,
+                            'naturalHeight': height
+                        })
 
+                else:
+                    # Logic for when gcp files are not provided
                     # Remove the first part of the image path
                     image_path = image_path.replace(data_root_dir, '')
-
                     selected_images.append({
                         'image_path': image_path,
-                        'gcp_lat': closest_location['latitude'],
-                        'gcp_lon': closest_location['longitude'],
-                        'gcp_label': closest_location['label'],
+                        'gcp_lat': 0,
+                        'gcp_lon': 0,
+                        'gcp_label': 'N/A',
                         'naturalWidth': width,
                         'naturalHeight': height
                     })
 
-                    # Save the selected images to a dict
-                    if selected_images != []:
-                        npy_path = os.path.join(image_folder, '../image_names.npy')
-                        np.save(npy_path, {'files': files, 'selected_images': selected_images})
+                # Save the selected images to a dict
+                if len(selected_images) > 0:
+                    npy_path = os.path.join(image_folder, '../image_names.npy')
+                    np.save(npy_path, {'files': files, 'selected_images': selected_images})
 
     # Save the selected images to a dict
     if selected_images != []:

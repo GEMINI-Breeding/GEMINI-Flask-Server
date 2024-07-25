@@ -418,6 +418,7 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
 
     bed_no = rgb['Bed']
     tier_no = rgb['Tier']
+    plot_no = rgb['Plot']
 
     Bed.append(bed_no)
     Tier.append(tier_no)
@@ -432,7 +433,7 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
     # Save image if arg.crop is true
     if save_cropped_imgs:
         # Generate save_path
-        save_path = os.path.join(save_dir,f"Bed{bed_no}_Tier{tier_no}.png")
+        save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
         #cv2.imwrite(save_path,rgb_resized)
         cv2.imwrite(save_path,rgb_img)
 
@@ -607,6 +608,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
 
                 bed_no = rgb['Bed']
                 tier_no = rgb['Tier']
+                plot_no = rgb['Plot']
 
                 Bed.append(bed_no)
                 Tier.append(tier_no)
@@ -625,7 +627,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                     name_only, extension = os.path.splitext(tiff_rgb.split('/')[-1])
                     
                     # Generate save_path
-                    save_path = os.path.join(save_dir,f"Bed{bed_no}_Tier{tier_no}.png")
+                    save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
                     
                     #cv2.imwrite(save_path,rgb_resized)
                     cv2.imwrite(save_path,rgb_img)
@@ -682,6 +684,10 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
         else:
             # Merge the two dataframes and save to geojson
             # print(df)
+            # Create Bed if not exists
+            if 'Bed' not in json_fieldmap['features'][0]['properties']:
+                json_fieldmap['features'][0]['properties']['Bed'] = json_fieldmap['features'][0]['properties']['column']
+                json_fieldmap['features'][0]['properties']['Tier'] = json_fieldmap['features'][0]['properties']['row']
             gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
             
             
@@ -767,9 +773,10 @@ def query_drone_images(args_dict, data_root_dir):
 
 # Debug
 if __name__ == "__main__":
-    process_tiff(tiff_files_rgb="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-RGB.tif",
-                 tiff_files_dem="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-DEM.tif",
-                 tiff_files_thermal="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-FLIR-RGBT.tif",
-                 plot_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/Plot-Attributes-WGS84.geojson",
-                 output_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Results/2022-06-20-Drone-Traits-WGS84_debug.geojson",
-                 debug=True)
+    process_tiff(tiff_files_rgb="/data3/Dataset_2023_processing/Davis/2023-07-18/Drone/metashape/2023-07-18-P4-RGB.tif",
+                 tiff_files_dem="/data3/Dataset_2023_processing/Davis/2023-07-18/Drone/metashape/2023-07-18-P4-DEM.tif",
+                 tiff_files_thermal="",
+                 plot_geojson="/home/GEMINI/GEMINI-App-Data/Intermediate/2023/Davis/Davis/Legumes/Plot-Boundary-WGS84.geojson",
+                 output_geojson="/data3/Dataset_2023_processing/Davis/2023-07-18/Drone/metashape/2023-07-18-P4-Processed.geojson",
+                 save_cropped_imgs=True,
+                 debug=False)
