@@ -845,7 +845,7 @@ def monitor_log_updates(logs_path, progress_file):
         completed_stages = set()
         progress_increment = 10  # Each stage completion increases progress by 10%
         with open(progress_file, 'w') as file:
-                    file.write("0")
+            file.write("0")
         
         # Wait for the log file to be created
         while not os.path.exists(logs_path):
@@ -862,12 +862,17 @@ def monitor_log_updates(logs_path, progress_file):
             while True:
                 line = file.readline()
                 if line:
-                    for point in progress_points:
-                        if point in line and point not in completed_stages:
-                            completed_stages.add(point)
-                            current_progress = len(completed_stages) * progress_increment
-                            update_progress_file(progress_file, current_progress)
-                            print(f"Progress updated: {current_progress}%")
+                    if "100 - done" in line:
+                        update_progress_file(progress_file, 100)
+                        print("Progress updated: 100%")
+                        return
+                    else:
+                        for point in progress_points:
+                            if point in line and point not in completed_stages:
+                                completed_stages.add(point)
+                                current_progress = len(completed_stages) * progress_increment
+                                update_progress_file(progress_file, current_progress)
+                                print(f"Progress updated: {current_progress}%")
                 else:
                     time.sleep(1)  # Sleep briefly to avoid busy waiting
     except Exception as e:
