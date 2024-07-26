@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from werkzeug.utils import secure_filename
 
 # Local application/library specific imports
+from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
@@ -35,7 +36,7 @@ from scripts.bin_to_images.bin_to_images import extract_binary
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
-latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0}
+latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 
 #### FILE SERVING ENDPOINTS ####
@@ -385,6 +386,30 @@ def get_gcp_selcted_images():
                     'num_total': len(files),
                     'status':status}), 200
 
+@file_app.route('/get_drone_extract_progress', methods=['GET'])
+def get_drone_extract_progress():
+    data = request.json
+    tiff_rgb = data['tiff_rgb']
+    txt_file = os.path.join(os.path.dirname(tiff_rgb), 'progress.txt')
+    
+    # Check if the file exists
+    if os.path.exists(txt_file):
+        with open(txt_file, 'r') as file:
+            number = file.read().strip()
+            latest_data['drone_extract'] = int(number)
+        return jsonify(latest_data)
+    else:
+        return jsonify({'error': 'Locate progress not found'}), 404
+    
+@file_app.route('/stop_drone_extract', methods=['POST'])
+def stop_drone_extract():
+    try:
+        shared_states.stop_signal = True
+        print('Drone Extraction stopped by user.')
+        return jsonify({"message": f"Drone Extraction process successfully stopped"}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": e.stderr.decode("utf-8")}), 500
+    
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff():
     global now_drone_processing
@@ -406,19 +431,20 @@ def process_drone_tiff():
         return jsonify({'message': 'Already in processing'}), 400
     
     now_drone_processing = True
+    shared_states.stop_signal = False
     
     try: 
         rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
         geojson_path = os.path.join(image_folder,'../../../Plot-Attributes-WGS84.geojson')
         date = image_folder.split("/")[-3]
         output_geojson = os.path.join(image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
-        process_tiff(tiff_files_rgb=rgb_tif_file,
+        result = process_tiff(tiff_files_rgb=rgb_tif_file,
                      tiff_files_dem=dem_tif_file,
                      tiff_files_thermal=thermal_tif_file,
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
-
+        print(f'Processing result: {result}')
 
     except Exception as e:
         now_drone_processing = False
@@ -426,11 +452,10 @@ def process_drone_tiff():
         return jsonify({'message': str(e)}), 400
 
 
-
+    shared_states.stop_signal = False
     now_drone_processing = False
 
     return jsonify({'message': 'Processing Finished'}), 200
-
 
 
 @file_app.route('/save_array', methods=['POST'])
