@@ -535,6 +535,8 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, plot_geojson, output_geojson, t
                 if 1:
                     # TODO: Parallelize
                     for img_idx in tqdm(range(len(data_rgb))):
+                        if shared_states.stop_signal == True:
+                            break
                         with open(f"{output_path}/progress.txt", "w") as f:
                             if img_idx >= len(data_rgb)-(0.5*len(data_rgb)):
                                 f.write("95")
@@ -635,6 +637,8 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, plot_geojson, output_geojson, t
                                             total_height, total_temperature, Bed, Tier, total_lon, total_lat, debug)
 
                 print("Analyze images --- %s seconds ---" % (time.time() - start_time))
+                if shared_states.stop_signal == True:
+                    break
                 start_time = time.time()
                 
                 df = pd.DataFrame({"column":Bed,
@@ -677,11 +681,14 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, plot_geojson, output_geojson, t
                     gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['column','row']).to_file(output_geojson, driver='GeoJSON')
                     
                     
+                if shared_states.stop_signal == True:
+                    break
                 with open(f"{output_path}/progress.txt", "w") as f:
                     f.write("100")
                     
                 print("Done.")
                 return True
+        shared_states.stop_signal = False
         return False
     except Exception as e:
         print(f"An error occurred: {e}")

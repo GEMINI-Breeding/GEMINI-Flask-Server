@@ -388,23 +388,28 @@ def get_gcp_selcted_images():
 
 @file_app.route('/get_drone_extract_progress', methods=['GET'])
 def get_drone_extract_progress():
-    data = request.json
-    tiff_rgb = data['tiff_rgb']
-    txt_file = os.path.join(os.path.dirname(tiff_rgb), 'progress.txt')
+    global processed_image_folder
+    # data = request.json
+    # tiff_rgb = data['tiff_rgb']
+    txt_file = os.path.join(processed_image_folder, 'progress.txt')
     
     # Check if the file exists
     if os.path.exists(txt_file):
         with open(txt_file, 'r') as file:
             number = file.read().strip()
-            latest_data['drone_extract'] = int(number)
+            if number == '':
+                latest_data['drone_extract'] = 0
+            else:
+                latest_data['drone_extract'] = float(number)
         return jsonify(latest_data)
     else:
-        return jsonify({'error': 'Locate progress not found'}), 404
+        return jsonify({'error': 'Drone progress not found'}), 404
     
 @file_app.route('/stop_drone_extract', methods=['POST'])
 def stop_drone_extract():
     try:
         shared_states.stop_signal = True
+        latest_data['drone_extract'] = 0
         print('Drone Extraction stopped by user.')
         return jsonify({"message": f"Drone Extraction process successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
@@ -412,7 +417,7 @@ def stop_drone_extract():
     
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff():
-    global now_drone_processing
+    global now_drone_processing, processed_image_folder
     
     # receive the parameters
     location = request.json['location']
@@ -446,18 +451,15 @@ def process_drone_tiff():
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
+        now_drone_processing = False
+        shared_states.stop_signal = True
         return jsonify({'message': str(result)}), 200
 
     except Exception as e:
         now_drone_processing = False
+        shared_states.stop_signal = True
         print(e)
         return jsonify({'message': str(e)}), 400
-
-
-    shared_states.stop_signal = False
-    now_drone_processing = False
-
-    return jsonify({'message': 'Processing Finished'}), 200
 
 
 @file_app.route('/save_array', methods=['POST'])
