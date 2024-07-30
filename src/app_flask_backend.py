@@ -423,8 +423,10 @@ def process_drone_tiff():
     platform = request.json['platform']
     sensor = request.json['sensor']
 
-    prefix = data_root_dir+'/Processed'
-    image_folder = os.path.join(prefix, year, experimnent, location, population, date, platform, sensor)
+    intermediate_prefix = data_root_dir+'/Intermediate'
+    processed_prefix = data_root_dir+'/Processed'
+    intermediate_image_folder = os.path.join(intermediate_prefix, year, experimnent, location, population)
+    processed_image_folder = os.path.join(processed_prefix, year, experimnent, location, population, date, platform, sensor)
 
     # Check if already in processing
     if now_drone_processing:
@@ -434,17 +436,16 @@ def process_drone_tiff():
     shared_states.stop_signal = False
     
     try: 
-        rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(image_folder)
-        geojson_path = os.path.join(image_folder,'../../../Plot-Attributes-WGS84.geojson')
-        date = image_folder.split("/")[-3]
-        output_geojson = os.path.join(image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
-        result = process_tiff(tiff_files_rgb=rgb_tif_file,
+        rgb_tif_file, dem_tif_file, thermal_tif_file = find_drone_tiffs(processed_image_folder)
+        geojson_path = os.path.join(intermediate_image_folder,'Plot-Boundary-WGS84.geojson')
+        date = processed_image_folder.split("/")[-3]
+        output_geojson = os.path.join(processed_image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
+        process_tiff(tiff_files_rgb=rgb_tif_file,
                      tiff_files_dem=dem_tif_file,
                      tiff_files_thermal=thermal_tif_file,
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
-        print(f'Processing result: {result}')
 
     except Exception as e:
         now_drone_processing = False
