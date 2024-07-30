@@ -440,12 +440,13 @@ def process_drone_tiff():
         geojson_path = os.path.join(intermediate_image_folder,'Plot-Boundary-WGS84.geojson')
         date = processed_image_folder.split("/")[-3]
         output_geojson = os.path.join(processed_image_folder,f"{date}-{platform}-{sensor}-Traits-WGS84.geojson")
-        process_tiff(tiff_files_rgb=rgb_tif_file,
+        result = process_tiff(tiff_files_rgb=rgb_tif_file,
                      tiff_files_dem=dem_tif_file,
                      tiff_files_thermal=thermal_tif_file,
                      plot_geojson=geojson_path,
                      output_geojson=output_geojson,
                      debug=False)
+        return jsonify({'message': str(result)}), 200
 
     except Exception as e:
         now_drone_processing = False
