@@ -1,7 +1,4 @@
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from osgeo import gdal, osr, ogr
 import numpy as np
 import pandas as pd
@@ -13,7 +10,6 @@ import geopandas as gpd
 import rasterio
 import time
 import concurrent.futures
-import shared_states
 from functools import partial
 
 DEBUG_ITER = 100
@@ -22,7 +18,7 @@ def find_drone_tiffs(image_folder:str) -> [str, str]:
     # List the files in the image folder
     files = os.listdir(image_folder)
     
-    files = [file for file in files if file.endswith(".tif")]
+    files = [file for file in files if file.endswith(".tif") and not "Pyramid" in file]
 
     # Find the RGB tiff file
     rgb_tiff_file = None
@@ -94,7 +90,7 @@ def get_img_data(src, rgb=False):
 
     return data    
 
-def crop_xywh(src, x,y,w,h, image_type='rgb'):
+def crop_xywh(src, x, y, w, h, image_type='rgb'):
     # Get the image's starting coordinate
     geotransform = src.GetGeoTransform()
     xinit = geotransform[0]
@@ -102,25 +98,38 @@ def crop_xywh(src, x,y,w,h, image_type='rgb'):
     xsize = geotransform[1]
     ysize = geotransform[5]
 
-    #p1 = point upper left of bounding box
-    #p2 = point bottom right of bounding box
-    p1 = (x, y) 
-    p2 = (x+w, y-h)
+    # p1 = point upper left of bounding box
+    # p2 = point bottom right of bounding box
+    p1 = (x, y)
+    p2 = (x + w, y - h)
 
-    row1 = int((p1[1] - yinit)/ysize)
-    col1 = int((p1[0] - xinit)/xsize)
+    row1 = int((p1[1] - yinit) / ysize)
+    col1 = int((p1[0] - xinit) / xsize)
 
-    row2 = int((p2[1] - yinit)/ysize)
-    col2 = int((p2[0] - xinit)/xsize)
+    row2 = int((p2[1] - yinit) / ysize)
+    col2 = int((p2[0] - xinit) / xsize)
+
+    # Get the dimensions of the array
+    cols = src.RasterXSize
+    rows = src.RasterYSize
+
+    # Ensure the bounds are within the dimensions
+    col1 = max(0, min(col1, cols - 1))
+    row1 = max(0, min(row1, rows - 1))
+    col2 = max(0, min(col2, cols - 1))
+    row2 = max(0, min(row2, rows - 1))
+
+    if col1 > col2 or row1 > row2:
+        raise ValueError("Invalid crop bounds")
 
     if image_type == 'rgb':
-        # Opencv BGR
+        # OpenCV BGR
         band1 = src.GetRasterBand(3)
         band2 = src.GetRasterBand(2)
         band3 = src.GetRasterBand(1)
         data = np.transpose([band1.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
-                band2.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
-                band3.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)],(1,2,0))
+                             band2.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
+                             band3.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)], (1, 2, 0))
     elif image_type == 'thermal':
         # Read last channel
         band = src.GetRasterBand(4)
@@ -133,7 +142,7 @@ def crop_xywh(src, x,y,w,h, image_type='rgb'):
     else:
         # Raise error
         raise ValueError("image_type must be either rgb, thermal or dem")
-    
+
     return data
 
 def draw_rect_xywh(src, canvas, color, x,y,w,h, rgb=False):
@@ -265,11 +274,41 @@ def crop_geojson(dataset, mask_ds, image_type='rgb', plots = None, debug = False
 
         cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY, image_type=image_type)
 
+        # Check if bed key exists
+        if 'Bed' in feature.items():
+            bed = feature.items()['Bed']
+        elif 'column' in feature.items():
+            bed = feature.items()['column']
+        else:
+            bed = None
+
+        # Check if tier key exists
+        if 'Tier' in feature.items():
+            tier = feature.items()['Tier']
+        elif 'row' in feature.items():
+            tier = feature.items()['row']
+        else:
+            tier = None
+
+        # Check if Plot key exists
+        if 'Plot' in feature.items():
+            plot = feature.items()['Plot']
+        elif 'plot' in feature.items():
+            plot = feature.items()['plot']
+        else:
+            plot = None
+
+        # Check if Label key exists
+        if 'Label' in feature.items():
+            label = feature.items()['Label']
+        elif 'accession' in feature.items():
+            label = feature.items()['accession']
+
         data_dict = {
-            "column": feature.items()['column'],
-            "row": feature.items()['row'],
-            "plot": feature.items()['plot'],
-            "accession": feature.items()['accession'],
+            "Bed": bed,
+            "Tier": tier,
+            "Plot": plot,
+            "Label": label,
             "img": cropped_img,
             "minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY,
             "pixel_width": abs(pixel_width), "pixel_height": abs(pixel_height),
@@ -389,8 +428,10 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
     else:
         print("No thermal file found. Skipping thermal analysis.")
 
-    bed_no = rgb['column']
-    tier_no = rgb['row']
+
+    bed_no = rgb['Bed']
+    tier_no = rgb['Tier']
+    plot_no = rgb['Plot']
 
     Bed.append(bed_no)
     Tier.append(tier_no)
@@ -405,7 +446,7 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
     # Save image if arg.crop is true
     if save_cropped_imgs:
         # Generate save_path
-        save_path = os.path.join(save_dir,f"column{bed_no}row{tier_no}.png")
+        save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
         #cv2.imwrite(save_path,rgb_resized)
         cv2.imwrite(save_path,rgb_img)
 
@@ -435,265 +476,252 @@ loaded_gdal_dict = {
     "data_thermal": None
 }
 
-def process_tiff(tiff_files_rgb, tiff_files_dem, plot_geojson, output_geojson, tiff_files_thermal = None, save_cropped_imgs=False, debug=False):
+def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojson, output_geojson, save_cropped_imgs=False, debug=False):
     global loaded_gdal_dict
 
-    try:
-        while(shared_states.stop_signal == False):
-            # check output path
-            print("Will save output geojson here: ", output_geojson)
+    # tiff_files_rgb is the essential file
+    if type(tiff_files_rgb) == str:
+        tiff_files_rgb = [tiff_files_rgb]
+
+    # Check if the tiff_files is a list
+    if type(tiff_files_dem) == str:
+        tiff_files_dem = [tiff_files_dem]
+
+    # Check if the tiff_files is a list
+    if type(tiff_files_thermal) == str:
+        tiff_files_thermal = [tiff_files_thermal]
+
+    # open the mask file using ogr
+    mask_ds = ogr.Open(plot_geojson)
+
+    # open_tiff_rasterio(tiff_files_rgb[0])
+
+    # Measure operation time if load the entire image
+    if 0:
+        start_time = time.time()
+        dataset_rgb = gdal.Open(tiff_files_rgb[0], gdal.GA_ReadOnly)
+        get_img_data(dataset_rgb, rgb=True)
+        print("--- %s seconds ---" % (time.time() - start_time))
+
+
+    # Load the GeoJSON file
+    with open(plot_geojson) as f:
+        json_fieldmap = json.load(f)
+
+    for day in range(len(tiff_files_rgb)):
+        start_time = time.time()
+        tiff_rgb = tiff_files_rgb[day]
+        
+        output_path = os.path.dirname(tiff_rgb)
+        with open(f"{output_path}/progress.txt", "w") as f:
+            f.write("0")
             
-            # tiff_files_rgb is the essential file
-            if type(tiff_files_rgb) == str:
-                tiff_files_rgb = [tiff_files_rgb]
+        # Load RGB
+        print(f"Load rgb... {tiff_rgb}",flush=True)
+        dataset_rgb = gdal.Open(tiff_rgb, gdal.GA_ReadOnly)
+        data_rgb = crop_geojson(dataset_rgb, mask_ds, image_type='rgb', debug=debug)
+        loaded_gdal_dict["data_rgb"] = data_rgb
+        try:
+            tiff_dem = tiff_files_dem[day]
+        except:
+            tiff_dem = None
 
-            # Check if the tiff_files is a list
-            if type(tiff_files_dem) == str:
-                tiff_files_dem = [tiff_files_dem]
+        if tiff_dem:
+            # Load Depth
+            print(f"Load depth... {tiff_dem}",flush=True)
+            dataset = gdal.Open(tiff_dem, gdal.GA_ReadOnly)
+            data_depth = crop_geojson(dataset, mask_ds, image_type='dem', debug=debug)
+            loaded_gdal_dict["data_depth"] = data_depth
 
-            # Check if the tiff_files is a list
-            if type(tiff_files_thermal) == str:
-                tiff_files_thermal = [tiff_files_thermal]
+        try:
+            tiff_thermal = tiff_files_thermal[day]
+        except:
+            tiff_thermal = None
 
-            # open the mask file using ogr
-            mask_ds = ogr.Open(plot_geojson)
+        if tiff_thermal:
+            # Load Thermal
+            print(f"Load thermal... {tiff_thermal}",flush=True)
+            dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
+            data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
+            loaded_gdal_dict["data_thermal"] = data_thermal
+        else:
+            print("No thermal file found. Skipping thermal analysis.")
+        
+        print("Load images --- %s seconds ---" % (time.time() - start_time))
+        start_time = time.time()
 
-            # open_tiff_rasterio(tiff_files_rgb[0])
+        # Create a crop dir if arg.crop is true
+        if save_cropped_imgs:
+            if not os.path.exists("patches"):
+                # Get the tiff file's dir
+                save_dir = os.path.join(os.path.dirname(tiff_rgb),"patches")
+                # Create a patches dir
+                os.makedirs(save_dir,exist_ok=True)
 
-            # Measure operation time if load the entire image
-            if 0:
-                start_time = time.time()
-                dataset_rgb = gdal.Open(tiff_files_rgb[0], gdal.GA_ReadOnly)
-                get_img_data(dataset_rgb, rgb=True)
-                print("--- %s seconds ---" % (time.time() - start_time))
+        total_height = []
+        total_vf = []
+        total_temperature = []
+        print("Analyze...")
+        Bed = []
+        Tier = []
+        total_lat = []
+        total_lon = []
+            
+        if 1:
+            # TODO: Parallelize
+            for img_idx in tqdm(range(len(data_rgb))):
+                
+                with open(f"{output_path}/progress.txt", "w") as f:
+                    if img_idx >= len(data_rgb)-(0.05*len(data_rgb)):
+                        f.write("95")
+                    else:
+                        f.write(str((img_idx/len(data_rgb))*100))
+                                
+                rgb = data_rgb[img_idx]
+                depth = data_depth[img_idx]
 
-
-            # Load the GeoJSON file
-            with open(plot_geojson) as f:
-                json_fieldmap = json.load(f)
-
-
-            for day in range(len(tiff_files_rgb)):
-                start_time = time.time()
-                tiff_rgb = tiff_files_rgb[day]
-                # Load RGB
-                print(f"Load rgb... {tiff_rgb}",flush=True)
-                dataset_rgb = gdal.Open(tiff_rgb, gdal.GA_ReadOnly)
-                data_rgb = crop_geojson(dataset_rgb, mask_ds, image_type='rgb', debug=debug)
-                loaded_gdal_dict["data_rgb"] = data_rgb
-                try:
-                    tiff_dem = tiff_files_dem[day]
-                except:
-                    tiff_dem = None
+                # Extract
+                rgb_img = rgb['img']
+                depth_img = depth['img']
+                rgb_resized = cv2.resize(rgb_img,dsize=(depth_img.shape[1],depth_img.shape[0]))
+                mask = get_mask(rgb_resized)
+                
+                Vegetation_Fraction = round(np.sum(mask) / mask.size,4)
+                total_vf.append(Vegetation_Fraction)
 
                 if tiff_dem:
-                    # Load Depth
-                    print(f"Load depth... {tiff_dem}",flush=True)
-                    dataset = gdal.Open(tiff_dem, gdal.GA_ReadOnly)
-                    data_depth = crop_geojson(dataset, mask_ds, image_type='dem', debug=debug)
-                    loaded_gdal_dict["data_depth"] = data_depth
+                    # Apply mask to image
+                    masked_depth_img = cv2.bitwise_and(depth_img, depth_img, mask=mask)
+                    # Height Analyis
+                    # Debug
+                    if debug:
+                        cv2.imwrite("rgb_img.png", rgb_img)
+                        cv2.imwrite("mask.png", mask*255)
 
-                try:
-                    tiff_thermal = tiff_files_thermal[day]
-                except:
-                    tiff_thermal = None
+                        # normalize depth values to range between 0 and 255
+                        depth_map_normalized = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                        # create a grayscale image
+                        depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
+                        cv2.imwrite("depth_map_gray_orig.png",depth_map_gray)
+
+                        # normalize depth values to range between 0 and 255
+                        depth_map_normalized = cv2.normalize(masked_depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                        # create a grayscale image
+                        depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
+                        cv2.imwrite("depth_map_gray.png",depth_map_gray)
+
+                    # Extract pixel values to list
+                    depth_pixel_values = masked_depth_img[np.where(masked_depth_img != 0)].tolist()
+                    if depth_pixel_values:
+                        base = np.quantile(depth_pixel_values, 0.05)
+                        height = np.quantile(depth_pixel_values, 0.95)
+                        crop_height = round(height - base, 4)
+                        total_height.append(crop_height)
+                    else:
+                        total_height.append(0)
 
                 if tiff_thermal:
-                    # Load Thermal
-                    print(f"Load thermal... {tiff_thermal}",flush=True)
-                    dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
-                    data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
-                    loaded_gdal_dict = data_thermal
-                else:
-                    print("No thermal file found. Skipping thermal analysis.")
-                
-                print("Load images --- %s seconds ---" % (time.time() - start_time))
-                start_time = time.time()
+                    # Thermal Analysis
+                    thermal = data_thermal[img_idx]
+                    thermal_img = thermal['img']
+                    # Resize mask to thermal image size
+                    thermal_mask = cv2.resize(mask,dsize=(thermal_img.shape[1],thermal_img.shape[0]))
+                    masked_thermal_img = cv2.bitwise_and(thermal_img, thermal_img, mask=thermal_mask)
+                    thermal_pixel_values = masked_thermal_img[np.where(masked_thermal_img != 0)].tolist()
+                    avg_temp = round(np.mean(thermal_pixel_values),2)
+                    total_temperature.append(avg_temp)
 
-                # Create a crop dir if arg.crop is true
+
+                bed_no = rgb['Bed']
+                tier_no = rgb['Tier']
+                plot_no = rgb['Plot']
+
+                Bed.append(bed_no)
+                Tier.append(tier_no)
+
+                lon = (rgb['maxLon'] + rgb['minLon'])/2
+                lat = (rgb['maxLat'] + rgb['minLat'])/2
+
+                total_lon.append(lon)
+                total_lat.append(lat)
+
+
+                # Save image if arg.crop is true
                 if save_cropped_imgs:
-                    if not os.path.exists("patches"):
-                        # Get the tiff file's dir
-                        save_dir = os.path.join(os.path.dirname(tiff_rgb),"patches")
-                        # Create a patches dir
-                        os.makedirs(save_dir,exist_ok=True)
-
-                total_height = []
-                total_vf = []
-                total_temperature = []
-                print("Analyze...")
-                Bed = []
-                Tier = []
-                total_lat = []
-                total_lon = []
-                
-                # write progress text file for front end to read
-                output_path = os.path.dirname(tiff_rgb)
-                with open(f"{output_path}/progress.txt", "w") as f:
-                    f.write("0")
-                
-                if 1:
-                    # TODO: Parallelize
-                    for img_idx in tqdm(range(len(data_rgb))):
-                        if shared_states.stop_signal == True:
-                            break
-                        with open(f"{output_path}/progress.txt", "w") as f:
-                            if img_idx >= len(data_rgb)-(0.5*len(data_rgb)):
-                                f.write("95")
-                            else:
-                                f.write(str((img_idx/len(data_rgb))*100))
-                        
-                        rgb = data_rgb[img_idx]
-                        depth = data_depth[img_idx]
-
-                        # Extract
-                        rgb_img = rgb['img']
-                        depth_img = depth['img']
-                        rgb_resized = cv2.resize(rgb_img,dsize=(depth_img.shape[1],depth_img.shape[0]))
-                        mask = get_mask(rgb_resized)
-                        
-                        Vegetation_Fraction = round(np.sum(mask) / mask.size,4)
-                        total_vf.append(Vegetation_Fraction)
-
-                        if tiff_dem:
-                            # Apply mask to image
-                            masked_depth_img = cv2.bitwise_and(depth_img, depth_img, mask=mask)
-                            # Height Analyis
-                            # Debug
-                            if debug:
-                                cv2.imwrite("rgb_img.png", rgb_img)
-                                cv2.imwrite("mask.png", mask*255)
-
-                                # normalize depth values to range between 0 and 255
-                                depth_map_normalized = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-                                # create a grayscale image
-                                depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
-                                cv2.imwrite("depth_map_gray_orig.png",depth_map_gray)
-
-                                # normalize depth values to range between 0 and 255
-                                depth_map_normalized = cv2.normalize(masked_depth_img, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-                                # create a grayscale image
-                                depth_map_gray = cv2.cvtColor(depth_map_normalized, cv2.COLOR_GRAY2BGR)
-                                cv2.imwrite("depth_map_gray.png",depth_map_gray)
-
-                            # Extract pixel values to list
-                            depth_pixel_values = masked_depth_img[np.where(masked_depth_img != 0)].tolist()
-                            if len(depth_pixel_values) > 0:
-                                base = np.quantile(depth_pixel_values, 0.05)
-                                height = np.quantile(depth_pixel_values, 0.95)
-                                crop_height = round(height - base, 4)
-                                total_height.append(crop_height)
-                            else:
-                                print(f"No valid depth pixel values found for image {img_idx}. Skipping height calculation.")
-                                total_height.append(0)
-                        if tiff_thermal:
-                            # Thermal Analysis
-                            thermal = data_thermal[img_idx]
-                            thermal_img = thermal['img']
-                            # Resize mask to thermal image size
-                            thermal_mask = cv2.resize(mask,dsize=(thermal_img.shape[1],thermal_img.shape[0]))
-                            masked_thermal_img = cv2.bitwise_and(thermal_img, thermal_img, mask=thermal_mask)
-                            thermal_pixel_values = masked_thermal_img[np.where(masked_thermal_img != 0)].tolist()
-                            avg_temp = round(np.mean(thermal_pixel_values),2)
-                            total_temperature.append(avg_temp)
-                            
-                        # Extract
-                        bed_no = rgb['column']
-                        tier_no = rgb['row']
-                        
-                        Bed.append(bed_no)
-                        Tier.append(tier_no)
-
-                        lon = (rgb['maxLon'] + rgb['minLon'])/2
-                        lat = (rgb['maxLat'] + rgb['minLat'])/2
-
-                        total_lon.append(lon)
-                        total_lat.append(lat)
-
-
-                        # Save image if arg.crop is true
-                        if save_cropped_imgs:
-                            # Save RGB Image patch
-                            # use os.path.splitext() to split the filename and extension
-                            name_only, extension = os.path.splitext(tiff_rgb.split('/')[-1])
-                            
-                            # Generate save_path
-                            save_path = os.path.join(save_dir,f"column{bed_no}_row{tier_no}.png")
-                            
-                            #cv2.imwrite(save_path,rgb_resized)
-                            cv2.imwrite(save_path,rgb_img)
-
-
-                        # Dry run for debugging
-                        if debug:
-                            if len(Bed) > DEBUG_ITER:
-                                break
-                else:
-                    # Call the parallelized function
-                    # Create a crop dir if arg.crop is true
-                    save_dir = os.path.join(os.path.dirname(tiff_rgb),"patches")
-                    parallel_process_images(data_rgb, data_depth, data_thermal, tiff_dem, 
-                                            tiff_thermal, save_cropped_imgs, save_dir, total_vf, 
-                                            total_height, total_temperature, Bed, Tier, total_lon, total_lat, debug)
-
-                print("Analyze images --- %s seconds ---" % (time.time() - start_time))
-                if shared_states.stop_signal == True:
-                    break
-                start_time = time.time()
-                
-                df = pd.DataFrame({"column":Bed,
-                                "row":Tier,
-                                "lon":total_lon,
-                                "lat":total_lat, 
-                                })
-                
-                if len(total_height) > 0:
-                    df["Height_95p_meters"] = total_height
-                
-                if len(total_vf) > 0:
-                    df["Vegetation_Fraction"] = total_vf
-                
-                if len(total_temperature) > 0:
-                    df["Avg_Temp_C"] = total_temperature
-
-                if 0:
-                    for i in range(len(df)):
+                    # Save RGB Image patch
+                    # use os.path.splitext() to split the filename and extension
+                    name_only, extension = os.path.splitext(tiff_rgb.split('/')[-1])
                     
-                        feature = json_fieldmap['features'][i]
-
-                        # Check if bed and tier matches
-                        if feature['properties']['Bed'] != df.iloc[i]['Bed'] or feature['properties']['Tier'] != df.iloc[i]['Tier']:
-                            print("Bed and Tier does not match")
-                            continue
-                        
-                        feature['properties']['Height_95p_meters'] = round(df.iloc[i]['Height_95p_meters'], 4)
-                        feature['properties']['Vegetation_Fraction'] = round(df.iloc[i]['Vegetation_Fraction'], 4)
-                        feature['properties']['Avg_Temp_C'] = round(df.iloc[i]['Avg_Temp_C'], 4)
-
-                        json_fieldmap['features'][i] = feature
-
-                    # Write JSON file with new data
-                    gpd.GeoDataFrame.from_features(json_fieldmap).to_file(output_geojson, driver='GeoJSON')
-                    print("file saved to: ", output_geojson)
-                else:
-                    # Merge the two dataframes and save to geojson
-                    # print(df)
-                    gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['column','row']).to_file(output_geojson, driver='GeoJSON')
+                    # Generate save_path
+                    save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
                     
-                    
-                if shared_states.stop_signal == True:
-                    break
-                with open(f"{output_path}/progress.txt", "w") as f:
-                    f.write("100")
-                    
-                print("Done.")
-                return True
-        shared_states.stop_signal = False
-        return False
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return False
+                    #cv2.imwrite(save_path,rgb_resized)
+                    cv2.imwrite(save_path,rgb_img)
+
+
+                # Dry run for debugging
+                if debug:
+                    if len(Bed) > DEBUG_ITER:
+                        break
+        else:
+            # Call the parallelized function
+            # Create a crop dir if arg.crop is true
+            save_dir = os.path.join(os.path.dirname(tiff_rgb),"patches")
+            parallel_process_images(data_rgb, data_depth, data_thermal, tiff_dem, 
+                                    tiff_thermal, save_cropped_imgs, save_dir, total_vf, 
+                                    total_height, total_temperature, Bed, Tier, total_lon, total_lat, debug)
+
+        print("Analyze images --- %s seconds ---" % (time.time() - start_time))
+        start_time = time.time()
+        
+        df = pd.DataFrame({"Bed":Bed,
+                           "Tier":Tier,
+                           "lon":total_lon,
+                           "lat":total_lat, 
+                           })
+        
+        if len(total_height) > 0:
+            df["Height_95p_meters"] = total_height
+        
+        if len(total_vf) > 0:
+            df["Vegetation_Fraction"] = total_vf
+        
+        if len(total_temperature) > 0:
+            df["Avg_Temp_C"] = total_temperature
+
+        if 0:
+            for i in range(len(df)):
             
+                feature = json_fieldmap['features'][i]
+
+                # Check if bed and tier matches
+                if feature['properties']['Bed'] != df.iloc[i]['Bed'] or feature['properties']['Tier'] != df.iloc[i]['Tier']:
+                    print("Bed and Tier does not match")
+                    continue
+                
+                feature['properties']['Height_95p_meters'] = round(df.iloc[i]['Height_95p_meters'], 4)
+                feature['properties']['Vegetation_Fraction'] = round(df.iloc[i]['Vegetation_Fraction'], 4)
+                feature['properties']['Avg_Temp_C'] = round(df.iloc[i]['Avg_Temp_C'], 4)
+
+                json_fieldmap['features'][i] = feature
+
+            # Write JSON file with new data
+            gpd.GeoDataFrame.from_features(json_fieldmap).to_file(output_geojson, driver='GeoJSON')
+        else:
+            # Merge the two dataframes and save to geojson
+            # print(df)
+            # Create Bed if not exists
+            if 'Bed' not in json_fieldmap['features'][0]['properties']:
+                json_fieldmap['features'][0]['properties']['Bed'] = json_fieldmap['features'][0]['properties']['column']
+                json_fieldmap['features'][0]['properties']['Tier'] = json_fieldmap['features'][0]['properties']['row']
+            gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
+            
+            
+    with open(f"{output_path}/progress.txt", "w") as f:
+                f.write("100")
+    print("Done.")
+    return True
+
 
 def query_drone_images(args_dict, data_root_dir):
     global loaded_gdal_dict
@@ -771,9 +799,10 @@ def query_drone_images(args_dict, data_root_dir):
 
 # Debug
 if __name__ == "__main__":
-    process_tiff(tiff_files_rgb="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-RGB-Pyramid.tif",
-                 tiff_files_dem="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-DEM-Pyramid.tif",
-                 tiff_files_thermal=None,
+    process_tiff(tiff_files_rgb="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-RGB.tif",
+                 tiff_files_dem="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-DEM.tif",
+                 tiff_files_thermal="",
                  plot_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Intermediate/2022/Subset/Davis/Cowpea/Plot-Boundary-WGS84.geojson",
                  output_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-Drone-RGB-Traits-WGS84.geojson",
-                 debug=True)
+                 save_cropped_imgs=False,
+                 debug=False)
