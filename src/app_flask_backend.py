@@ -409,6 +409,7 @@ def get_drone_extract_progress():
 def stop_drone_extract():
     try:
         shared_states.stop_signal = True
+        print(f'Shared states variable changed: {shared_states.stop_signal}')
         latest_data['drone_extract'] = 0
         print('Drone Extraction stopped by user.')
         return jsonify({"message": f"Drone Extraction process successfully stopped"}), 200

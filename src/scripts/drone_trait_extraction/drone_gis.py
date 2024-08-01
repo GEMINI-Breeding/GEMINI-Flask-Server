@@ -11,6 +11,7 @@ import rasterio
 import time
 import concurrent.futures
 from functools import partial
+from scripts.drone_trait_extraction import shared_states
 
 DEBUG_ITER = 100
 
@@ -571,6 +572,10 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             # TODO: Parallelize
             for img_idx in tqdm(range(len(data_rgb))):
                 
+                # check if stop signal is True
+                if shared_states.stop_signal:
+                    break
+                
                 with open(f"{output_path}/progress.txt", "w") as f:
                     if img_idx >= len(data_rgb)-(0.05*len(data_rgb)):
                         f.write("95")
@@ -671,6 +676,9 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                                     tiff_thermal, save_cropped_imgs, save_dir, total_vf, 
                                     total_height, total_temperature, Bed, Tier, total_lon, total_lat, debug)
 
+        # check if stop signal is True
+        if shared_states.stop_signal:
+            break
         print("Analyze images --- %s seconds ---" % (time.time() - start_time))
         start_time = time.time()
         
@@ -716,7 +724,11 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                 json_fieldmap['features'][0]['properties']['Tier'] = json_fieldmap['features'][0]['properties']['row']
             gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
             
-            
+    
+    # check if stop signal is True
+    if shared_states.stop_signal:
+        return False
+    
     with open(f"{output_path}/progress.txt", "w") as f:
                 f.write("100")
     print("Done.")
