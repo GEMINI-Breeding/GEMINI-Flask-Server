@@ -506,6 +506,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
 
 
     # Load the GeoJSON file
+    prog_started = False
     with open(plot_geojson) as f:
         json_fieldmap = json.load(f)
 
@@ -515,7 +516,8 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
         
         output_path = os.path.dirname(tiff_rgb)
         with open(f"{output_path}/progress.txt", "w") as f:
-            f.write("0")
+            if not prog_started:
+                f.write("0")
             
         # Load RGB
         print(f"Load rgb... {tiff_rgb}",flush=True)
@@ -570,6 +572,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             
         if 1:
             # TODO: Parallelize
+            prog_started = True
             for img_idx in tqdm(range(len(data_rgb))):
                 
                 # check if stop signal is True
@@ -719,11 +722,16 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             # Merge the two dataframes and save to geojson
             # print(df)
             # Create Bed if not exists
-            if 'Bed' not in json_fieldmap['features'][0]['properties']:
-                json_fieldmap['features'][0]['properties']['Bed'] = json_fieldmap['features'][0]['properties']['column']
-                json_fieldmap['features'][0]['properties']['Tier'] = json_fieldmap['features'][0]['properties']['row']
-            gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
-            
+            for feature in json_fieldmap['features']:
+                if 'Bed' not in feature['properties']:
+                    feature['properties']['Bed'] = feature['properties']['column']
+                    feature['properties']['Tier'] = feature['properties']['row']
+            # gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
+            gdf = gpd.GeoDataFrame.from_features(json_fieldmap)
+            merged_gdf = gdf.merge(df, on=['Bed', 'Tier'])
+            merged_gdf = merged_gdf.fillna("None")
+            merged_gdf = merged_gdf.drop(columns=['col', 'row', 'column'], errors='ignore')
+            merged_gdf.to_file(output_geojson, driver='GeoJSON')
     
     # check if stop signal is True
     if shared_states.stop_signal:
