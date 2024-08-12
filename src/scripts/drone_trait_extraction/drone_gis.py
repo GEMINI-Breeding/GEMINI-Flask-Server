@@ -11,7 +11,11 @@ import rasterio
 import time
 import concurrent.futures
 from functools import partial
-from scripts.drone_trait_extraction import shared_states
+
+# Add the path to the scripts folder
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+import shared_states
 
 DEBUG_ITER = 100
 
@@ -819,10 +823,10 @@ def query_drone_images(args_dict, data_root_dir):
 
 # Debug
 if __name__ == "__main__":
-    process_tiff(tiff_files_rgb="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-RGB.tif",
-                 tiff_files_dem="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-DEM.tif",
+    process_tiff(tiff_files_rgb="/home/GEMINI/Dataset_processing/Davis_Legumes/2022-09-05/Drone/metashape/2022-09-05-P4-RGB.tif",
+                 tiff_files_dem="/home/GEMINI/Dataset_processing/Davis_Legumes/2022-09-05/Drone/metashape/2022-09-05-P4-DEM.tif",
                  tiff_files_thermal="",
-                 plot_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Intermediate/2022/Subset/Davis/Cowpea/Plot-Boundary-WGS84.geojson",
-                 output_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-Drone-RGB-Traits-WGS84.geojson",
-                 save_cropped_imgs=False,
+                 plot_geojson="/home/lion397/GEMINI/GEMINI-App-Data/Intermediate/2022/GEMINI/Davis/Legumes/Plot-Boundary-WGS84.geojson",
+                 output_geojson="/home/GEMINI/Dataset_processing/Davis_Legumes/2022-09-05/Drone/metashape/Traits-WGS84.geojson",
+                 save_cropped_imgs=True,
                  debug=False)
