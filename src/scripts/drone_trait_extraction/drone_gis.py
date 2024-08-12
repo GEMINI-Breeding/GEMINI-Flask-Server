@@ -11,6 +11,7 @@ import rasterio
 import time
 import concurrent.futures
 from functools import partial
+from scripts.drone_trait_extraction import shared_states
 
 DEBUG_ITER = 100
 
@@ -90,7 +91,7 @@ def get_img_data(src, rgb=False):
 
     return data    
 
-def crop_xywh(src, x,y,w,h, image_type='rgb'):
+def crop_xywh(src, x, y, w, h, image_type='rgb'):
     # Get the image's starting coordinate
     geotransform = src.GetGeoTransform()
     xinit = geotransform[0]
@@ -98,25 +99,38 @@ def crop_xywh(src, x,y,w,h, image_type='rgb'):
     xsize = geotransform[1]
     ysize = geotransform[5]
 
-    #p1 = point upper left of bounding box
-    #p2 = point bottom right of bounding box
-    p1 = (x, y) 
-    p2 = (x+w, y-h)
+    # p1 = point upper left of bounding box
+    # p2 = point bottom right of bounding box
+    p1 = (x, y)
+    p2 = (x + w, y - h)
 
-    row1 = int((p1[1] - yinit)/ysize)
-    col1 = int((p1[0] - xinit)/xsize)
+    row1 = int((p1[1] - yinit) / ysize)
+    col1 = int((p1[0] - xinit) / xsize)
 
-    row2 = int((p2[1] - yinit)/ysize)
-    col2 = int((p2[0] - xinit)/xsize)
+    row2 = int((p2[1] - yinit) / ysize)
+    col2 = int((p2[0] - xinit) / xsize)
+
+    # Get the dimensions of the array
+    cols = src.RasterXSize
+    rows = src.RasterYSize
+
+    # Ensure the bounds are within the dimensions
+    col1 = max(0, min(col1, cols - 1))
+    row1 = max(0, min(row1, rows - 1))
+    col2 = max(0, min(col2, cols - 1))
+    row2 = max(0, min(row2, rows - 1))
+
+    if col1 > col2 or row1 > row2:
+        raise ValueError("Invalid crop bounds")
 
     if image_type == 'rgb':
-        # Opencv BGR
+        # OpenCV BGR
         band1 = src.GetRasterBand(3)
         band2 = src.GetRasterBand(2)
         band3 = src.GetRasterBand(1)
         data = np.transpose([band1.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
-                band2.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
-                band3.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)],(1,2,0))
+                             band2.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1),
+                             band3.ReadAsArray(col1, row1, col2 - col1 + 1, row2 - row1 + 1)], (1, 2, 0))
     elif image_type == 'thermal':
         # Read last channel
         band = src.GetRasterBand(4)
@@ -129,7 +143,7 @@ def crop_xywh(src, x,y,w,h, image_type='rgb'):
     else:
         # Raise error
         raise ValueError("image_type must be either rgb, thermal or dem")
-    
+
     return data
 
 def draw_rect_xywh(src, canvas, color, x,y,w,h, rgb=False):
@@ -261,11 +275,41 @@ def crop_geojson(dataset, mask_ds, image_type='rgb', plots = None, debug = False
 
         cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY, image_type=image_type)
 
+        # Check if bed key exists
+        if 'Bed' in feature.items():
+            bed = feature.items()['Bed']
+        elif 'column' in feature.items():
+            bed = feature.items()['column']
+        else:
+            bed = None
+
+        # Check if tier key exists
+        if 'Tier' in feature.items():
+            tier = feature.items()['Tier']
+        elif 'row' in feature.items():
+            tier = feature.items()['row']
+        else:
+            tier = None
+
+        # Check if Plot key exists
+        if 'Plot' in feature.items():
+            plot = feature.items()['Plot']
+        elif 'plot' in feature.items():
+            plot = feature.items()['plot']
+        else:
+            plot = None
+
+        # Check if Label key exists
+        if 'Label' in feature.items():
+            label = feature.items()['Label']
+        elif 'accession' in feature.items():
+            label = feature.items()['accession']
+
         data_dict = {
-            "Bed": feature.items()['Bed'],
-            "Tier": feature.items()['Tier'],
-            "Plot": feature.items()['Plot'],
-            "Label": feature.items()['Label'],
+            "Bed": bed,
+            "Tier": tier,
+            "Plot": plot,
+            "Label": label,
             "img": cropped_img,
             "minX": minX, "maxX": maxX, "minY": minY, "maxY": maxY,
             "pixel_width": abs(pixel_width), "pixel_height": abs(pixel_height),
@@ -388,6 +432,7 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
 
     bed_no = rgb['Bed']
     tier_no = rgb['Tier']
+    plot_no = rgb['Plot']
 
     Bed.append(bed_no)
     Tier.append(tier_no)
@@ -402,7 +447,7 @@ def process_image(img_idx, data_rgb, data_depth, data_thermal,
     # Save image if arg.crop is true
     if save_cropped_imgs:
         # Generate save_path
-        save_path = os.path.join(save_dir,f"Bed{bed_no}_Tier{tier_no}.png")
+        save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
         #cv2.imwrite(save_path,rgb_resized)
         cv2.imwrite(save_path,rgb_img)
 
@@ -461,13 +506,19 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
 
 
     # Load the GeoJSON file
+    prog_started = False
     with open(plot_geojson) as f:
         json_fieldmap = json.load(f)
-
 
     for day in range(len(tiff_files_rgb)):
         start_time = time.time()
         tiff_rgb = tiff_files_rgb[day]
+        
+        output_path = os.path.dirname(tiff_rgb)
+        with open(f"{output_path}/progress.txt", "w") as f:
+            if not prog_started:
+                f.write("0")
+            
         # Load RGB
         print(f"Load rgb... {tiff_rgb}",flush=True)
         dataset_rgb = gdal.Open(tiff_rgb, gdal.GA_ReadOnly)
@@ -495,7 +546,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
             print(f"Load thermal... {tiff_thermal}",flush=True)
             dataset_thermal = gdal.Open(tiff_thermal, gdal.GA_ReadOnly)
             data_thermal = crop_geojson(dataset_thermal, mask_ds, image_type='thermal', debug=debug)
-            loaded_gdal_dict = data_thermal
+            loaded_gdal_dict["data_thermal"] = data_thermal
         else:
             print("No thermal file found. Skipping thermal analysis.")
         
@@ -518,9 +569,22 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
         Tier = []
         total_lat = []
         total_lon = []
+            
         if 1:
             # TODO: Parallelize
+            prog_started = True
             for img_idx in tqdm(range(len(data_rgb))):
+                
+                # check if stop signal is True
+                if shared_states.stop_signal:
+                    break
+                
+                with open(f"{output_path}/progress.txt", "w") as f:
+                    if img_idx >= len(data_rgb)-(0.05*len(data_rgb)):
+                        f.write("95")
+                    else:
+                        f.write(str((img_idx/len(data_rgb))*100))
+                                
                 rgb = data_rgb[img_idx]
                 depth = data_depth[img_idx]
 
@@ -556,12 +620,13 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
 
                     # Extract pixel values to list
                     depth_pixel_values = masked_depth_img[np.where(masked_depth_img != 0)].tolist()
-                    base = np.quantile(depth_pixel_values,0.05)
-                    height = np.quantile(depth_pixel_values,0.95)
-                    crop_height = round(height - base,4)
-                    total_height.append(crop_height)
-                else:
-                    print("No depth file found. Skipping depth analysis.")
+                    if depth_pixel_values:
+                        base = np.quantile(depth_pixel_values, 0.05)
+                        height = np.quantile(depth_pixel_values, 0.95)
+                        crop_height = round(height - base, 4)
+                        total_height.append(crop_height)
+                    else:
+                        total_height.append(0)
 
                 if tiff_thermal:
                     # Thermal Analysis
@@ -577,6 +642,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
 
                 bed_no = rgb['Bed']
                 tier_no = rgb['Tier']
+                plot_no = rgb['Plot']
 
                 Bed.append(bed_no)
                 Tier.append(tier_no)
@@ -595,7 +661,7 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                     name_only, extension = os.path.splitext(tiff_rgb.split('/')[-1])
                     
                     # Generate save_path
-                    save_path = os.path.join(save_dir,f"Bed{bed_no}_Tier{tier_no}.png")
+                    save_path = os.path.join(save_dir,f"Plot_{plot_no}_Bed{bed_no}_Tier{tier_no}.png")
                     
                     #cv2.imwrite(save_path,rgb_resized)
                     cv2.imwrite(save_path,rgb_img)
@@ -613,6 +679,9 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
                                     tiff_thermal, save_cropped_imgs, save_dir, total_vf, 
                                     total_height, total_temperature, Bed, Tier, total_lon, total_lat, debug)
 
+        # check if stop signal is True
+        if shared_states.stop_signal:
+            break
         print("Analyze images --- %s seconds ---" % (time.time() - start_time))
         start_time = time.time()
         
@@ -652,13 +721,26 @@ def process_tiff(tiff_files_rgb, tiff_files_dem, tiff_files_thermal, plot_geojso
         else:
             # Merge the two dataframes and save to geojson
             # print(df)
-            gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
-            
-            
-
-        print("Done.")
-        
-
+            # Create Bed if not exists
+            for feature in json_fieldmap['features']:
+                if 'Bed' not in feature['properties']:
+                    feature['properties']['Bed'] = feature['properties']['column']
+                    feature['properties']['Tier'] = feature['properties']['row']
+            # gpd.GeoDataFrame.merge(gpd.GeoDataFrame.from_features(json_fieldmap), df, on=['Bed','Tier']).to_file(output_geojson, driver='GeoJSON')
+            gdf = gpd.GeoDataFrame.from_features(json_fieldmap)
+            merged_gdf = gdf.merge(df, on=['Bed', 'Tier'])
+            merged_gdf = merged_gdf.fillna("None")
+            merged_gdf = merged_gdf.drop(columns=['col', 'row', 'column'], errors='ignore')
+            merged_gdf.to_file(output_geojson, driver='GeoJSON')
+    
+    # check if stop signal is True
+    if shared_states.stop_signal:
+        return False
+    
+    with open(f"{output_path}/progress.txt", "w") as f:
+                f.write("100")
+    print("Done.")
+    return True
 
 
 def query_drone_images(args_dict, data_root_dir):
@@ -737,9 +819,10 @@ def query_drone_images(args_dict, data_root_dir):
 
 # Debug
 if __name__ == "__main__":
-    process_tiff(tiff_files_rgb="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-RGB.tif",
-                 tiff_files_dem="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-P4-DEM.tif",
-                 tiff_files_thermal="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Drone/2022-06-20-FLIR-RGBT.tif",
-                 plot_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/Plot-Attributes-WGS84.geojson",
-                 output_geojson="/home/GEMINI/GEMINI-Data/Processed/Davis/Legumes/2022-06-20/Results/2022-06-20-Drone-Traits-WGS84_debug.geojson",
-                 debug=True)
+    process_tiff(tiff_files_rgb="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-RGB.tif",
+                 tiff_files_dem="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-DEM.tif",
+                 tiff_files_thermal="",
+                 plot_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Intermediate/2022/Subset/Davis/Cowpea/Plot-Boundary-WGS84.geojson",
+                 output_geojson="/home/gemini/mnt/d/GEMINI-App-Data-Demo/Processed/2022/Subset/Davis/Cowpea/2022-07-11/Drone/RGB/2022-07-11-Drone-RGB-Traits-WGS84.geojson",
+                 save_cropped_imgs=False,
+                 debug=False)
