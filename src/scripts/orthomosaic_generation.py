@@ -194,9 +194,10 @@ def make_odm_args(data_root_dir, location, population, date, year, experiment, p
 
     return args
 
-def reset_odm(data_root_dir):
+def reset_odm(args):
     # May be more appropriate to rename as "prep_odm" in the future to clarify functionality
     # This function now contains checks for existing processed data previously in run_odm
+    drd = args.data_root_dir
     pth = args.temp_dir
     recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
     reset_odm_temp = False
@@ -215,8 +216,9 @@ def reset_odm(data_root_dir):
                 reset_odm_temp = True
     else:
         reset_odm_temp = True
-    temp_path = os.path.join(data_root_dir, 'temp')
+    
     if reset_odm_temp:
+        temp_path = os.path.join(drd, 'temp')
         while os.path.exists(temp_path):
             shutil.rmtree(temp_path)
 
