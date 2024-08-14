@@ -809,6 +809,11 @@ def run_odm_endpoint():
                          custom_options)
     
     try:
+        # Reset ODM if needed before proceeding 
+        reset_thread = threading.Thread(target=reset_odm, args=(args.data_root_dir))
+        reset_thread.start()
+        # Ensure reset thread is finished before trying to access temp folder 
+        reset_thread.join()
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,))
         thread.start()

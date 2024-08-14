@@ -7,6 +7,7 @@ import argparse
 from glob import glob
 from math import log
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 # Third-party library imports
 import cv2
@@ -194,10 +195,30 @@ def make_odm_args(data_root_dir, location, population, date, year, experiment, p
     return args
 
 def reset_odm(data_root_dir):
-    # Delete existing folders
+    # May be more appropriate to rename as "prep_odm" in the future to clarify functionality
+    # This function now contains checks for existing processed data previously in run_odm
+    pth = args.temp_dir
+    recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+    reset_odm_temp = False
+    if os.path.exists(recipe_file):
+        # Read the recipe file
+        with open(recipe_file, 'r') as file:
+            data = yaml.load(file, Loader=yaml.FullLoader)
+            image_pth = data['image_pth']
+            prev_arg = make_odm_args_from_path(image_pth)
+            if odm_args_checker(prev_arg, args):
+                _process_outputs(args)
+                print("Already processed. Copying to Processed folder.")
+                return
+            else:
+                # Reset the ODM if the arguments are different
+                reset_odm_temp = True
+    else:
+        reset_odm_temp = True
     temp_path = os.path.join(data_root_dir, 'temp')
-    while os.path.exists(temp_path):
-        shutil.rmtree(temp_path)
+    if reset_odm_temp:
+        while os.path.exists(temp_path):
+            shutil.rmtree(temp_path)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -220,30 +241,7 @@ def run_odm(args):
     # Check if the already processed data is not in the Processed folder
     # Copy the temp to the Processed folder without deleting the temp, and finish
     # Check if the log file exists
-
-    pth = args.temp_dir
-    recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
-    reset_odm_temp = False
-    if os.path.exists(recipe_file):
-        # Read the recipe file
-        with open(recipe_file, 'r') as file:
-            data = yaml.load(file, Loader=yaml.FullLoader)
-            image_pth = data['image_pth']
-            prev_arg = make_odm_args_from_path(image_pth)
-            if odm_args_checker(prev_arg, args):
-                _process_outputs(args)
-                print("Already processed. Copying to Processed folder.")
-                return
-            else:
-                # Reset the ODM if the arguments are different
-                reset_odm_temp = True
-    else:
-        reset_odm_temp = True
-
-    if reset_odm_temp:
-        # Reset the ODM
-        reset_odm(args.data_root_dir)
-
+    
     try:
         _create_directory_structure(args)
 
