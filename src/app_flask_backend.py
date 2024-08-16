@@ -841,6 +841,16 @@ def stop_odm():
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
+        command = f"docker stop GEMINI-Container"
+        command = command.split()
+        # Run the command
+        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+        process.wait()
+        command = f"docker rm GEMINI-Container"
+        command = command.split()
+        # Run the command
+        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+        process.wait()
         # reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
