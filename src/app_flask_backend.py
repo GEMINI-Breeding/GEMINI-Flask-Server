@@ -906,7 +906,7 @@ def monitor_log_updates(logs_path, progress_file):
             while True:
                 line = file.readline()
                 if line:
-                    if "100 - done" in line:
+                    if "100 - done" in line or "ODM app finished" in line:
                         update_progress_file(progress_file, 100)
                         print("Progress updated: 100%")
                         return
