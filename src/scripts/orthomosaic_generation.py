@@ -287,7 +287,7 @@ def run_odm(args):
             else:
                 docker_image = "opendronemap/odm"
 
-            command = f"docker run -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
