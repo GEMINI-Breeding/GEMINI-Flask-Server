@@ -807,10 +807,14 @@ def run_odm_endpoint():
                          temp_dir, 
                          reconstruction_quality, 
                          custom_options)
-    
     try:
+        # Reset ODM if needed before proceeding 
+        reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
+        reset_thread.start()
+        # Ensure reset thread is finished before trying to access temp folder 
+        reset_thread.join()
         # Run ODM in a separate thread
-        thread = threading.Thread(target=run_odm, args=(args,))
+        thread = threading.Thread(target=run_odm, args=(args,), daemon=True)
         thread.start()
         
         # Run progress tracker
