@@ -34,6 +34,10 @@ from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
 
+# Paths to scripts
+TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
+print(TRAIN_MODEL)
+
 # Define the Flask application for serving files
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
@@ -64,6 +68,25 @@ def list_dirs(dir_path):
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
+def stream_output(process):
+    """Function to read the process output and errors in real-time."""
+    while True:
+        # Read stdout line
+        output = process.stdout.readline()
+        error_output = process.stderr.readline()
+
+        if output == b"" and error_output == b"" and process.poll() is not None:
+            break  # Break loop if process ends and no more output
+
+        if output:
+            print("Output:", output.decode('utf-8').strip())
+
+        if error_output:
+            print("Error:", error_output.decode('utf-8').strip())
+
+    # Close stdout and stderr after reading
+    process.stdout.close()
+    process.stderr.close()
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
@@ -1135,12 +1158,15 @@ def scan_for_new_folders(save_path):
         
 @file_app.route('/get_progress', methods=['GET'])
 def get_training_progress():
+    for key, value in latest_data.items():
+        if isinstance(value, np.int64):
+            latest_data[key] = int(value)
     print(latest_data)
     return jsonify(latest_data)
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels
+    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels, training_process
     
     try:
         # receive the parameters
@@ -1165,12 +1191,11 @@ def train_model():
         # extract labels
         labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
         labels = get_labels(labels_path)
-        labels_arg = " ".join(labels)
+        labels_arg = " ".join(labels).split()
         
         # other training args
-        container_dir = Path('/app/mnt/GEMINI-App-Data')
-        pretrained = "/app/train/yolov8n.pt"
-        save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
+        pretrained = "yolov8n.pt"
+        save_train_model = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform
         scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
         scan_save = Path(scan_save)
         scan_save.mkdir(parents=True, exist_ok=True)
@@ -1178,35 +1203,68 @@ def train_model():
         latest_data['map'] = 0
         training_stopped_event.clear()
         threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-        images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
+        images = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
         
         # run training
-        cmd = (f"docker exec train "
-            f"python /app/train/train.py "
-            f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
-            f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
-            f"--batch-size {batch_size} --labels {labels_arg} ")
+        # cmd = (f"docker exec train "
+        #     f"python /app/train/train.py "
+        #     f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
+        #     f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
+        #     f"--batch-size {batch_size} --labels {labels_arg} ")
         
+        cmd = (
+            f"python {TRAIN_MODEL} "
+            f"--pretrained '{pretrained}' "
+            f"--images '{images}' "
+            f"--save '{save_train_model}' "
+            f"--sensor '{sensor}' "
+            f"--date '{date}' "
+            f"--trait '{trait}' "
+            f"--image-size '{image_size}' "
+            f"--epochs '{epochs}' "
+            f"--batch-size {batch_size} "
+            f"--labels {' '.join(labels_arg)}"
+        )
         print(cmd)
+        
+        training_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=stream_output, args=(training_process,), daemon=True).start()
+        time.sleep(5)  # Wait for 5 seconds
+        if training_process.poll() is None:
+            print("Process started successfully and is running.")
+        else:
+            print("Process failed to start or exited immediately.")
 
-        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = process.stdout.decode('utf-8')
-        # output = 'test'
-        return jsonify({"message": "Training started", "output": output}), 202
+        
+        return jsonify({"message": "Training started"}), 202
+        
+        # print(cmd)
+
+        # process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # output = process.stdout.decode('utf-8')
+        # return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
-    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-    container_name = 'train'
+    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder, training_process
+    # container_name = 'train'
     try:        
         # stop training
         print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        # kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        # subprocess.run(kill_cmd, shell=True)
+        # print(f"Sent SIGKILL to Python process in {container_name} container.")
+        if training_process is not None:
+            training_process.terminate()
+            training_process.wait()  # Optionally wait for the process to terminate
+            print("Training process terminated.")
+            training_process = None
+        else:
+            print("No training process running.")
+            
         training_stopped_event.set()
         subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
         
@@ -1215,29 +1273,39 @@ def stop_training():
         remove_files_from_folder(labels_val_folder)
         remove_files_from_folder(images_train_folder)
         remove_files_from_folder(images_val_folder)
+        
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 @file_app.route('/done_training', methods=['POST'])
 def done_training():
-    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-    container_name = 'train'
+    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder, training_process
+    # container_name = 'train'
     try:
         # stop training
         print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
-        training_stopped_event.set()
-        results_file = ''
-        subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        # kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        # subprocess.run(kill_cmd, shell=True)
+        # print(f"Sent SIGKILL to Python process in {container_name} container.")
+        if training_process is not None:
+            training_process.terminate()
+            training_process.wait()  # Optionally wait for the process to terminate
+            print("Training process terminated.")
+            training_process = None
+        else:
+            print("No training process running.")
+            
+        # subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        # print(f"Removed {new_folder}")
         
         # unlink files
         remove_files_from_folder(labels_train_folder)
         remove_files_from_folder(labels_val_folder)
         remove_files_from_folder(images_train_folder)
         remove_files_from_folder(images_val_folder)
+        training_stopped_event.set()
+        results_file = ''
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
