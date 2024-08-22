@@ -64,3 +64,6 @@ zipp==3.16.2
 opencv-python
 tqdm
 pyyaml
+farm-ng-amiga
+torch
+kornia-rs
