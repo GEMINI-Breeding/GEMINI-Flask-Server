@@ -807,10 +807,14 @@ def run_odm_endpoint():
                          temp_dir, 
                          reconstruction_quality, 
                          custom_options)
-    
     try:
+        # Reset ODM if needed before proceeding 
+        reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
+        reset_thread.start()
+        # Ensure reset thread is finished before trying to access temp folder 
+        reset_thread.join()
         # Run ODM in a separate thread
-        thread = threading.Thread(target=run_odm, args=(args,))
+        thread = threading.Thread(target=run_odm, args=(args,), daemon=True)
         thread.start()
         
         # Run progress tracker
@@ -841,6 +845,16 @@ def stop_odm():
         print('ODM processed stopped by user.')
         stop_event = threading.Event()
         stop_event.set()
+        command = f"docker stop GEMINI-Container"
+        command = command.split()
+        # Run the command
+        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+        process.wait()
+        command = f"docker rm GEMINI-Container"
+        command = command.split()
+        # Run the command
+        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+        process.wait()
         # reset_odm(data_root_dir)
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
@@ -892,7 +906,7 @@ def monitor_log_updates(logs_path, progress_file):
             while True:
                 line = file.readline()
                 if line:
-                    if "100 - done" in line:
+                    if "100 - done" in line or "ODM app finished" in line:
                         update_progress_file(progress_file, 100)
                         print("Progress updated: 100%")
                         return
