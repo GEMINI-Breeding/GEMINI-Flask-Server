@@ -14,8 +14,11 @@ import csv
 import subprocess
 from PIL import Image
 from math import sqrt, exp, log
-from matplotlib import cm
-from matplotlib import pyplot as plt
+try:
+    from matplotlib import cm
+    from matplotlib import pyplot as plt
+except Exception as e:
+    pass
 
 import numpy as np
 
@@ -218,13 +221,14 @@ class FlirImageExtractor:
             #thermal_np = np.vectorize(lambda x: (x >> 8) + ((x & 0x00ff) << 8))(thermal_np)
             thermal_np = (thermal_np >> 8) + ((thermal_np & 0x00ff) << 8)
             pass
-
+        
+        self.RawThermalImage = thermal_np # Back up the raw thermal image
         mean_value = np.mean(thermal_np)
         
         if 1:
             # print(mean_value)
             if np.max(thermal_np) < 7500:
-                print(f"mean_value: {mean_value}, Image needs to be Corrected")
+                # print(f"mean_value: {mean_value}, Image needs to be Corrected")
                 # Add offset
                 thermal_np = thermal_np*3.356422717437227 - 1404.6130301150079
             else:
@@ -237,7 +241,6 @@ class FlirImageExtractor:
             start_time = time.time()
 
         # Convert to real temperature   
-        self.RawThermalImage = thermal_np # Back up the raw thermal image
         thermal_np = self.raw2temp(thermal_np, E=meta['Emissivity'], OD=subject_distance,
                                                                         RTemp= meta['ReflectedApparentTemperature'],
                                                                         ATemp= meta['AtmosphericTemperature'],
@@ -308,6 +311,18 @@ class FlirImageExtractor:
         """
         digits = re.findall(r"[-+]?\d*\.\d+|\d+", dirtystr)
         return float(digits[0])
+    
+    def extract_gps_info(self):
+        """
+        Extract GPS info from the image
+        :return:
+        """
+        meta_json = subprocess.check_output(
+            [self.exiftool_path, self.flir_img_filename, '-GPSLatitude', '-GPSLongitude', '-GPSAltitude', '-j'])
+    
+        meta = json.loads(meta_json.decode())[0]
+
+        return meta
 
     def plot(self):
         """

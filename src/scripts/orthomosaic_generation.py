@@ -17,9 +17,10 @@ import yaml
 
 # Local application/library specific imports
 # Add script directory to path
-sys.path.append(os.path.dirname(os.path.join(os.path.realpath(__file__),"../")))
-from scripts.create_geotiff_pyramid import create_tiled_pyramid
-from scripts.thermal_camera.flir_image_extractor import FlirImageExtractor
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from create_geotiff_pyramid import create_tiled_pyramid
+from thermal_camera.flir_image_extractor import FlirImageExtractor
+from thermal_camera.process_flir import warp_image
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -192,7 +193,7 @@ def reset_odm(args):
         with open(recipe_file, 'r') as file:
             data = yaml.load(file, Loader=yaml.FullLoader)
             image_pth = data['image_pth']
-            prev_arg = make_odm_args_from_path(image_pth)
+            prev_arg = make_odm_args_from_recipe(data)
             if odm_args_checker(prev_arg, args):
                 _process_outputs(args)
                 print("Already processed. Copying to Processed folder.")
@@ -228,7 +229,7 @@ def extract_thermal_images(image_pth, extracted_folder_name):
     fie = FlirImageExtractor(exiftool_path="exiftool",use_calibration_data=True, is_debug=False)
 
     # Create the folder
-    extracted_folder = os.path.join(image_pth, extracted_folder_name)
+    extracted_folder = os.path.join(image_pth, "../",extracted_folder_name)
     if not os.path.exists(extracted_folder):
         os.makedirs(extracted_folder)
 
@@ -236,9 +237,58 @@ def extract_thermal_images(image_pth, extracted_folder_name):
     # Get the list of images
     images = glob(os.path.join(image_pth, '*.jpg'))
 
+    # Prepare geo.txt file
+    geo_txt_path = os.path.join(image_pth, "../", 'geo.txt')
+    with open(geo_txt_path, "w") as f:
+        # Write the projection to the file
+        f.write("EPSG:4326\n")
 
-    # # Extract the thermal images
-    # for image in images:
+        # Extract the thermal images
+        print("Extracting thermal images...")
+        for i, image in enumerate(tqdm(images)):
+            image_name = os.path.basename(image)
+            # Change the extension to .tiff
+            image_name = image_name.replace('.jpg', '.tif')
+
+            # Check if the image is already extracted
+            if os.path.exists(os.path.join(extracted_folder, image_name)):
+                continue
+
+            fie.process_image(image)
+            # Extract Thermal Image
+            raw_rgb = fie.get_rgb_np()
+            thermal_image_np = fie.get_RawThermalImage()
+            thermal_image_np = thermal_image_np.astype('uint16')
+            # Warp RGB
+            warped_rgb, _  = warp_image(raw_rgb, thermal_image_np, fie.meta, obj_distance=10.0)
+
+            # Convert into uint16
+            warped_rgb_uint16 = (warped_rgb * 2**8).astype('uint16')
+
+            # Make RGB-Thermal 4 channel image
+            rgb_thermal = cv2.merge([warped_rgb_uint16[:,:,0], warped_rgb_uint16[:,:,1], warped_rgb_uint16[:,:,2], thermal_image_np])
+
+            # Save the image
+
+            cv2.imwrite(os.path.join(extracted_folder, image_name), rgb_thermal)
+
+            # Dry run
+            # if i > 10:
+            #     break
+
+            # Write the geo.txt file
+            gps_info = fie.extract_gps_info()
+            gps_info_keys = gps_info.keys()
+            # Check if the GPS info is available
+            if 'GPSLatitude' in gps_info_keys and 'GPSLongitude' in gps_info_keys and 'GPSAltitude' in gps_info_keys:
+                lat = gps_info['latitude']
+                lon = gps_info['longitude']
+                height = gps_info['altitude']
+                f.write(f"{image_name} {lon} {lat} {height}\n")
+
+    print("Thermal images extracted.")
+
+
 
 
 
@@ -273,7 +323,7 @@ def run_odm(args):
 
     if reset_odm_temp:
         # Reset the ODM
-        reset_odm(args.data_root_dir)
+        reset_odm(args)
 
     try:
         _create_directory_structure(args)
@@ -282,8 +332,8 @@ def run_odm(args):
         # Check if the sensor is thermal
         if args.sensor.lower() == 'thermal':
             # Extract thermal images
-            extracted_folder_name = 'ThermalImages'
-            extract_thermal_images(image_pth,extracted_folder_name)
+            extracted_folder_name = 'Images_extracted'
+            extract_thermal_images(image_pth, extracted_folder_name)
             image_pth = image_pth.replace('Images', extracted_folder_name)
         # Run ODM
         project_path = args.temp_dir
@@ -348,18 +398,18 @@ def run_odm(args):
 if __name__ == '__main__':
     # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--year', type=str, help='Year of the data collection',default='2022')
-    parser.add_argument('--experiment', type=str, help='Experiment name', default='GEMINI')
+    parser.add_argument('--year', type=str, help='Year of the data collection',default='2023')
+    parser.add_argument('--experiment', type=str, help='Experiment name', default='Davis')
     parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
     parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
-    parser.add_argument('--date', type=str, help='Date of the data collection', default='2022-06-20')
+    parser.add_argument('--date', type=str, help='Date of the data collection', default='2023-06-20')
     parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
     parser.add_argument('--sensor', type=str, help='Sensor used', default='Thermal')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
                         default='/home/GEMINI/GEMINI-App-Data/temp/project')
     parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=['high', 'low', 'custom'], default='low')
+                        choices=[' high', 'low', 'custom'], default='low')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
