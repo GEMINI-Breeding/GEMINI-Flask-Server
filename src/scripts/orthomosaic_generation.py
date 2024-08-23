@@ -16,9 +16,10 @@ from tqdm import tqdm
 import yaml
 
 # Local application/library specific imports
-# Add current directory to path
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from create_geotiff_pyramid import create_tiled_pyramid
+# Add script directory to path
+sys.path.append(os.path.dirname(os.path.join(os.path.realpath(__file__),"../")))
+from scripts.create_geotiff_pyramid import create_tiled_pyramid
+from scripts.thermal_camera.flir_image_extractor import FlirImageExtractor
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -47,41 +48,23 @@ def _create_directory_structure(args):
         os.makedirs(pth)
         os.makedirs(os.path.join(pth, 'code'))
 
- 
-    if 0:
-        # Copy the images to the temporary directory
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
-        print(f"Image Path: {image_pth}")
-        os.makedirs(os.path.join(pth, 'code', 'images'))
-        images = os.listdir(os.path.join(image_pth))
-        extensions = ('.jpg', '.tif','.png')
-        images = [x for x in images if x.lower().endswith(extensions)]
-        if 0:
-            # Copy the images to the temporary directory
-            with ThreadPoolExecutor() as executor:
-                executor.map(lambda im_name: _copy_image(image_pth, 
-                                                    os.path.join(pth, 'code', 'images'), 
-                                                    im_name), 
-                                        images)
-        else:
-            print("Copying images")
-            for im_name in tqdm(images):
-                _copy_image(image_pth, os.path.join(pth, 'code', 'images'), im_name)
-    else:
-        # Do nothing because docker will mount the image folder to the container
-        pass
 
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
-    print(f"GCP Path: {gcp_pth}")
-    # Check if the file has more than 1 lines
-    filtered_gcp_list = []
-    with open(gcp_pth, 'r') as f:
-        lines = f.readlines()
-        if len(lines) < 2:
-            print("GCP file has less than 2 lines...Ignoring")
-        else:
-            shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
+    # print(f"GCP Path: {gcp_pth}")
+    # Check if gcp_pth exists
+    if not os.path.exists(gcp_pth):
+        print(f"GCP file {gcp_pth} does not exist.")
+        return False
+    else:
+        # Check if the file exists but has more than 1 lines
+        filtered_gcp_list = []
+        with open(gcp_pth, 'r') as f:
+            lines = f.readlines()
+            if len(lines) < 2:
+                print("GCP file has less than 2 lines...Ignoring")
+            else:
+                shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
 
 
 def _process_outputs(args):
@@ -156,24 +139,27 @@ def check_nvidia_smi():
             return False
     except Exception as e:
         return False
-    
-def make_odm_args_from_path(path):
-    '''
-    Generate an argparse.Namespace object from a path to the images.
-    Example path string: Raw/2022/GEMINI/Davis/Legumes/2022-06-20/Drone/RGB/Images
-    '''
-    parts = path.split('/')
-    sensor = parts[-2]
-    platform = parts[-3]
-    date = parts[-4]
-    population = parts[-5]
-    location = parts[-6]
-    experiment = parts[-7]
-    year = parts[-8]
-    data_root_dir = parts[-9]
-    temp_dir = os.path.join(data_root_dir, 'temp', 'project')
 
-    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, 'Low', [])
+def make_odm_args_from_recipe(yaml_data):
+    '''
+    Generate an argparse.Namespace object from the recipe.yaml file.
+    Example of yaml_data:
+    
+    '''
+    year = yaml_data['year']
+    experiment = yaml_data['experiment']
+    location = yaml_data['location']
+    population = yaml_data['population']
+    date = yaml_data['date']
+    platform = yaml_data['platform']
+    sensor = yaml_data['sensor']
+    reconstruction_quality = yaml_data['reconstruction_quality']
+    custom_options = yaml_data['custom_options']
+    image_pth = yaml_data['image_pth']
+    data_root_dir = yaml_data['data_root_dir']
+    temp_dir = yaml_data['temp_dir']
+
+    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options)
 
 
 
@@ -234,6 +220,27 @@ def odm_args_checker(arg1, arg2):
         arg1.sensor == arg2.sensor
     ])
 
+def extract_thermal_images(image_pth, extracted_folder_name):
+    '''
+    # Extract thermal images
+    '''
+
+    fie = FlirImageExtractor(exiftool_path="exiftool",use_calibration_data=True, is_debug=False)
+
+    # Create the folder
+    extracted_folder = os.path.join(image_pth, extracted_folder_name)
+    if not os.path.exists(extracted_folder):
+        os.makedirs(extracted_folder)
+
+    
+    # Get the list of images
+    images = glob(os.path.join(image_pth, '*.jpg'))
+
+
+    # # Extract the thermal images
+    # for image in images:
+
+
 
 def run_odm(args):
     '''
@@ -243,67 +250,87 @@ def run_odm(args):
     # Check if the already processed data is not in the Processed folder
     # Copy the temp to the Processed folder without deleting the temp, and finish
     # Check if the log file exists
-    
+    project_path = args.temp_dir
+    recipe_file = os.path.join(project_path,'recipe.yaml')
+    reset_odm_temp = False
+    if os.path.exists(recipe_file):
+        # Read the recipe file
+        with open(recipe_file, 'r') as file:
+            data = yaml.load(file, Loader=yaml.FullLoader)
+            # Recover the arg from the recipe file
+            recipe_arg = make_odm_args_from_recipe(data)
+            if odm_args_checker(recipe_arg, args):
+                print("Already processed. Try to copying to Processed folder.")
+                if _process_outputs(args) == True:
+                    return
+                else:
+                    print("Error in copying to Processed folder. Re-run ODM.")    
+            else:
+                # Reset the ODM if the arguments are different
+                reset_odm_temp = True
+    else:
+        reset_odm_temp = True
+
+    if reset_odm_temp:
+        # Reset the ODM
+        reset_odm(args.data_root_dir)
+
     try:
         _create_directory_structure(args)
 
-        # Run ODM
-        pth = args.temp_dir
-
-        if pth[-1] == '/':
-            pth = pth[:-1]
-        if os.path.basename(pth) != 'project':
-            pth = os.path.join(pth, 'project')
-        
-        
-        print('Project Path: ', pth)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        # Check if the sensor is thermal
+        if args.sensor.lower() == 'thermal':
+            # Extract thermal images
+            extracted_folder_name = 'ThermalImages'
+            extract_thermal_images(image_pth,extracted_folder_name)
+            image_pth = image_pth.replace('Images', extracted_folder_name)
+        # Run ODM
+        project_path = args.temp_dir
+
+        if project_path[-1] == '/':
+            project_path = project_path[:-1]
+        if os.path.basename(project_path) != 'project':
+            project_path = os.path.join(project_path, 'project')
+        
+        
+        print('Project Path: ', project_path)
+
         options = ""
-        log_file = os.path.join(pth, 'code', 'logs.txt')
+        log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
             # See options from https://docs.opendronemap.org/arguments/
-            #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            common_options = "--dsm --orthophoto-resolution 2.0" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            if args.reconstruction_quality == 'Custom':
-                #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+            common_options = "--dsm" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            reconstruction_quality = args.reconstruction_quality.lower()
+            if reconstruction_quality == 'custom':
                 options = f"{args.custom_options} {common_options}"
                 print('Starting ODM with custom options...')
-            elif args.reconstruction_quality == 'Low':
-                options = f"--pc-quality medium --min-num-features 8000 {common_options}" 
+            elif reconstruction_quality == 'low':
+                options = f"{common_options} --pc-quality medium --min-num-features 8000 --orthophoto-resolution 2.0" 
                 print('Starting ODM with low options...')
-            elif args.reconstruction_quality == 'Lowest':
-                options = f"--fast-orthophoto --dsm {common_options}"
+            elif reconstruction_quality == 'lowest':
+                options = f"{common_options} --fast-orthophoto "
                 print('Starting ODM with Lowest options...')
-            elif args.reconstruction_quality == 'High':
-                options = f"--pc-quality high --min-num-features 16000 {common_options}"
+            elif reconstruction_quality == 'high':
+                options = f"{common_options} --pc-quality high --min-num-features 16000 --orthophoto-resolution 0.5"
                 print('Starting ODM with high options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
             if check_nvidia_smi():
                 docker_image = "--gpus all opendronemap/odm:gpu"
             else:
                 docker_image = "opendronemap/odm"
 
             command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
-            # Save image_pth and  docker command to recipe yaml file
-            data = {
-                'year': args.year,
-                'experiment': args.experiment,
-                'location': args.location,
-                'population': args.population,
-                'date': args.date,
-                'platform': args.platform,
-                'sensor': args.sensor,
-                'reconstruction_quality': args.reconstruction_quality,
-                'custom_options': args.custom_options,
-                'image_pth': image_pth,
-                'command': command,
-            }
-            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            # Save settings to recipe yaml file
             with open(recipe_file, 'w') as file:
+                # Export arg to data
+                data = vars(args)
+                data['image_pth'] = image_pth
+                data['command'] = command
                 yaml.dump(data, file, sort_keys=False)
 
             # Parse this with space to list
@@ -319,25 +346,27 @@ def run_odm(args):
         print(f"Error in thread: {e}")
     
 if __name__ == '__main__':
+    # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--date', type=str, help='Date of the data collection')
-    parser.add_argument('--location', type=str, help='Location of the data collection')
-    parser.add_argument('--population', type=str, help='Population for the dataset')
-    parser.add_argument('--year', type=str, help='Year of the data collection')
-    parser.add_argument('--experiment', type=str, help='Experiment name')
-    parser.add_argument('--sensor', type=str, help='Sensor used')
+    parser.add_argument('--year', type=str, help='Year of the data collection',default='2022')
+    parser.add_argument('--experiment', type=str, help='Experiment name', default='GEMINI')
+    parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
+    parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
+    parser.add_argument('--date', type=str, help='Date of the data collection', default='2022-06-20')
+    parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
+    parser.add_argument('--sensor', type=str, help='Sensor used', default='Thermal')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/GEMINI/temp/project')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
+                        default='/home/GEMINI/GEMINI-App-Data/temp/project')
+    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=['High', 'Low', 'Custom'], default='low')
+                        choices=['high', 'low', 'custom'], default='low')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
 
     # Check if opendronemap is installed as a snap package
-    if shutil.which('opendronemap') is None:
-        print("Error: opendronemap is not installed. Please install it using 'sudo snap install opendronemap --edge'")
+    if shutil.which('docker') is None:
+        print("Error: docker is not installed. Please install docker")
         sys.exit(1)
     
     # Run ODM
