@@ -11,5 +11,6 @@ dependencies:
   - scipy
   - protobuf
   - farm-ng-amiga
+  - ultralytics
   - pip:
       - -r requirements.txt
