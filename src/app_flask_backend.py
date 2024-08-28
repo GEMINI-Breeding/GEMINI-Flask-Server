@@ -127,8 +127,19 @@ def update_data():
                         old_dir = os.path.dirname(old_dir)
                     except OSError:
                         break
+        npy_path = new_path_raw + "/image_names_final.npy"
 
-        return jsonify({'message': 'Directories updated successfully.'}), 200
+        if not os.path.isfile(npy_path):
+            print(f"The file {npy_path} does not exist. Skipping this block.")
+            return jsonify({'message': 'File does not exist. Skipped updating .npy file.'}), 200
+        
+        loaded_npy = np.load(npy_path, allow_pickle=True).item()
+        new_path_npy = f"/Raw/{new_data['year']}/{new_data['experiment']}/{new_data['location']}/{new_data['population']}/{new_data['date']}/{new_data['platform']}/{new_data['sensor']}/Images/"
+        for entry in loaded_npy['selected_images']:
+            entry['image_path'] = new_path_npy + entry['image_path'].split('/')[-1]
+        np.save(npy_path, loaded_npy)
+
+        return jsonify({'message': 'Directories and .npy updated successfully.'}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
