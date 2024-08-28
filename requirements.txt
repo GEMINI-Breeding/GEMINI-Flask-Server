@@ -65,3 +65,5 @@ opencv-python
 tqdm
 pyyaml
 ultralytics
+torch
+kornia-rs
