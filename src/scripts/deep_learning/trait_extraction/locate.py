@@ -728,7 +728,7 @@ def update_progress(
                         'filter': 90,'export': 100}
     progress = scores[task]
     
-    # write in text file
+    # write in text file (make text file if it doesnt exist)
     with open(save/'locate_progress.txt', 'w') as file:
         file.write(str(progress))
 
@@ -821,3 +821,9 @@ if __name__ == "__main__":
     
     main(args.images, args.camera, args.camera_stereo, args.batch_size, \
             args.metadata, args.model, args.save, args.plotmap, args.skip_stereo)
+    
+    # example: python locate.py --images /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Raw/2022/Subset/Davis/Cowpea/2022-06-20/T4/RGB/Images
+    # --model /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Intermediate/2022/Subset/Davis/Cowpea/Training/T4/RGB Plant Detection/Plant-NTA1T6/weights/last.pt
+    # --plotmap /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Intermediate/2022/Subset/Davis/Cowpea/Plot-Boundary-WGS84.geojson
+    # --save /home/gemini/mnt/d/Temporary/locate_test
+    # --metadata /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Raw/2022/Subset/Davis/Cowpea/2022-06-20/T4/RGB/Metadata
