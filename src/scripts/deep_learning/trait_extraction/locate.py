@@ -629,7 +629,7 @@ def parse_dir(
     """
     if task == 'inference':
         # Create a search pattern to find .jpg files in all nested subdirectories
-        search_pattern = str(images_path / '**' / camera / '*.jpg')
+        search_pattern = str(images_path / '**' / '*.jpg')
         
         # Use glob to get all image paths matching the search pattern
         try:
@@ -741,7 +741,8 @@ def main(
     model: Path,
     save: Path,
     plotmap: Path,
-    skip_stereo: bool
+    skip_stereo: bool,
+    accelerate: bool
 ) -> None:
     
     if not skip_stereo:
@@ -759,7 +760,8 @@ def main(
     # parse through parent directory for images
     images = parse_dir(images_path, metadata, camera, task='inference')
     images = sorted(images, key=lambda path: int(re.search(r'\d{19}', path).group()))
-    images = images[::3]
+    if accelerate:
+        images = images[::3]
     update_progress(save, 'images')
 
     # run inference on dataset and export dataframe    
@@ -815,12 +817,15 @@ if __name__ == "__main__":
                     help='Path to camera configuration file')
     ap.add_argument('--skip-stereo', action='store_true', default=False,
                     help='True if pointclouds already exist.')
+    ap.add_argument('--accelerate', action='store_true', default=False,
+                    help='True if using high frame rate cameras.')
     args = ap.parse_args()
     
     print(f'num. of workers: {num_workers}')
     
     main(args.images, args.camera, args.camera_stereo, args.batch_size, \
-            args.metadata, args.model, args.save, args.plotmap, args.skip_stereo)
+            args.metadata, args.model, args.save, args.plotmap, args.skip_stereo, \
+                args.accelerate)
     
     # example: python locate.py --images /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Raw/2022/Subset/Davis/Cowpea/2022-06-20/T4/RGB/Images
     # --model /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Intermediate/2022/Subset/Davis/Cowpea/Training/T4/RGB Plant Detection/Plant-NTA1T6/weights/last.pt
