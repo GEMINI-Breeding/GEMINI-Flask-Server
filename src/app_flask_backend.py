@@ -421,18 +421,25 @@ def run_script():
 @file_app.route('/process_images', methods=['POST'])
 def get_gcp_selcted_images():
     global data_root_dir
-    # receive the parameters
-    location = request.json['location']
-    population = request.json['population']
-    date = request.json['date']
-    radius_meters = request.json['radius_meters']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    sensor = request.json['sensor']
-    platform = request.json['platform']
-
-    prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+    try:
+        location = request.json['location']
+        population = request.json['population']
+        date = request.json['date']
+        radius_meters = request.json['radius_meters']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        sensor = request.json['sensor']
+        platform = request.json['platform']
+        prefix = data_root_dir+'/Raw'
+        image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+    except Exception as e:
+        print(e)
+        selected_images = []
+        files = []
+        status = "DONE"
+        return jsonify({'selected_images': selected_images,
+                    'num_total': len(files),
+                    'status':status}), 200
 
     # Check if the process is already running
     is_running = False
@@ -493,6 +500,7 @@ def get_drone_extract_progress():
     global processed_image_folder
     # data = request.json
     # tiff_rgb = data['tiff_rgb']
+    # print("Processed image folder: "+ processed_image_folder)
     txt_file = os.path.join(processed_image_folder, 'progress.txt')
     
     # Check if the file exists
@@ -535,7 +543,7 @@ def process_drone_tiff():
     processed_prefix = data_root_dir+'/Processed'
     intermediate_image_folder = os.path.join(intermediate_prefix, year, experimnent, location, population)
     processed_image_folder = os.path.join(processed_prefix, year, experimnent, location, population, date, platform, sensor)
-
+    # print("Setting processed image folder: "+ processed_image_folder)
     # Check if already in processing
     if now_drone_processing:
         return jsonify({'message': 'Already in processing'}), 400
