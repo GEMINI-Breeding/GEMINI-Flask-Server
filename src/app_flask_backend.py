@@ -90,7 +90,109 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
-    
+
+@file_app.route('/update_data', methods=['POST'])
+def update_data():
+    try:
+        data = request.json
+        old_data = data['oldData']
+        new_data = data['updatedData']
+        prefix = data_root_dir
+
+        new_path_raw = os.path.join(prefix, 'Raw', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        new_path_intermediate = os.path.join(prefix, 'Intermediate', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        new_path_processed = os.path.join(prefix, 'Processed', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+
+        os.makedirs(new_path_raw, exist_ok=True)
+        os.makedirs(new_path_intermediate, exist_ok=True)
+        os.makedirs(new_path_processed, exist_ok=True)
+
+        for folder in ['Raw', 'Intermediate', 'Processed']:
+            old_dir = os.path.join(prefix, folder, old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+            new_dir = os.path.join(prefix, folder, new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+
+            if os.path.exists(old_dir):
+                for item in os.listdir(old_dir):
+                    old_item_path = os.path.join(old_dir, item)
+                    new_item_path = os.path.join(new_dir, item)
+                    shutil.move(old_item_path, new_item_path)
+                
+                def is_empty_dir(path):
+                    return all(os.path.isdir(os.path.join(path, d)) and len(os.listdir(os.path.join(path, d))) == 0
+                               for d in os.listdir(path))
+                
+                while os.path.exists(old_dir) and is_empty_dir(old_dir):
+                    try:
+                        os.rmdir(old_dir)
+                        old_dir = os.path.dirname(old_dir)
+                    except OSError:
+                        break
+        npy_path = new_path_raw + "/image_names_final.npy"
+
+        if not os.path.isfile(npy_path):
+            print(f"The file {npy_path} does not exist. Skipping this block.")
+        else:
+            loaded_npy = np.load(npy_path, allow_pickle=True).item()
+            new_path_npy = f"/Raw/{new_data['year']}/{new_data['experiment']}/{new_data['location']}/{new_data['population']}/{new_data['date']}/{new_data['platform']}/{new_data['sensor']}/Images/"
+            for entry in loaded_npy['selected_images']:
+                entry['image_path'] = new_path_npy + entry['image_path'].split('/')[-1]
+            np.save(npy_path, loaded_npy)
+
+        for file in os.listdir(new_path_processed):
+            file_path = os.path.join(new_path_processed, file)
+            if os.path.isfile(file_path) and file.lower().endswith('.tif'):
+                base_name, ext = os.path.splitext(file)
+                last_part = "-".join(base_name.split('-')[3:])
+                new_filename = f"{new_data['date']}-{last_part}{ext}"
+                new_file_path = os.path.join(new_path_processed, new_filename)
+                os.rename(file_path, new_file_path)
+        
+
+        return jsonify({'message': 'Directories updated successfully.'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/delete_files', methods=['POST'])
+def delete_files():
+    try:
+        data = request.json
+        data_to_del = data['data_to_del']
+        prefix = data_root_dir
+
+        paths = {
+            'Raw': os.path.join(prefix, 'Raw', data_to_del['year'], data_to_del['experiment'], data_to_del['location'], data_to_del['population'], data_to_del['date'], data_to_del['platform'], data_to_del['sensor']),
+            'Intermediate': os.path.join(prefix, 'Intermediate', data_to_del['year'], data_to_del['experiment'], data_to_del['location'], data_to_del['population'], data_to_del['date'], data_to_del['platform'], data_to_del['sensor']),
+            'Processed': os.path.join(prefix, 'Processed', data_to_del['year'], data_to_del['experiment'], data_to_del['location'], data_to_del['population'], data_to_del['date'], data_to_del['platform'], data_to_del['sensor'])
+        }
+
+        for _, path in paths.items():
+            if os.path.exists(path):
+                for item in os.listdir(path):
+                    item_path = os.path.join(path, item)
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    pass
+
+                current_dir = os.path.dirname(path)
+                while os.path.exists(current_dir) and not os.listdir(current_dir):
+                    try:
+                        os.rmdir(current_dir)
+                        current_dir = os.path.dirname(current_dir)
+                    except OSError:
+                        break
+
+        return jsonify({'message': 'Files and directories deleted successfully.'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
 def check_runs(dir_path):
     global data_root_dir
@@ -319,18 +421,25 @@ def run_script():
 @file_app.route('/process_images', methods=['POST'])
 def get_gcp_selcted_images():
     global data_root_dir
-    # receive the parameters
-    location = request.json['location']
-    population = request.json['population']
-    date = request.json['date']
-    radius_meters = request.json['radius_meters']
-    year = request.json['year']
-    experiment = request.json['experiment']
-    sensor = request.json['sensor']
-    platform = request.json['platform']
-
-    prefix = data_root_dir+'/Raw'
-    image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+    try:
+        location = request.json['location']
+        population = request.json['population']
+        date = request.json['date']
+        radius_meters = request.json['radius_meters']
+        year = request.json['year']
+        experiment = request.json['experiment']
+        sensor = request.json['sensor']
+        platform = request.json['platform']
+        prefix = data_root_dir+'/Raw'
+        image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+    except Exception as e:
+        print(e)
+        selected_images = []
+        files = []
+        status = "DONE"
+        return jsonify({'selected_images': selected_images,
+                    'num_total': len(files),
+                    'status':status}), 200
 
     # Check if the process is already running
     is_running = False
@@ -391,6 +500,7 @@ def get_drone_extract_progress():
     global processed_image_folder
     # data = request.json
     # tiff_rgb = data['tiff_rgb']
+    # print("Processed image folder: "+ processed_image_folder)
     txt_file = os.path.join(processed_image_folder, 'progress.txt')
     
     # Check if the file exists
@@ -433,7 +543,7 @@ def process_drone_tiff():
     processed_prefix = data_root_dir+'/Processed'
     intermediate_image_folder = os.path.join(intermediate_prefix, year, experimnent, location, population)
     processed_image_folder = os.path.join(processed_prefix, year, experimnent, location, population, date, platform, sensor)
-
+    # print("Setting processed image folder: "+ processed_image_folder)
     # Check if already in processing
     if now_drone_processing:
         return jsonify({'message': 'Already in processing'}), 400
