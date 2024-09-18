@@ -177,6 +177,8 @@ def conversion(
     
     # split timestamps into chunks
     parts = int(0.05 * len(timestamps)) # take 5% of the timestamps
+    if parts == 0:
+        parts = 1
     print(f"Splitting dataset into {parts} parts")
     num_parts = len(timestamps) // parts
     chunks = list(split_into_chunks(timestamps, num_parts))
@@ -187,19 +189,23 @@ def conversion(
         camA_params = get_camera_params(metadata / f'{camera_stereo[0]}.pbtxt')
         camB_params = get_camera_params(metadata / f'{camera_stereo[1]}.pbtxt')
         
+        # get image size
+        example_img = cv2.imread(images[0])
+        ex_w, ex_h = example_img.shape[1], example_img.shape[0]
+        
         R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify( ## NOTE: these values could change
                 cameraMatrix1=camB_params['camera'], distCoeffs1=camB_params['distortion'],
                 cameraMatrix2=camA_params['camera'], distCoeffs2=camA_params['distortion'],
-                imageSize=(2592, 2048), R=camB_params['rectification'], T=np.array([8.5*16,0,0]))
+                imageSize=(ex_w, ex_h), R=camB_params['rectification'], T=np.array([8.5*16,0,0]))
         
         leftX, leftY = cv2.initUndistortRectifyMap( ## NOTE: these values could change
                 camB_params['camera'], camB_params['distortion'], R1,
-                P1, (2592, 2048), cv2.CV_32FC1
+                P1, (ex_w, ex_h), cv2.CV_32FC1
             )
         
         rightX, rightY = cv2.initUndistortRectifyMap( ## NOTE: these values could change
                 camA_params['camera'], camA_params['distortion'], R2,
-                P2, (2592, 2048), cv2.CV_32FC1
+                P2, (ex_w, ex_h), cv2.CV_32FC1
             )
         wrapper = StereoWrapper(leftX, leftY, rightX, rightY)
         
@@ -329,7 +335,7 @@ def match_plot_boundary(args):
 
     for plot in plot_map.itertuples():
         if plot.geometry.contains(point):
-            return idx, timestamp, plot.Bed, plot.Tier, coord[['x1', 'y1', 'x2', 'y2']].tolist()
+            return idx, timestamp, plot.column, plot.row, coord[['x1', 'y1', 'x2', 'y2']].tolist()
 
     return idx, timestamp, None, None, coord[['x1', 'y1', 'x2', 'y2']].tolist()
 
@@ -549,8 +555,9 @@ def create_stereo(
     camA, camB = camera_stereo
 
     # get row that matches timestamp
-    synced[f'{camA}_time'] = synced[f'{camA}_time'].fillna(0).astype('int64')
-    sync_row = synced.loc[synced[f'{camA}_time'] == np.int64(ts), :]
+    # synced[f'{camA}_time'] = synced[f'{camA}_time'].fillna(0).astype(np.int64)
+    synced_timestamps = synced[f'{camA}_time'].fillna(0).to_numpy().astype(np.int64)
+    sync_row = synced.loc[synced_timestamps == np.int64(ts), :]
     if len(sync_row['direction'].values) == 0:
         return 0
     heading = sync_row['direction'].values[0]
@@ -566,9 +573,13 @@ def create_stereo(
         elif len(roots) == 0:
             print(f'Timestamp not found: {file}')
             return 0
-        root = Path(os.path.dirname(roots[0])[:-5])
-        right_im = cv2.imread(str(root / f'{camA}' / sync_row[f'{camA}_file'].values[0]), cv2.IMREAD_COLOR)
-        left_im = cv2.imread(str(root / f'{camB}'/ sync_row[f'{camB}_file'].values[0]), cv2.IMREAD_COLOR)
+        root = Path(os.path.dirname(roots[0]))
+        right_im = cv2.imread(str(root / sync_row[f'{camA}_file'].values[0]), cv2.IMREAD_COLOR)
+        left_im = cv2.imread(str(root / sync_row[f'{camB}_file'].values[0]), cv2.IMREAD_COLOR)
+        
+        # if either right_im or left_im is empty, return 0
+        if (right_im is None) or (left_im is None):
+            return 0
         
     except Exception as e:
         
