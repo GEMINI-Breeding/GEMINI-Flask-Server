@@ -64,5 +64,8 @@ zipp==3.16.2
 opencv-python
 tqdm
 pyyaml
+ultralytics
 torch
 kornia-rs
+scikit-image
+albumentations
