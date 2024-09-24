@@ -67,3 +67,5 @@ pyyaml
 ultralytics
 torch
 kornia-rs
+scikit-image
+albumentations

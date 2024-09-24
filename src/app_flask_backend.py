@@ -37,6 +37,7 @@ from scripts.bin_to_images.bin_to_images import extract_binary
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
 LOCATE_PLANTS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/locate.py'))
+EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/extract.py'))
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
@@ -1572,7 +1573,7 @@ def get_extract_progress():
     
 @file_app.route('/extract_traits', methods=['POST'])
 def extract_traits():
-    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract
+    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract, extract_process
     
     try:
         # recieve parameters
@@ -1601,16 +1602,15 @@ def extract_traits():
         locate_id = match_locate_id.group(1)
         
         # other args
-        container_dir = Path('/app/mnt/GEMINI-App-Data')
-        summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-        model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
-        images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-        disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
-        plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
-        metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-        save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
+        summary_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+        model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
+        images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
+        plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
+        metadata = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+        save = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-Traits-WGS84.geojson'
         save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
-        temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        temp = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
         temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
         temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
         save_extract.mkdir(parents=True, exist_ok=True)
@@ -1622,51 +1622,43 @@ def extract_traits():
         if emerging:
             if disparity.exists():
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save_extract}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo --geojson-filename '{save}'"
                 )
             else:
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --geojson-filename '{save}'"
                 )
         else:
             if disparity.exists():
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo --geojson-filename '{save}'"
                 )
             else:
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --geojson-filename '{save}'"
                 )
         print(cmd)
         
-        with open(save_extract/"output.txt", "w") as file:
-            process = subprocess.run(cmd, shell=True, check=True, stdout=file, stderr=subprocess.PIPE)
-            output = process.stdout.decode('utf-8')
-            return jsonify({"message": "Extract has started", "output": output}), 202
+        extract_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=stream_output, args=(extract_process,), daemon=True).start()
+        time.sleep(5)  # Wait for 5 seconds
+        if extract_process.poll() is None:
+            print("Extract process started successfully and is running.")
+        else:
+            print("Extract process failed to start or exited immediately.")
+        return jsonify({"message": "Extract started"}), 202
     
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
@@ -1674,23 +1666,26 @@ def extract_traits():
     
 @file_app.route('/stop_extract', methods=['POST'])
 def stop_extract():
-    global save_extract, temp_extract
-    container_name = 'locate-extract'
+    global save_extract, temp_extract, extract_process
     try:
-        print('Locate-Extract stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        print('Extract stopped by user.')
+        if extract_process is not None:
+            extract_process.terminate()
+            extract_process.wait()
+            print("Extract process terminated.")
+            extract_process = None
+        else:
+            print("No extract process running.")
+        
         subprocess.run(f"rm -rf '{save_extract}/logs.yaml'", check=True, shell=True)
         subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
-        return jsonify({"message": "Python process in container successfully stopped"}), 200
+        return jsonify({"message": "Python process successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
-    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract
-    container_name = 'locate-extract'
+    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract, extract_process
     try:
         # update logs file
         logs_file = Path(save_extract)/'logs.yaml'
@@ -1708,10 +1703,14 @@ def done_extract():
         with open(logs_file, 'w') as file:
             yaml.dump(data, file, default_flow_style=False, sort_keys=False)
         
-        print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        print('Extract stopped by user.')
+        if extract_process is not None:
+            extract_process.terminate()
+            extract_process.wait()
+            print("Extract process terminated.")
+            extract_process = None
+        else:
+            print("No extract process running.")
         subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:

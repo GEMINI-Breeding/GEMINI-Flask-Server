@@ -639,14 +639,19 @@ def parse_dir(
         camera (str): camera view to use
     """
     if task == 'inference':
-        # Create a search pattern to find .jpg files in all nested subdirectories
-        search_pattern = str(images_path / '**' / '*.jpg')
-        
-        # Use glob to get all image paths matching the search pattern
-        try:
-            images = glob.glob(search_pattern, recursive=True)
-        except Exception as e:
-            print(f'Possible incompatible directory: {e}')
+        # Create a list of image extensions you want to search for
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.gif']
+
+        # Initialize an empty list to hold the paths of the found images
+        images = []
+
+        # Loop through each image extension and use glob to search recursively
+        for ext in image_extensions:
+            search_pattern = str(images_path / '**' / ext)
+            try:
+                images.extend(glob.glob(search_pattern, recursive=True))
+            except Exception as e:
+                print(f'Possible incompatible directory: {e}')
         
         return images
     elif task == 'sync':
