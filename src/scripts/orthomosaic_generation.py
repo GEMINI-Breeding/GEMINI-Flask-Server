@@ -8,12 +8,14 @@ from glob import glob
 from math import log
 from concurrent.futures import ThreadPoolExecutor
 import time
+from datetime import datetime
 
 # Third-party library imports
 import cv2
 from numpy import std
 from tqdm import tqdm
 import yaml
+import json
 
 # Local application/library specific imports
 # Add current directory to path
@@ -240,10 +242,6 @@ def run_odm(args):
     Run ODM on the temporary directory.
     '''
     
-    # Check if the already processed data is not in the Processed folder
-    # Copy the temp to the Processed folder without deleting the temp, and finish
-    # Check if the log file exists
-    
     try:
         _create_directory_structure(args)
 
@@ -313,6 +311,7 @@ def run_odm(args):
             process.wait()
         
         _process_outputs(args)
+        save_ortho_metadata(args)  # Call save_ortho_metadata here
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
@@ -342,3 +341,20 @@ if __name__ == '__main__':
     
     # Run ODM
     run_odm(args)
+
+def save_ortho_metadata(args):
+    metadata = {
+        "date": args.date,
+        "location": args.location,
+        "population": args.population,
+        "year": args.year,
+        "experiment": args.experiment,
+        "sensor": args.sensor,
+        "quality": args.reconstruction_quality,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+    
+    metadata_path = os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'ortho_metadata.json')
+    
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)

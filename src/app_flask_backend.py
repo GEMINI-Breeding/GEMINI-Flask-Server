@@ -25,6 +25,9 @@ from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from werkzeug.utils import secure_filename
+import rasterio
+from PIL import Image
+import io
 
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
@@ -39,6 +42,45 @@ file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 
+@file_app.route('/convert_tif_to_png', methods=['POST'])
+def convert_tif_to_png():
+    data = request.json
+    file_path = data['filePath']
+    
+    # Construct the full file path
+    full_file_path = os.path.join(data_root_dir, file_path)
+    
+    if not os.path.exists(full_file_path):
+        return jsonify({'error': f'File not found: {full_file_path}'}), 404
+    
+    try:
+        # Open the TIFF image using rasterio
+        with rasterio.open(full_file_path) as src:
+            # Read the image data
+            image_data = src.read()
+            
+            # Convert to RGB if necessary
+            if image_data.shape[0] > 3:
+                image_data = image_data[:3]
+            
+            # Transpose the data to the correct shape for PIL
+            image_data = np.transpose(image_data, (1, 2, 0))
+            
+            # Create a PIL Image
+            img = Image.fromarray(np.uint8(image_data))
+            
+            # Create a byte stream to hold the PNG image
+            byte_io = io.BytesIO()
+            # Save the image as PNG to the byte stream
+            img.save(byte_io, 'PNG')
+            # Seek to the beginning of the stream
+            byte_io.seek(0)
+        
+        # Send the PNG image as a file
+        return send_file(byte_io, mimetype='image/png')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
 @file_app.route('/files/<path:filename>')
@@ -52,6 +94,10 @@ def serve_image(filename):
     global image_dict
     return image_dict[filename]
     
+@file_app.route('/fetch_data_root_dir')
+def fetch_data_root_dir():
+    global data_root_dir
+    return data_root_dir
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
@@ -973,6 +1019,57 @@ def stop_odm():
 @file_app.route('/get_ortho_progress', methods=['GET'])
 def get_ortho_progress():
     return jsonify(latest_data)
+
+@file_app.route('/get_ortho_metadata', methods=['GET'])
+def get_ortho_metadata():
+    global data_root_dir
+    date = request.args.get('date')
+    platform = request.args.get('platform')
+    sensor = request.args.get('sensor')
+    year = request.args.get('year')
+    experiment = request.args.get('experiment')
+    location = request.args.get('location')
+    population = request.args.get('population')
+    
+    metadata_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor, 'ortho_metadata.json')
+    
+    if not os.path.exists(metadata_path):
+        return jsonify({"error": "Metadata file not found"}), 404
+    
+    try:
+        with open(metadata_path, 'r') as file:
+            metadata = json.load(file)
+        return jsonify({
+            "quality": metadata.get("quality", "N/A"),
+            "timestamp": metadata.get("timestamp", "N/A")
+        })
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON in metadata file"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+@file_app.route('/delete_ortho', methods=['POST'])
+def delete_ortho():
+    global data_root_dir
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    # modify when allowing for creation of orthos with same date and different quality
+    ortho_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+    try:
+        shutil.rmtree(ortho_path)
+    except FileNotFoundError:
+        print(f"Directory not found: {ortho_path}")
+    except PermissionError:
+        print(f"Permission denied: Unable to delete {ortho_path}")
+    except Exception as e:
+        print(f"An error occurred while deleting {ortho_path}: {str(e)}")
+    return jsonify({"message": "Ortho file deleted successfully"}), 200
 
 def update_progress_file(progress_file, progress):
     with open(progress_file, 'w') as pf:
