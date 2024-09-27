@@ -172,31 +172,47 @@ def update_data():
         new_path_raw = os.path.join(prefix, 'Raw', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
         new_path_intermediate = os.path.join(prefix, 'Intermediate', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
         new_path_processed = os.path.join(prefix, 'Processed', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        
+        old_path_raw = os.path.join(prefix, 'Raw', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        old_path_intermediate = os.path.join(prefix, 'Intermediate', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        old_path_processed = os.path.join(prefix, 'Processed', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
 
-        os.makedirs(new_path_raw, exist_ok=True)
-        os.makedirs(new_path_intermediate, exist_ok=True)
-        os.makedirs(new_path_processed, exist_ok=True)
+        # Rename paths
+        print("Renaming directories...")
+        if os.path.exists(old_path_raw):
+            os.rename(old_path_raw, new_path_raw)
+        if os.path.exists(old_path_intermediate):
+            os.rename(old_path_intermediate, new_path_intermediate)
+        if os.path.exists(old_path_processed):
+            os.rename(old_path_processed, new_path_processed)
+            
+        # print('Making new directory...')
+        # os.makedirs(new_path_raw, exist_ok=True)
+        # os.makedirs(new_path_intermediate, exist_ok=True)
+        # os.makedirs(new_path_processed, exist_ok=True)
 
-        for folder in ['Raw', 'Intermediate', 'Processed']:
-            old_dir = os.path.join(prefix, folder, old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
-            new_dir = os.path.join(prefix, folder, new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        # # Move files from old directory to new directory
+        # print('Moving files...')
+        # for folder in ['Raw', 'Intermediate', 'Processed']:
+        #     old_dir = os.path.join(prefix, folder, old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        #     new_dir = os.path.join(prefix, folder, new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
 
-            if os.path.exists(old_dir):
-                for item in os.listdir(old_dir):
-                    old_item_path = os.path.join(old_dir, item)
-                    new_item_path = os.path.join(new_dir, item)
-                    shutil.move(old_item_path, new_item_path)
+        #     if os.path.exists(old_dir):
+        #         for item in os.listdir(old_dir):
+        #             old_item_path = os.path.join(old_dir, item)
+        #             new_item_path = os.path.join(new_dir, item)
+        #             shutil.move(old_item_path, new_item_path)
                 
-                def is_empty_dir(path):
-                    return all(os.path.isdir(os.path.join(path, d)) and len(os.listdir(os.path.join(path, d))) == 0
-                               for d in os.listdir(path))
+        #         def is_empty_dir(path):
+        #             return all(os.path.isdir(os.path.join(path, d)) and len(os.listdir(os.path.join(path, d))) == 0
+        #                        for d in os.listdir(path))
                 
-                while os.path.exists(old_dir) and is_empty_dir(old_dir):
-                    try:
-                        os.rmdir(old_dir)
-                        old_dir = os.path.dirname(old_dir)
-                    except OSError:
-                        break
+        #         while os.path.exists(old_dir) and is_empty_dir(old_dir):
+        #             try:
+        #                 os.rmdir(old_dir)
+        #                 old_dir = os.path.dirname(old_dir)
+        #             except OSError:
+        #                 break
         npy_path = new_path_raw + "/image_names_final.npy"
 
         if not os.path.isfile(npy_path):
@@ -221,6 +237,7 @@ def update_data():
         return jsonify({'message': 'Directories updated successfully.'}), 200
 
     except Exception as e:
+        print(e)
         return jsonify({'error': str(e)}), 500
 
 @file_app.route('/delete_files', methods=['POST'])
