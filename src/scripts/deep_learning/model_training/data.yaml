@@ -1,0 +1,8 @@
+names:
+- '0'
+- '1'
+nc: 2
+path: /home/gemini/mnt/d/GEMINI-App-Data-DEMO/Intermediate/2022/Subset/Davis/Cowpea/2022-06-20/T4/RGB/Labels/Plant
+  Detection
+train: images/train
+val: images/val

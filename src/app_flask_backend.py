@@ -25,6 +25,9 @@ from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from werkzeug.utils import secure_filename
+import rasterio
+from PIL import Image
+import io
 
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
@@ -34,10 +37,54 @@ from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
 
+# Paths to scripts
+TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
+LOCATE_PLANTS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/locate.py'))
+EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/extract.py'))
+
 # Define the Flask application for serving files
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
+
+@file_app.route('/convert_tif_to_png', methods=['POST'])
+def convert_tif_to_png():
+    data = request.json
+    file_path = data['filePath']
+    
+    # Construct the full file path
+    full_file_path = os.path.join(data_root_dir, file_path)
+    
+    if not os.path.exists(full_file_path):
+        return jsonify({'error': f'File not found: {full_file_path}'}), 404
+    
+    try:
+        # Open the TIFF image using rasterio
+        with rasterio.open(full_file_path) as src:
+            # Read the image data
+            image_data = src.read()
+            
+            # Convert to RGB if necessary
+            if image_data.shape[0] > 3:
+                image_data = image_data[:3]
+            
+            # Transpose the data to the correct shape for PIL
+            image_data = np.transpose(image_data, (1, 2, 0))
+            
+            # Create a PIL Image
+            img = Image.fromarray(np.uint8(image_data))
+            
+            # Create a byte stream to hold the PNG image
+            byte_io = io.BytesIO()
+            # Save the image as PNG to the byte stream
+            img.save(byte_io, 'PNG')
+            # Seek to the beginning of the stream
+            byte_io.seek(0)
+        
+        # Send the PNG image as a file
+        return send_file(byte_io, mimetype='image/png')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 #### FILE SERVING ENDPOINTS ####
 # endpoint to serve files
@@ -52,6 +99,10 @@ def serve_image(filename):
     global image_dict
     return image_dict[filename]
     
+@file_app.route('/fetch_data_root_dir')
+def fetch_data_root_dir():
+    global data_root_dir
+    return data_root_dir
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
@@ -64,6 +115,25 @@ def list_dirs(dir_path):
     else:
         return jsonify({'message': 'Directory not found'}), 404
     
+def stream_output(process):
+    """Function to read the process output and errors in real-time."""
+    while True:
+        # Read stdout line
+        output = process.stdout.readline()
+        error_output = process.stderr.readline()
+
+        if output == b"" and error_output == b"" and process.poll() is not None:
+            break  # Break loop if process ends and no more output
+
+        if output:
+            print("Output:", output.decode('utf-8').strip())
+
+        if error_output:
+            print("Error:", error_output.decode('utf-8').strip())
+
+    # Close stdout and stderr after reading
+    process.stdout.close()
+    process.stderr.close()
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
@@ -102,31 +172,47 @@ def update_data():
         new_path_raw = os.path.join(prefix, 'Raw', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
         new_path_intermediate = os.path.join(prefix, 'Intermediate', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
         new_path_processed = os.path.join(prefix, 'Processed', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        
+        old_path_raw = os.path.join(prefix, 'Raw', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        old_path_intermediate = os.path.join(prefix, 'Intermediate', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        old_path_processed = os.path.join(prefix, 'Processed', old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
 
-        os.makedirs(new_path_raw, exist_ok=True)
-        os.makedirs(new_path_intermediate, exist_ok=True)
-        os.makedirs(new_path_processed, exist_ok=True)
+        # Rename paths
+        print("Renaming directories...")
+        if os.path.exists(old_path_raw):
+            os.rename(old_path_raw, new_path_raw)
+        if os.path.exists(old_path_intermediate):
+            os.rename(old_path_intermediate, new_path_intermediate)
+        if os.path.exists(old_path_processed):
+            os.rename(old_path_processed, new_path_processed)
+            
+        # print('Making new directory...')
+        # os.makedirs(new_path_raw, exist_ok=True)
+        # os.makedirs(new_path_intermediate, exist_ok=True)
+        # os.makedirs(new_path_processed, exist_ok=True)
 
-        for folder in ['Raw', 'Intermediate', 'Processed']:
-            old_dir = os.path.join(prefix, folder, old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
-            new_dir = os.path.join(prefix, folder, new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
+        # # Move files from old directory to new directory
+        # print('Moving files...')
+        # for folder in ['Raw', 'Intermediate', 'Processed']:
+        #     old_dir = os.path.join(prefix, folder, old_data['year'], old_data['experiment'], old_data['location'], old_data['population'], old_data['date'], old_data['platform'], old_data['sensor'])
+        #     new_dir = os.path.join(prefix, folder, new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
 
-            if os.path.exists(old_dir):
-                for item in os.listdir(old_dir):
-                    old_item_path = os.path.join(old_dir, item)
-                    new_item_path = os.path.join(new_dir, item)
-                    shutil.move(old_item_path, new_item_path)
+        #     if os.path.exists(old_dir):
+        #         for item in os.listdir(old_dir):
+        #             old_item_path = os.path.join(old_dir, item)
+        #             new_item_path = os.path.join(new_dir, item)
+        #             shutil.move(old_item_path, new_item_path)
                 
-                def is_empty_dir(path):
-                    return all(os.path.isdir(os.path.join(path, d)) and len(os.listdir(os.path.join(path, d))) == 0
-                               for d in os.listdir(path))
+        #         def is_empty_dir(path):
+        #             return all(os.path.isdir(os.path.join(path, d)) and len(os.listdir(os.path.join(path, d))) == 0
+        #                        for d in os.listdir(path))
                 
-                while os.path.exists(old_dir) and is_empty_dir(old_dir):
-                    try:
-                        os.rmdir(old_dir)
-                        old_dir = os.path.dirname(old_dir)
-                    except OSError:
-                        break
+        #         while os.path.exists(old_dir) and is_empty_dir(old_dir):
+        #             try:
+        #                 os.rmdir(old_dir)
+        #                 old_dir = os.path.dirname(old_dir)
+        #             except OSError:
+        #                 break
         npy_path = new_path_raw + "/image_names_final.npy"
 
         if not os.path.isfile(npy_path):
@@ -151,6 +237,7 @@ def update_data():
         return jsonify({'message': 'Directories updated successfully.'}), 200
 
     except Exception as e:
+        print(e)
         return jsonify({'error': str(e)}), 500
 
 @file_app.route('/delete_files', methods=['POST'])
@@ -201,7 +288,7 @@ def check_runs(dir_path):
     
     # For the Model column of Locate Plants
     if os.path.exists(dir_path) and 'Plant Detection' in dir_path:
-        check = f'{dir_path}/Plant-*/weights/best.pt'
+        check = f'{dir_path}/Plant-*/weights/last.pt'
         matched_paths = glob.glob(check)
         
         for path in matched_paths:
@@ -268,9 +355,11 @@ def check_runs(dir_path):
             
     elif os.path.exists(dir_path) and 'Processed' in dir_path:
         logs = f'{dir_path}/logs.yaml'
-        with open(logs, 'r') as file:
-            data = yaml.safe_load(file)
-            response_data = {k: {'model': v['model'], 'locate': v['locate'], 'id': v['id']} for k, v in data.items()}
+        # if log files exist, read the log files else return empty dictionary
+        if os.path.exists(logs):
+            with open(logs, 'r') as file:
+                data = yaml.safe_load(file)
+                response_data = {k: {'model': v['model'], 'locate': v['locate'], 'id': v['id']} for k, v in data.items()}
         
     return jsonify(response_data), 200
     
@@ -974,6 +1063,57 @@ def stop_odm():
 def get_ortho_progress():
     return jsonify(latest_data)
 
+@file_app.route('/get_ortho_metadata', methods=['GET'])
+def get_ortho_metadata():
+    global data_root_dir
+    date = request.args.get('date')
+    platform = request.args.get('platform')
+    sensor = request.args.get('sensor')
+    year = request.args.get('year')
+    experiment = request.args.get('experiment')
+    location = request.args.get('location')
+    population = request.args.get('population')
+    
+    metadata_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor, 'ortho_metadata.json')
+    
+    if not os.path.exists(metadata_path):
+        return jsonify({"error": "Metadata file not found"}), 404
+    
+    try:
+        with open(metadata_path, 'r') as file:
+            metadata = json.load(file)
+        return jsonify({
+            "quality": metadata.get("quality", "N/A"),
+            "timestamp": metadata.get("timestamp", "N/A")
+        })
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON in metadata file"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+@file_app.route('/delete_ortho', methods=['POST'])
+def delete_ortho():
+    global data_root_dir
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    # modify when allowing for creation of orthos with same date and different quality
+    ortho_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+    try:
+        shutil.rmtree(ortho_path)
+    except FileNotFoundError:
+        print(f"Directory not found: {ortho_path}")
+    except PermissionError:
+        print(f"Permission denied: Unable to delete {ortho_path}")
+    except Exception as e:
+        print(f"An error occurred while deleting {ortho_path}: {str(e)}")
+    return jsonify({"message": "Ortho file deleted successfully"}), 200
+
 def update_progress_file(progress_file, progress):
     with open(progress_file, 'w') as pf:
         pf.write(f"{progress}%")
@@ -1245,12 +1385,15 @@ def scan_for_new_folders(save_path):
         
 @file_app.route('/get_progress', methods=['GET'])
 def get_training_progress():
+    for key, value in latest_data.items():
+        if isinstance(value, np.int64):
+            latest_data[key] = int(value)
     print(latest_data)
     return jsonify(latest_data)
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels
+    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels, training_process
     
     try:
         # receive the parameters
@@ -1275,12 +1418,11 @@ def train_model():
         # extract labels
         labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
         labels = get_labels(labels_path)
-        labels_arg = " ".join(labels)
+        labels_arg = " ".join(labels).split()
         
         # other training args
-        container_dir = Path('/app/mnt/GEMINI-App-Data')
-        pretrained = "/app/train/yolov8n.pt"
-        save_train_model = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform
+        pretrained = "yolov8n.pt"
+        save_train_model = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform
         scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
         scan_save = Path(scan_save)
         scan_save.mkdir(parents=True, exist_ok=True)
@@ -1288,35 +1430,52 @@ def train_model():
         latest_data['map'] = 0
         training_stopped_event.clear()
         threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-        images = container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
+        images = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
         
-        # run training
-        cmd = (f"docker exec train "
-            f"python /app/train/train.py "
-            f"--pretrained '{pretrained}' --images '{images}' --save '{save_train_model}' --sensor '{sensor}' "
-            f"--date '{date}' --trait '{trait}' --image-size '{image_size}' --epochs '{epochs}' "
-            f"--batch-size {batch_size} --labels {labels_arg} ")
-        
+        cmd = (
+            f"python {TRAIN_MODEL} "
+            f"--pretrained '{pretrained}' "
+            f"--images '{images}' "
+            f"--save '{save_train_model}' "
+            f"--sensor '{sensor}' "
+            f"--date '{date}' "
+            f"--trait '{trait}' "
+            f"--image-size '{image_size}' "
+            f"--epochs '{epochs}' "
+            f"--batch-size {batch_size} "
+            f"--labels {' '.join(labels_arg)}"
+        )
         print(cmd)
+        
+        training_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=stream_output, args=(training_process,), daemon=True).start()
+        time.sleep(5)  # Wait for 5 seconds
+        if training_process.poll() is None:
+            print("Process started successfully and is running.")
+        else:
+            print("Process failed to start or exited immediately.")
+        
+        return jsonify({"message": "Training started"}), 202
 
-        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = process.stdout.decode('utf-8')
-        # output = 'test'
-        return jsonify({"message": "Training started", "output": output}), 202
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
     
 @file_app.route('/stop_training', methods=['POST'])
 def stop_training():
-    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-    container_name = 'train'
+    global training_stopped_event, new_folder, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder, training_process
+
     try:        
         # stop training
         print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        if training_process is not None:
+            training_process.terminate()
+            training_process.wait()  # Optionally wait for the process to terminate
+            print("Training process terminated.")
+            training_process = None
+        else:
+            print("No training process running.")
+            
         training_stopped_event.set()
         subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
         
@@ -1325,29 +1484,39 @@ def stop_training():
         remove_files_from_folder(labels_val_folder)
         remove_files_from_folder(images_train_folder)
         remove_files_from_folder(images_val_folder)
+        
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 @file_app.route('/done_training', methods=['POST'])
 def done_training():
-    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-    container_name = 'train'
+    global training_stopped_event, new_folder, results_file, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder, training_process
+    # container_name = 'train'
     try:
         # stop training
         print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
-        training_stopped_event.set()
-        results_file = ''
-        subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        # kill_cmd = f"docker exec {container_name} pkill -9 -f python"
+        # subprocess.run(kill_cmd, shell=True)
+        # print(f"Sent SIGKILL to Python process in {container_name} container.")
+        if training_process is not None:
+            training_process.terminate()
+            training_process.wait()  # Optionally wait for the process to terminate
+            print("Training process terminated.")
+            training_process = None
+        else:
+            print("No training process running.")
+            
+        # subprocess.run(f"rm -rf '{new_folder}'", check=True, shell=True)
+        # print(f"Removed {new_folder}")
         
         # unlink files
         remove_files_from_folder(labels_train_folder)
         remove_files_from_folder(labels_val_folder)
         remove_files_from_folder(images_train_folder)
         remove_files_from_folder(images_val_folder)
+        training_stopped_event.set()
+        results_file = ''
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -1437,7 +1606,7 @@ def generate_hash(trait, length=6):
 
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
-    global data_root_dir, save_locate
+    global data_root_dir, save_locate, locate_process
     
     # recieve parameters
     batch_size = int(request.json['batchSize'])
@@ -1452,11 +1621,11 @@ def locate_plants():
     id = request.json['id']
     
     # other args
-    container_dir = Path('/app/mnt/GEMINI-App-Data')
-    images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-    disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
-    configs = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-    plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
+    # container_dir = Path('/app/mnt/GEMINI-App-Data')
+    images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
+    configs = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
     
     # generate save folder
     version = generate_hash(trait='Locate')
@@ -1465,8 +1634,8 @@ def locate_plants():
         version = generate_hash(trait='Locate')
     save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
-    save = Path(container_dir/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}')
-    model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt'
+    model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt' # TODO: DEBUG
+    # model_path = "/mnt/d/GEMINI-App-Data/Intermediate/2022/GEMINI/Davis/Legumes/Training/Amiga-Onboard/RGB Plant Detection/Plant-btRN26/weights/last.pt"
     
     # save logs file
     data = {"model": [id], "date": [date]}
@@ -1478,39 +1647,44 @@ def locate_plants():
         pass
     
     # run locate
+    cmd = (
+        f"python -W ignore {LOCATE_PLANTS} "
+        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
+        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save_locate}'"
+    )
+
     if disparity.exists():
-        cmd = (
-        f"docker exec locate-extract "
-        f"python -W ignore /app/locate.py "
-        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
-        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' --skip-stereo"
-        )
-    else:   
-        cmd = (
-        f"docker exec locate-extract "
-        f"python -W ignore /app/locate.py "
-        f"--images '{images}' --metadata '{configs}' --plotmap '{plotmap}' "
-        f"--batch-size '{batch_size}' --model '{model_path}' --save '{save}' "
-        )
-    print(cmd)
+        cmd += " --skip-stereo"
 
     try:
-        process = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = process.stdout.decode('utf-8')
-        return jsonify({"message": "Locate has started", "output": output}), 202
+        locate_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=stream_output, args=(locate_process,), daemon=True).start()
+        time.sleep(5)  # Wait for 5 seconds
+        if locate_process.poll() is None:
+            print("Locate process started successfully and is running.")
+        else:
+            print("Locate process failed to start or exited immediately.")
+        return jsonify({"message": "Locate started"}), 202
+    
     except subprocess.CalledProcessError as e:
+        
         error_output = e.stderr.decode('utf-8')
         return jsonify({"error": error_output}), 500
     
 @file_app.route('/stop_locate', methods=['POST'])
 def stop_locate():
-    global save_locate
-    container_name = 'locate-extract'
+    global save_locate, locate_process
+    
     try:
-        print('Locate-Extract stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        print('Locate stopped by user.')
+        if locate_process is not None:
+            locate_process.terminate()
+            locate_process.wait()
+            print("Locate process terminated.")
+            locate_process = None
+        else:
+            print("No locate process running.")
+
         subprocess.run(f"rm -rf '{save_locate}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
@@ -1541,7 +1715,7 @@ def get_extract_progress():
     
 @file_app.route('/extract_traits', methods=['POST'])
 def extract_traits():
-    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract
+    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract, extract_process
     
     try:
         # recieve parameters
@@ -1570,16 +1744,15 @@ def extract_traits():
         locate_id = match_locate_id.group(1)
         
         # other args
-        container_dir = Path('/app/mnt/GEMINI-App-Data')
-        summary_path = container_dir/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-        model_path = container_dir/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
-        images = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-        disparity = Path(container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity')
-        plotmap = container_dir/'Intermediate'/year/experiment/location/population/'Plot-Attributes-WGS84.geojson'
-        metadata = container_dir/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-        save = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-{trait}-Traits-WGS84.geojson'
+        summary_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+        model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
+        images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
+        plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
+        metadata = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+        save = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-Traits-WGS84.geojson'
         save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
-        temp = container_dir/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        temp = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
         temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
         temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
         save_extract.mkdir(parents=True, exist_ok=True)
@@ -1591,51 +1764,43 @@ def extract_traits():
         if emerging:
             if disparity.exists():
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
-                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                    f"--batch-size {batch_size} --model-path '{model_path}' --save '{save_extract}' "
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo --geojson-filename '{save}'"
                 )
             else:
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--emerging --summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --geojson-filename '{save}'"
                 )
         else:
             if disparity.exists():
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --skip-stereo --geojson-filename '{save}'"
                 )
             else:
                 cmd = (
-                    f"docker exec locate-extract /bin/sh -c \""
-                    f". /miniconda/etc/profile.d/conda.sh && "
-                    f"conda activate env && "
-                    f"exec python -W ignore /app/extract.py "
+                    f"python -W ignore {EXTRACT_TRAITS} "
                     f"--summary '{summary_path}' --images '{images}' --plotmap '{plotmap}' "
                     f"--batch-size {batch_size} --model-path '{model_path}' --save '{save}' "
-                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}'\""
+                    f"--metadata '{metadata}' --temp '{temp}' --trait '{trait}' --geojson-filename '{save}'"
                 )
         print(cmd)
         
-        with open(save_extract/"output.txt", "w") as file:
-            process = subprocess.run(cmd, shell=True, check=True, stdout=file, stderr=subprocess.PIPE)
-            output = process.stdout.decode('utf-8')
-            return jsonify({"message": "Extract has started", "output": output}), 202
+        extract_process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threading.Thread(target=stream_output, args=(extract_process,), daemon=True).start()
+        time.sleep(5)  # Wait for 5 seconds
+        if extract_process.poll() is None:
+            print("Extract process started successfully and is running.")
+        else:
+            print("Extract process failed to start or exited immediately.")
+        return jsonify({"message": "Extract started"}), 202
     
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
@@ -1643,23 +1808,26 @@ def extract_traits():
     
 @file_app.route('/stop_extract', methods=['POST'])
 def stop_extract():
-    global save_extract, temp_extract
-    container_name = 'locate-extract'
+    global save_extract, temp_extract, extract_process
     try:
-        print('Locate-Extract stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        print('Extract stopped by user.')
+        if extract_process is not None:
+            extract_process.terminate()
+            extract_process.wait()
+            print("Extract process terminated.")
+            extract_process = None
+        else:
+            print("No extract process running.")
+        
         subprocess.run(f"rm -rf '{save_extract}/logs.yaml'", check=True, shell=True)
         subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
-        return jsonify({"message": "Python process in container successfully stopped"}), 200
+        return jsonify({"message": "Python process successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
     
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
-    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract
-    container_name = 'locate-extract'
+    global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract, extract_process
     try:
         # update logs file
         logs_file = Path(save_extract)/'logs.yaml'
@@ -1677,10 +1845,14 @@ def done_extract():
         with open(logs_file, 'w') as file:
             yaml.dump(data, file, default_flow_style=False, sort_keys=False)
         
-        print('Training stopped by user.')
-        kill_cmd = f"docker exec {container_name} pkill -9 -f python"
-        subprocess.run(kill_cmd, shell=True)
-        print(f"Sent SIGKILL to Python process in {container_name} container.")
+        print('Extract stopped by user.')
+        if extract_process is not None:
+            extract_process.terminate()
+            extract_process.wait()
+            print("Extract process terminated.")
+            extract_process = None
+        else:
+            print("No extract process running.")
         subprocess.run(f"rm -rf '{temp_extract}'", check=True, shell=True)
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
