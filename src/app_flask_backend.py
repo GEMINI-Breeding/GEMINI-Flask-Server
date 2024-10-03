@@ -996,6 +996,18 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
     
+@file_app.route('/get_odm_logs', methods=['GET'])
+def get_odm_logs():
+    logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+    print("Logs Path:", logs_path)  # Debug statement
+    if os.path.exists(logs_path):
+        with open(logs_path, 'r') as log_file:
+            lines = log_file.readlines()
+            latest_logs = lines[-20:]  # Get the last 20 lines
+        return jsonify({"log_content": ''.join(latest_logs)}), 200
+    else:
+        print("Logs not found at path:", logs_path)  # Debug statement
+        return jsonify({"error": "Logs not found"}), 404
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
@@ -1029,11 +1041,32 @@ def run_odm_endpoint():
                          reconstruction_quality, 
                          custom_options)
     try:
-        # Reset ODM if needed before proceeding 
+        # Check if the container exists
+        command = f"docker ps -a --filter name=GEMINI-Container --format '{{{{.Names}}}}'"
+        command = command.split()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        
+        container_exists = "GEMINI-Container" in stdout.decode().strip()
+
+        if container_exists:
+            # Stop the container if it's running
+            command = f"docker stop GEMINI-Container"
+            command = command.split()
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+
+            # Remove the container if it exists
+            command = f"docker rm GEMINI-Container"
+            command = command.split()
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+
+        # Proceed with the reset and starting threads
         reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
         reset_thread.start()
-        # Ensure reset thread is finished before trying to access temp folder 
-        reset_thread.join()
+        reset_thread.join()  # Ensure reset thread is finished before proceeding
+        
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,), daemon=True)
         thread.start()
@@ -1055,7 +1088,7 @@ def run_odm_endpoint():
         # Optionally, wait for threads to finish if needed
         thread_prog.join()
         thread.join()
-        return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 400)
+        return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 404)
 
 
         
@@ -1077,6 +1110,7 @@ def stop_odm():
         process = subprocess.Popen(command, stderr=subprocess.STDOUT)
         process.wait()
         # reset_odm(data_root_dir)
+        shutil.rmtree(os.path.join(data_root_dir, 'temp'))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -1301,6 +1335,12 @@ def prepare_labels(annotations, images_path):
         copy_files_to_folder(images_train, images_train_folder)
         copy_files_to_folder(images_val, images_val_folder)
         
+        # check if images_train_folder and images_val_folder are not empty
+        if not any(images_train_folder.iterdir()) or not any(images_val_folder.iterdir()):
+            return False
+        else:
+            return True
+        
     except Exception as e:
         print(f'Error preparing labels for training: {e}')
 
@@ -1435,7 +1475,11 @@ def train_model():
         annotations = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
         all_images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
         # all_images = Path('/home/gemini/mnt/d/Annotations/Plant Detection/obj_train_data')
-        prepare_labels(annotations, all_images)
+        check_if_images_exist = prepare_labels(annotations, all_images)
+        # wait for 1 minute
+        time.sleep(60)
+        if check_if_images_exist == False:
+            return jsonify({"error": "No images found for training. Press stop and upload images."}), 404
         
         # extract labels
         labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
@@ -1465,7 +1509,7 @@ def train_model():
             f"--image-size '{image_size}' "
             f"--epochs '{epochs}' "
             f"--batch-size {batch_size} "
-            f"--labels {' '.join(labels_arg)}"
+            f"--labels {' '.join(labels_arg)} "
         )
         print(cmd)
         
@@ -1684,14 +1728,15 @@ def locate_plants():
         time.sleep(5)  # Wait for 5 seconds
         if locate_process.poll() is None:
             print("Locate process started successfully and is running.")
+            return jsonify({"message": "Locate started"}), 202
         else:
             print("Locate process failed to start or exited immediately.")
-        return jsonify({"message": "Locate started"}), 202
+            return jsonify({"error": "Failed to start locate process." }), 404
     
     except subprocess.CalledProcessError as e:
         
         error_output = e.stderr.decode('utf-8')
-        return jsonify({"error": error_output}), 500
+        return jsonify({"error": error_output}), 404
     
 @file_app.route('/stop_locate', methods=['POST'])
 def stop_locate():
@@ -1779,8 +1824,15 @@ def extract_traits():
         temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
         save_extract.mkdir(parents=True, exist_ok=True)
         
+        # reset extract process (or initialize)
+        extract_process = None
+        
         # check if date is emerging
         emerging = date in summary
+        
+        # check if metadata path exists OR contains files
+        if not metadata.exists() or not any(metadata.iterdir()):
+            return jsonify({"error": "Platform logs not found or empty. Please press stop and upload necessary logs."}), 404
         
         # run extract
         if emerging:
@@ -1820,13 +1872,15 @@ def extract_traits():
         time.sleep(5)  # Wait for 5 seconds
         if extract_process.poll() is None:
             print("Extract process started successfully and is running.")
+            return jsonify({"message": "Extract started"}), 202
         else:
             print("Extract process failed to start or exited immediately.")
-        return jsonify({"message": "Extract started"}), 202
+            return jsonify({"error": 
+                "Failed to start extraction process. Check if you have corectly uploaded images/metadata"}), 404
     
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
-        return jsonify({"status": "error", "message": str(error_output)}), 400
+        return jsonify({"status": "error", "message": str(error_output)}), 404
     
 @file_app.route('/stop_extract', methods=['POST'])
 def stop_extract():
