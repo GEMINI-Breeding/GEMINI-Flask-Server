@@ -491,6 +491,28 @@ def check_uploaded_chunks():
 
     return jsonify({'uploadedChunksCount': uploaded_chunks_count}), 200
 
+
+@file_app.route('/clear_upload_cache', methods=['POST'])
+def clear_upload_cache():
+    
+    try:
+        print('Clearing cache...')
+        dir_path = request.json['dirPath']
+        cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
+        
+        # loop through each file in cache directory and remove it
+        for file in os.listdir(cache_dir_path):
+            file_path = os.path.join(cache_dir_path, file)
+            os.remove(file_path)
+            
+        # remove the cache directory
+        os.rmdir(cache_dir_path)
+        time.sleep(60)  # Wait for 60 seconds
+        return jsonify({'message': 'Cache cleared successfully'}), 200
+    except Exception as e:
+        print(f'Error clearing cache: {str(e)}')
+        return jsonify({'message': 'Cache directory not found'}), 404
+
 #### SCRIPT SERVING ENDPOINTS ####
 # endpoint to run script
 @file_app.route('/run_script', methods=['POST'])

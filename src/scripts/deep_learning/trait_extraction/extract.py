@@ -660,7 +660,8 @@ def main(
     
     # change `row` and `column` to `Bed` and `Tier` in format_df (if not already)
     if 'Bed' not in format_df.columns:
-        format_df.rename(columns={'row':'Bed', 'column':'Tier'}, inplace=True)
+        # format_df.rename(columns={'row':'Bed', 'column':'Tier'}, inplace=True)
+        format_df.rename(columns={'row':'Tier', 'column':'Bed'}, inplace=True)
         
     # change `Group` and `Label` to `population` and `accession` in summ_df (if not already)
     if 'population' not in summ_df_final.columns:
