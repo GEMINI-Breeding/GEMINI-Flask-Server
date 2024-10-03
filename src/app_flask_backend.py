@@ -1029,11 +1029,32 @@ def run_odm_endpoint():
                          reconstruction_quality, 
                          custom_options)
     try:
-        # Reset ODM if needed before proceeding 
+        # Check if the container exists
+        command = f"docker ps -a --filter name=GEMINI-Container --format '{{{{.Names}}}}'"
+        command = command.split()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        
+        container_exists = "GEMINI-Container" in stdout.decode().strip()
+
+        if container_exists:
+            # Stop the container if it's running
+            command = f"docker stop GEMINI-Container"
+            command = command.split()
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+
+            # Remove the container if it exists
+            command = f"docker rm GEMINI-Container"
+            command = command.split()
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+
+        # Proceed with the reset and starting threads
         reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
         reset_thread.start()
-        # Ensure reset thread is finished before trying to access temp folder 
-        reset_thread.join()
+        reset_thread.join()  # Ensure reset thread is finished before proceeding
+        
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,), daemon=True)
         thread.start()
@@ -1055,7 +1076,7 @@ def run_odm_endpoint():
         # Optionally, wait for threads to finish if needed
         thread_prog.join()
         thread.join()
-        return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 400)
+        return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 404)
 
 
         
@@ -1077,6 +1098,7 @@ def stop_odm():
         process = subprocess.Popen(command, stderr=subprocess.STDOUT)
         process.wait()
         # reset_odm(data_root_dir)
+        shutil.rmtree(os.path.join(data_root_dir, 'temp'))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500

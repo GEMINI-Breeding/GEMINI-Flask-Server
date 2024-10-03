@@ -221,8 +221,7 @@ def reset_odm(args):
     
     if reset_odm_temp:
         temp_path = os.path.join(drd, 'temp')
-        while os.path.exists(temp_path):
-            shutil.rmtree(temp_path)
+        shutil.rmtree(temp_path)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -285,7 +284,10 @@ def run_odm(args):
             else:
                 docker_image = "opendronemap/odm"
 
-            command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            user_id = os.getenv("UID", os.getuid())  # Get the current user ID
+            group_id = os.getenv("GID", os.getgid())  # Get the current group ID
+            command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
