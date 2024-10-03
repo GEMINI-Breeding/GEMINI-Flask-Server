@@ -69,3 +69,4 @@ scikit-image
 albumentations
 pydantic
 fastapi
+utm
