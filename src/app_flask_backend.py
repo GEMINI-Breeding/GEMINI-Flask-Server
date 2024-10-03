@@ -1301,6 +1301,12 @@ def prepare_labels(annotations, images_path):
         copy_files_to_folder(images_train, images_train_folder)
         copy_files_to_folder(images_val, images_val_folder)
         
+        # check if images_train_folder and images_val_folder are not empty
+        if not any(images_train_folder.iterdir()) or not any(images_val_folder.iterdir()):
+            return False
+        else:
+            return True
+        
     except Exception as e:
         print(f'Error preparing labels for training: {e}')
 
@@ -1435,7 +1441,11 @@ def train_model():
         annotations = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
         all_images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
         # all_images = Path('/home/gemini/mnt/d/Annotations/Plant Detection/obj_train_data')
-        prepare_labels(annotations, all_images)
+        check_if_images_exist = prepare_labels(annotations, all_images)
+        # wait for 1 minute
+        time.sleep(60)
+        if check_if_images_exist == False:
+            return jsonify({"error": "No images found for training. Press stop and upload images."}), 404
         
         # extract labels
         labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
@@ -1465,7 +1475,7 @@ def train_model():
             f"--image-size '{image_size}' "
             f"--epochs '{epochs}' "
             f"--batch-size {batch_size} "
-            f"--labels {' '.join(labels_arg)}"
+            f"--labels {' '.join(labels_arg)} "
         )
         print(cmd)
         
@@ -1684,14 +1694,15 @@ def locate_plants():
         time.sleep(5)  # Wait for 5 seconds
         if locate_process.poll() is None:
             print("Locate process started successfully and is running.")
+            return jsonify({"message": "Locate started"}), 202
         else:
             print("Locate process failed to start or exited immediately.")
-        return jsonify({"message": "Locate started"}), 202
+            return jsonify({"error": "Failed to start locate process." }), 404
     
     except subprocess.CalledProcessError as e:
         
         error_output = e.stderr.decode('utf-8')
-        return jsonify({"error": error_output}), 500
+        return jsonify({"error": error_output}), 404
     
 @file_app.route('/stop_locate', methods=['POST'])
 def stop_locate():
@@ -1779,8 +1790,15 @@ def extract_traits():
         temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
         save_extract.mkdir(parents=True, exist_ok=True)
         
+        # reset extract process (or initialize)
+        extract_process = None
+        
         # check if date is emerging
         emerging = date in summary
+        
+        # check if metadata path exists OR contains files
+        if not metadata.exists() or not any(metadata.iterdir()):
+            return jsonify({"error": "Platform logs not found or empty. Please press stop and upload necessary logs."}), 404
         
         # run extract
         if emerging:
@@ -1820,13 +1838,15 @@ def extract_traits():
         time.sleep(5)  # Wait for 5 seconds
         if extract_process.poll() is None:
             print("Extract process started successfully and is running.")
+            return jsonify({"message": "Extract started"}), 202
         else:
             print("Extract process failed to start or exited immediately.")
-        return jsonify({"message": "Extract started"}), 202
+            return jsonify({"error": 
+                "Failed to start extraction process. Check if you have corectly uploaded images/metadata"}), 404
     
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode('utf-8')
-        return jsonify({"status": "error", "message": str(error_output)}), 400
+        return jsonify({"status": "error", "message": str(error_output)}), 404
     
 @file_app.route('/stop_extract', methods=['POST'])
 def stop_extract():
