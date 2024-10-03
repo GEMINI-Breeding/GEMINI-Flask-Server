@@ -996,6 +996,18 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
     
+@file_app.route('/get_odm_logs', methods=['GET'])
+def get_odm_logs():
+    logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+    print("Logs Path:", logs_path)  # Debug statement
+    if os.path.exists(logs_path):
+        with open(logs_path, 'r') as log_file:
+            lines = log_file.readlines()
+            latest_logs = lines[-20:]  # Get the last 20 lines
+        return jsonify({"log_content": ''.join(latest_logs)}), 200
+    else:
+        print("Logs not found at path:", logs_path)  # Debug statement
+        return jsonify({"error": "Logs not found"}), 404
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
