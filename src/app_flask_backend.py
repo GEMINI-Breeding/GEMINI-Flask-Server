@@ -1050,6 +1050,13 @@ def run_odm_endpoint():
         container_exists = "GEMINI-Container" in stdout.decode().strip()
 
         if container_exists:
+            print('Removing temp folder...')
+            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
+            cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+            cleanup_command = cleanup_command.split()
+            cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
+            cleanup_process.wait()
+            
             # Stop the container if it's running
             command = f"docker stop GEMINI-Container"
             command = command.split()
@@ -1062,10 +1069,10 @@ def run_odm_endpoint():
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
 
-        # Proceed with the reset and starting threads
-        reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
-        reset_thread.start()
-        reset_thread.join()  # Ensure reset thread is finished before proceeding
+        # # Proceed with the reset and starting threads
+        # reset_thread = threading.Thread(target=reset_odm, args=(args,), daemon=True)
+        # reset_thread.start()
+        # reset_thread.join()  # Ensure reset thread is finished before proceeding
         
         # Run ODM in a separate thread
         thread = threading.Thread(target=run_odm, args=(args,), daemon=True)
@@ -1097,6 +1104,14 @@ def stop_odm():
     global data_root_dir
     try:
         print('ODM processed stopped by user.')
+        print('Removing temp folder...')
+        folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
+        cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+        cleanup_command = cleanup_command.split()
+        cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
+        cleanup_process.wait()
+        
+        print('Stopping ODM process...')
         stop_event = threading.Event()
         stop_event.set()
         command = f"docker stop GEMINI-Container"
@@ -1104,6 +1119,8 @@ def stop_odm():
         # Run the command
         process = subprocess.Popen(command, stderr=subprocess.STDOUT)
         process.wait()
+        
+        print('Removing ODM container...')
         command = f"docker rm GEMINI-Container"
         command = command.split()
         # Run the command

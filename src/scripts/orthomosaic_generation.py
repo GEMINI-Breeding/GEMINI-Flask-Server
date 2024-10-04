@@ -255,6 +255,7 @@ def run_odm(args):
         
         print('Project Path: ', pth)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        print('Image Path: ', image_pth)
         options = ""
         log_file = os.path.join(pth, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
@@ -284,10 +285,11 @@ def run_odm(args):
             else:
                 docker_image = "opendronemap/odm"
 
-            # command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
-            user_id = os.getenv("UID", os.getuid())  # Get the current user ID
-            group_id = os.getenv("GID", os.getgid())  # Get the current group ID
-            command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+            command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
+            # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
+            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
