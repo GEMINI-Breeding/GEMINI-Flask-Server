@@ -8,12 +8,14 @@ from glob import glob
 from math import log
 from concurrent.futures import ThreadPoolExecutor
 import time
+from datetime import datetime
 
 # Third-party library imports
 import cv2
 from numpy import std
 from tqdm import tqdm
 import yaml
+import json
 
 # Local application/library specific imports
 # Add script directory to path
@@ -206,8 +208,7 @@ def reset_odm(args):
     
     if reset_odm_temp:
         temp_path = os.path.join(drd, 'temp')
-        while os.path.exists(temp_path):
-            shutil.rmtree(temp_path)
+        shutil.rmtree(temp_path)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -297,34 +298,6 @@ def run_odm(args):
     Run ODM on the temporary directory.
     '''
     
-    # Check if the already processed data is not in the Processed folder
-    # Copy the temp to the Processed folder without deleting the temp, and finish
-    # Check if the log file exists
-    project_path = args.temp_dir
-    recipe_file = os.path.join(project_path,'recipe.yaml')
-    reset_odm_temp = False
-    if os.path.exists(recipe_file):
-        # Read the recipe file
-        with open(recipe_file, 'r') as file:
-            data = yaml.load(file, Loader=yaml.FullLoader)
-            # Recover the arg from the recipe file
-            recipe_arg = make_odm_args_from_recipe(data)
-            if odm_args_checker(recipe_arg, args):
-                print("Already processed. Try to copying to Processed folder.")
-                if _process_outputs(args) == True:
-                    return
-                else:
-                    print("Error in copying to Processed folder. Re-run ODM.")    
-            else:
-                # Reset the ODM if the arguments are different
-                reset_odm_temp = True
-    else:
-        reset_odm_temp = True
-
-    if reset_odm_temp:
-        # Reset the ODM
-        reset_odm(args)
-
     try:
         _create_directory_structure(args)
 
@@ -344,8 +317,9 @@ def run_odm(args):
             project_path = os.path.join(project_path, 'project')
         
         
-        print('Project Path: ', project_path)
-
+        print('Project Path: ', pth)
+        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        print('Image Path: ', image_pth)
         options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
@@ -374,8 +348,26 @@ def run_odm(args):
             else:
                 docker_image = "opendronemap/odm"
 
-            command = f"docker run --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
-            # Save settings to recipe yaml file
+            command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
+            # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
+            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+            # Save image_pth and  docker command to recipe yaml file
+            data = {
+                'year': args.year,
+                'experiment': args.experiment,
+                'location': args.location,
+                'population': args.population,
+                'date': args.date,
+                'platform': args.platform,
+                'sensor': args.sensor,
+                'reconstruction_quality': args.reconstruction_quality,
+                'custom_options': args.custom_options,
+                'image_pth': image_pth,
+                'command': command,
+            }
+            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
             with open(recipe_file, 'w') as file:
                 # Export arg to data
                 data = vars(args)
@@ -390,6 +382,7 @@ def run_odm(args):
             process.wait()
         
         _process_outputs(args)
+        save_ortho_metadata(args)  # Call save_ortho_metadata here
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
@@ -421,3 +414,20 @@ if __name__ == '__main__':
     
     # Run ODM
     run_odm(args)
+
+def save_ortho_metadata(args):
+    metadata = {
+        "date": args.date,
+        "location": args.location,
+        "population": args.population,
+        "year": args.year,
+        "experiment": args.experiment,
+        "sensor": args.sensor,
+        "quality": args.reconstruction_quality,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+    
+    metadata_path = os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'ortho_metadata.json')
+    
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)
