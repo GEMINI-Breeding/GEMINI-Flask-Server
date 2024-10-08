@@ -1,6 +1,30 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import os
+import shutil
 
+def _copy_image(src_folder, dest_folder, image_name):
+    
+    src_path = os.path.join(src_folder, image_name)
+    dest_path = os.path.join(dest_folder, image_name)
+
+    if not os.path.exists(dest_path):
+        shutil.copy(src_path, dest_path)
+
+def check_nvidia_smi():
+    '''
+    Check if nvidia-smi is installed on the system.
+    '''
+    # Check the output of "docker run --rm --gpus all nvidia/cuda:11.0.3-base nvidia-smi"
+    try:
+        output = subprocess.check_output(['docker', 'run', '--rm', '--gpus', 'all', 'nvidia/cuda:11.0.3-base', 'nvidia-smi'])
+        if 'NVIDIA-SMI' in output.decode('utf-8'):
+            return True
+        else:
+            return False
+    except Exception as e:
+        return False
 
 def build_nested_structure_sync(path, current_depth=0, max_depth=2):
     if current_depth >= max_depth:
