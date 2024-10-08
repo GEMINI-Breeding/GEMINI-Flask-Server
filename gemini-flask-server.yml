@@ -9,5 +9,6 @@ dependencies:
   - kornia
   - scipy
   - protobuf
+  - exiftool
   - pip:
       - -r requirements.txt
