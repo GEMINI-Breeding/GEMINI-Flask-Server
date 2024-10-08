@@ -154,15 +154,21 @@ def reset_odm(args, metadata_file_name=None):
     # May be more appropriate to rename as "prep_odm" in the future to clarify functionality
     # This function now contains checks for existing processed data previously in run_odm
     drd = args.data_root_dir
-    pth = args.temp_dir
+    temp_dir = args.temp_dir
+
+    # Check if the temp directory exists
+    if not os.path.exists(temp_dir):
+        # No need to reset ODM
+        return
+
     if metadata_file_name is None:
         metadata_file_name = 'metadata.json'
         
-    metadata_file = os.path.join(pth, 'code', metadata_file_name)
+    metadata_file = os.path.join(temp_dir, 'code', metadata_file_name)
     # Check if the metadata file exists
     if not os.path.exists(metadata_file):
         # Try with yaml
-        metadata_file = os.path.join(pth, 'code', metadata_file_name.replace('.json', '.yaml'))
+        metadata_file = os.path.join(temp_dir, 'code', metadata_file_name.replace('.json', '.yaml'))
         
     reset_odm_temp = False
     if os.path.exists(metadata_file):
@@ -190,8 +196,7 @@ def reset_odm(args, metadata_file_name=None):
         reset_odm_temp = True
     
     if reset_odm_temp:
-        temp_path = os.path.join(drd, 'temp')
-        shutil.rmtree(temp_path)
+        shutil.rmtree(temp_dir)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -297,16 +302,16 @@ def run_odm(args):
 if __name__ == '__main__':
     # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--year', type=str, help='Year of the data collection',default='2023')
-    parser.add_argument('--experiment', type=str, help='Experiment name', default='Davis')
+    parser.add_argument('--year', type=str, help='Year of the data collection',default='2024')
+    parser.add_argument('--experiment', type=str, help='Experiment name', default='GEMINI')
     parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
     parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
-    parser.add_argument('--date', type=str, help='Date of the data collection', default='2023-06-20')
+    parser.add_argument('--date', type=str, help='Date of the data collection', default='2024-07-15')
     parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
-    parser.add_argument('--sensor', type=str, help='Sensor used', default='Thermal')
+    parser.add_argument('--sensor', type=str, help='Sensor used', default='thermal')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/GEMINI/GEMINI-App-Data/temp/project')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
+                        default='/home/gemini/mnt/d/GEMINI-App-Data-DEMO/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
+    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/gemini/mnt/d/GEMINI-App-Data-DEMO')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
                         choices=[' high', 'low', 'lowest', 'custom'], default='lowest')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 

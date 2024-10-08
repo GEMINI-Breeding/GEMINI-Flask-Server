@@ -5,7 +5,7 @@ import cv2
 
 from thermal_camera.flir_image_extractor import FlirImageExtractor
 from thermal_camera.process_flir import warp_image
-from utils import check_nvidia_smi
+from utils import dms_to_decimal
 import pandas as pd
 
 def extract_thermal_images(image_pth, extracted_folder_name,show_progress=True):
@@ -123,9 +123,12 @@ def extract_thermal_images(image_pth, extracted_folder_name,show_progress=True):
         gps_info_keys = gps_info.keys()
         # Check if the GPS info is available
         if 'GPSLatitude' in gps_info_keys and 'GPSLongitude' in gps_info_keys and 'GPSAltitude' in gps_info_keys:
-            lat = gps_info['latitude']
-            lon = gps_info['longitude']
-            height = gps_info['altitude']
+            lat_DMS = gps_info['GPSLatitude']
+            lon_DMS = gps_info['GPSLongitude']
+            height_m = gps_info['GPSAltitude']
+            lat = dms_to_decimal(lat_DMS)
+            lon = dms_to_decimal(lon_DMS)
+            height = float(height_m.replace(' m', ''))
             with open(geo_txt_path, "w") as f:
                 f.write(f"{image_name} {lon} {lat} {height}\n")
 

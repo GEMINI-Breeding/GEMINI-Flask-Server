@@ -3,8 +3,19 @@
 # Function to download and install Miniconda
 install_miniconda() {
     echo "Conda is not installed. Downloading and installing Miniconda..."
-    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
-    MINICONDA_SCRIPT="Miniconda3-latest-MacOSX-x86_64.sh"
+    
+    # Detect the operating system
+    OS=$(uname)
+    if [ "$OS" = "Linux" ]; then
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+        MINICONDA_SCRIPT="Miniconda3-latest-Linux-x86_64.sh"
+    elif [ "$OS" = "Darwin" ]; then
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
+        MINICONDA_SCRIPT="Miniconda3-latest-MacOSX-x86_64.sh"
+    else
+        echo "Unsupported OS: $OS"
+        exit 1
+    fi
     
     # Download the Miniconda installer
     curl -LO $MINICONDA_URL
@@ -19,7 +30,13 @@ install_miniconda() {
     rm $MINICONDA_SCRIPT
     
     # Source the new conda configuration
-    source $HOME/.bash_profile  # or ~/.zshrc, depending on the shell you're using
+    if [ -f "$HOME/.bash_profile" ]; then
+        source $HOME/.bash_profile
+    elif [ -f "$HOME/.zshrc" ]; then
+        source $HOME/.zshrc
+    else
+        echo "No suitable shell configuration file found to source."
+    fi
 }
 
 # Check if Conda is installed

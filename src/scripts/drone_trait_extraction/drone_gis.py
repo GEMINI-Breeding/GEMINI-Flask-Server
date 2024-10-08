@@ -14,7 +14,7 @@ from functools import partial
 
 # Add the path to the scripts folder
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__)))
 import shared_states
 
 DEBUG_ITER = 100
