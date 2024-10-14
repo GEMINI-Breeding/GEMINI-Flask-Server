@@ -70,3 +70,4 @@ albumentations
 pydantic
 fastapi
 utm
+requests
