@@ -10,7 +10,9 @@ import random
 import string
 import shutil
 import argparse
+import select
 import multiprocessing
+import requests
 from multiprocessing import active_children
 from pathlib import Path
 
@@ -118,18 +120,21 @@ def list_dirs(dir_path):
 def stream_output(process):
     """Function to read the process output and errors in real-time."""
     while True:
-        # Read stdout line
-        output = process.stdout.readline()
-        error_output = process.stderr.readline()
+        reads = [process.stdout.fileno(), process.stderr.fileno()]
+        ret = select.select(reads, [], [])
 
-        if output == b"" and error_output == b"" and process.poll() is not None:
-            break  # Break loop if process ends and no more output
+        for fd in ret[0]:
+            if fd == process.stdout.fileno():
+                output = process.stdout.readline()
+                if output:
+                    print("Output:", output.decode('utf-8').strip())
+            if fd == process.stderr.fileno():
+                error_output = process.stderr.readline()
+                if error_output:
+                    print("Error:", error_output.decode('utf-8').strip())
 
-        if output:
-            print("Output:", output.decode('utf-8').strip())
-
-        if error_output:
-            print("Error:", error_output.decode('utf-8').strip())
+        if process.poll() is not None:
+            break  # Break loop if process ends
 
     # Close stdout and stderr after reading
     process.stdout.close()
@@ -180,11 +185,11 @@ def update_data():
         # Rename paths
         print("Renaming directories...")
         if os.path.exists(old_path_raw):
-            os.rename(old_path_raw, new_path_raw)
+                os.rename(old_path_raw, new_path_raw)
         if os.path.exists(old_path_intermediate):
-            os.rename(old_path_intermediate, new_path_intermediate)
+                os.rename(old_path_intermediate, new_path_intermediate)
         if os.path.exists(old_path_processed):
-            os.rename(old_path_processed, new_path_processed)
+                os.rename(old_path_processed, new_path_processed)
             
         # print('Making new directory...')
         # os.makedirs(new_path_raw, exist_ok=True)
@@ -1245,6 +1250,98 @@ def monitor_log_updates(logs_path, progress_file):
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
+        
+### CVAT #### 
+@file_app.route('/start_cvat', methods=['POST'])
+def start_cvat():
+    global data_root_dir
+    clone_dir = os.path.join(data_root_dir, 'cvat')
+    
+    # Create the directory if it doesn't exist
+    os.makedirs(clone_dir, exist_ok=True)
+    
+    try:
+        # Check if the CVAT container is already running
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=cvat", "--format", "{{.Names}}"],
+            stdout=subprocess.PIPE
+        )
+        container_running = 'cvat' in result.stdout.decode('utf-8')
+    except Exception as e:
+        return jsonify({"error": f"Error checking for CVAT container: {str(e)}"}), 404
+    
+    try:
+        if not container_running:
+            # Clone the repository if needed and run docker-compose
+            if not os.path.exists(os.path.join(clone_dir, 'cvat')):
+                subprocess.run(
+                    ["git", "clone", "https://github.com/cvat-ai/cvat"], cwd=clone_dir
+                )
+                
+            # Check if docker-compose.yml exists before starting docker-compose
+            compose_file = os.path.join(clone_dir, 'cvat', 'docker-compose.yml')
+            if not os.path.exists(compose_file):
+                return jsonify({"error": "docker-compose.yml not found in the cloned repository"}), 404
+            
+            # Start CVAT with docker-compose
+            compose_dir = os.path.join(clone_dir, 'cvat')
+            subprocess.run(
+                ["docker-compose", "up", "-d"], cwd=compose_dir
+            )
+            print("Starting CVAT container with docker-compose...")
+
+            # Wait for specific services to be fully up and running
+            services_to_check = ["cvat_server", "cvat_ui"]
+            max_retries = 30
+            for i in range(max_retries):
+                # Check the status of the containers
+                result = subprocess.run(
+                    ["docker-compose", "ps", "--services", "--filter", "status=running"], cwd=compose_dir, stdout=subprocess.PIPE
+                )
+                running_services = result.stdout.decode('utf-8').strip().split('\n')
+
+                # Check if all expected services are running
+                if all(service in running_services for service in services_to_check):
+                    print("All required CVAT services are running.")
+                    break
+
+                print(f"Waiting for CVAT services to start... ({i + 1}/{max_retries})")
+                time.sleep(5)  # Wait 5 seconds before checking again
+
+            if i == max_retries - 1:
+                return jsonify({"error": "CVAT services failed to start in time"}), 500
+
+            # Create superuser via docker exec
+            subprocess.run(
+                ["docker", "exec", "-it", "cvat", "bash", "-ic", "python3 ~/manage.py createsuperuser"]
+            )
+            print("CVAT superuser created.")
+
+            # Poll the CVAT server to check if it's running
+            cvat_url = "http://localhost:8080/api/server/about"
+            for i in range(max_retries):
+                try:
+                    response = requests.get(cvat_url)
+                    if response.status_code == 200:
+                        print("CVAT server is up and running.")
+                        break
+                except requests.exceptions.RequestException:
+                    pass  # Server is not ready yet
+
+                print(f"Waiting for CVAT to start... ({i + 1}/{max_retries})")
+                time.sleep(5)  # Wait 5 seconds before checking again
+
+            # If the server didn't start within the max retries, return an error
+            if i == max_retries - 1:
+                return jsonify({"error": "CVAT server failed to start in time"}), 500
+
+            return jsonify({"status": "CVAT container started and superuser created"})
+        else:
+            print("CVAT container already running")
+            return jsonify({"status": "CVAT container already running"})
+    except Exception as e:
+        print(f"Error starting CVAT container: {str(e)}")
+        return jsonify({"error": f"Error starting CVAT container: {str(e)}"}), 404
 
 ### ROVER LABELS PREPARATION ###
 @file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
