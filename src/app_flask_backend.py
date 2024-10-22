@@ -469,6 +469,7 @@ def upload_chunk():
     chunk.save(chunk_save_path)
     
     # Check if all parts are uploaded
+    print(f"Chunk {chunk_index} of {total_chunks} received")
     if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
         # Reassemble file
         with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
@@ -1260,88 +1261,106 @@ def start_cvat():
     # Create the directory if it doesn't exist
     os.makedirs(clone_dir, exist_ok=True)
     
+    # Define the path for the compose directory
+    compose_dir = os.path.join(clone_dir, 'cvat')
+
     try:
-        # Check if the CVAT container is already running
+        # Get a list of all containers with 'cvat' or 'traefik' in their name
         result = subprocess.run(
-            ["docker", "ps", "--filter", "name=cvat", "--format", "{{.Names}}"],
+            ["docker", "ps", "-a", "--filter", "name=cvat", "--format", "{{.Names}}"],
             stdout=subprocess.PIPE
         )
-        container_running = 'cvat' in result.stdout.decode('utf-8')
+        cvat_containers = result.stdout.decode('utf-8').strip().split('\n')
+        cvat_containers = [container for container in cvat_containers if container]  # filter out empty strings
+
+        # Add traefik to the list of containers to restart
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=traefik", "--format", "{{.Names}}"],
+            stdout=subprocess.PIPE
+        )
+        traefik_containers = result.stdout.decode('utf-8').strip().split('\n')
+        traefik_containers = [container for container in traefik_containers if container]  # filter out empty strings
+
+        # Combine the lists of containers
+        all_containers = cvat_containers + traefik_containers
+
     except Exception as e:
-        return jsonify({"error": f"Error checking for CVAT container: {str(e)}"}), 404
-    
+        return jsonify({"error": f"Error checking for CVAT or Traefik containers: {str(e)}"}), 404
+
     try:
-        if not container_running:
+        if all_containers:
+            # Restart each container with 'cvat' or 'traefik' in its name
+            print(f"Restarting containers: {all_containers}")
+            for container in all_containers:
+                subprocess.run(["docker", "restart", container])
+            print("All relevant containers have been restarted.")
+        else:
             # Clone the repository if needed and run docker-compose
-            if not os.path.exists(os.path.join(clone_dir, 'cvat')):
+            if not os.path.exists(compose_dir):
                 subprocess.run(
                     ["git", "clone", "https://github.com/cvat-ai/cvat"], cwd=clone_dir
                 )
                 
             # Check if docker-compose.yml exists before starting docker-compose
-            compose_file = os.path.join(clone_dir, 'cvat', 'docker-compose.yml')
+            compose_file = os.path.join(compose_dir, 'docker-compose.yml')
             if not os.path.exists(compose_file):
                 return jsonify({"error": "docker-compose.yml not found in the cloned repository"}), 404
             
             # Start CVAT with docker-compose
-            compose_dir = os.path.join(clone_dir, 'cvat')
             subprocess.run(
                 ["docker-compose", "up", "-d"], cwd=compose_dir
             )
             print("Starting CVAT container with docker-compose...")
 
-            # Wait for specific services to be fully up and running
-            services_to_check = ["cvat_server", "cvat_ui"]
-            max_retries = 30
-            for i in range(max_retries):
-                # Check the status of the containers
-                result = subprocess.run(
-                    ["docker-compose", "ps", "--services", "--filter", "status=running"], cwd=compose_dir, stdout=subprocess.PIPE
-                )
-                running_services = result.stdout.decode('utf-8').strip().split('\n')
-
-                # Check if all expected services are running
-                if all(service in running_services for service in services_to_check):
-                    print("All required CVAT services are running.")
-                    break
-
-                print(f"Waiting for CVAT services to start... ({i + 1}/{max_retries})")
-                time.sleep(5)  # Wait 5 seconds before checking again
-
-            if i == max_retries - 1:
-                return jsonify({"error": "CVAT services failed to start in time"}), 500
-
-            # Create superuser via docker exec
-            subprocess.run(
-                ["docker", "exec", "-it", "cvat", "bash", "-ic", "python3 ~/manage.py createsuperuser"]
+        # Wait for specific services to be fully up and running
+        services_to_check = ["cvat_server", "cvat_ui"]
+        max_retries = 30
+        for i in range(max_retries):
+            # Check the status of the containers
+            result = subprocess.run(
+                ["docker-compose", "ps", "--services", "--filter", "status=running"], cwd=compose_dir, stdout=subprocess.PIPE
             )
-            print("CVAT superuser created.")
+            running_services = result.stdout.decode('utf-8').strip().split('\n')
 
-            # Poll the CVAT server to check if it's running
-            cvat_url = "http://localhost:8080/api/server/about"
-            for i in range(max_retries):
-                try:
-                    response = requests.get(cvat_url)
-                    if response.status_code == 200:
-                        print("CVAT server is up and running.")
-                        break
-                except requests.exceptions.RequestException:
-                    pass  # Server is not ready yet
+            # Check if all expected services are running
+            if all(service in running_services for service in services_to_check):
+                print("All required CVAT services are running.")
+                break
 
-                print(f"Waiting for CVAT to start... ({i + 1}/{max_retries})")
-                time.sleep(5)  # Wait 5 seconds before checking again
+            print(f"Waiting for CVAT services to start... ({i + 1}/{max_retries})")
+            time.sleep(5)  # Wait 5 seconds before checking again
 
-            # If the server didn't start within the max retries, return an error
-            if i == max_retries - 1:
-                return jsonify({"error": "CVAT server failed to start in time"}), 500
+        if i == max_retries - 1:
+            return jsonify({"error": "CVAT services failed to start in time"}), 500
 
-            return jsonify({"status": "CVAT container started and superuser created"})
-        else:
-            print("CVAT container already running")
-            return jsonify({"status": "CVAT container already running"})
+        # Create superuser via docker exec
+        subprocess.run(
+            ["docker", "exec", "-it", "cvat_server", "bash", "-c", "'python3 ~/manage.py createsuperuser'"]
+        )
+        print("CVAT superuser created.")
+
+        # Poll the CVAT server to check if it's running
+        cvat_url = "http://localhost:8080/api/server/about"
+        for i in range(max_retries):
+            try:
+                response = requests.get(cvat_url)
+                if response.status_code == 200:
+                    print("CVAT server is up and running.")
+                    break
+            except requests.exceptions.RequestException:
+                pass  # Server is not ready yet
+
+            print(f"Waiting for CVAT to start... ({i + 1}/{max_retries})")
+            time.sleep(5)  # Wait 5 seconds before checking again
+
+        # If the server didn't start within the max retries, return an error
+        if i == max_retries - 1:
+            return jsonify({"error": "CVAT server failed to start in time"}), 500
+
+        return jsonify({"status": "CVAT and Traefik containers restarted and superuser created"})
     except Exception as e:
-        print(f"Error starting CVAT container: {str(e)}")
-        return jsonify({"error": f"Error starting CVAT container: {str(e)}"}), 404
+        print(f"Error starting CVAT or Traefik containers: {str(e)}")
+        return jsonify({"error": f"Error starting CVAT or Traefik containers: {str(e)}"}), 404
 
 ### ROVER LABELS PREPARATION ###
 @file_app.route('/check_labels/<path:dir_path>', methods=['GET'])

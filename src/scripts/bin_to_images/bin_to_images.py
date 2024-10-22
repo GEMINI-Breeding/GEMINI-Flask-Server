@@ -503,11 +503,6 @@ def extract_binary(
     # extract each bin file
     for file_name in tqdm(file_names):
         
-        # overwrite progress text file
-        counter += 1
-        with open(f"{output_path}/progress.txt", "w") as f:
-            f.write(str(counter))
-        
         # create the file reader
         reader = EventsFileReader(file_name)
         success: bool = reader.open()
@@ -556,6 +551,11 @@ def extract_binary(
         # *: Interpolate GPS data to query at camera timestamps
         gps_dfs = interpolate_gps(gps_dfs = gps_dfs, image_dfs = image_dfs, skip_pointer = skip_pointer, save_path = output_path, columns = gps_cols)
         skip_pointer = len(gps_dfs[0])
+        
+         # overwrite progress text file
+        counter += 1
+        with open(f"{output_path}/progress.txt", "w") as f:
+            f.write(str(counter))
     
     # sync messages # *: only do this once all the msgs synceds are read
     msgs = image_dfs + gps_dfs
@@ -573,16 +573,3 @@ def extract_binary(
     if not save_path.exists():
         save_path.mkdir(parents=True, exist_ok=True)
     msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
-    
-    
-# if __name__ == '__main__':
-
-#     ap = argparse.ArgumentParser()
-#     ap.add_argument("--file-names", type=Path, nargs='+', required=True,
-#         help="Path(s) to the events.bin file exported using the recorder app")
-#     ap.add_argument("--output-path", type=Path, required=True,
-#         help="Path to output extracted files")
-#     args = ap.parse_args()
-
-#     base = 'RGB'
-#     main(args.file_names, args.output_path / base)
