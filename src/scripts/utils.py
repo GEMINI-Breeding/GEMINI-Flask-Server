@@ -1,6 +1,14 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+t4_ortho_progress = 0
+
+def set_t4_ortho_progress(val):
+    global t4_ortho_progress
+    t4_ortho_progress = val
+
+def get_t4_ortho_progress():
+    return t4_ortho_progress
 
 def build_nested_structure_sync(path, current_depth=0, max_depth=2):
     if current_depth >= max_depth:

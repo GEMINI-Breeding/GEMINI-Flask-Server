@@ -35,9 +35,11 @@ import io
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
+from scripts.ground_based_t4_ortho.t4_orthophoto_generation import read_geo_file, process_images, merge_georeferenced_images, create_tiled_pyramid
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
+from scripts.utils import set_t4_ortho_progress, get_t4_ortho_progress
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -48,6 +50,7 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
+
 
 @file_app.route('/convert_tif_to_png', methods=['POST'])
 def convert_tif_to_png():
@@ -1000,7 +1003,8 @@ def load_geojson():
         return jsonify(geojson_data)
     else:
         return jsonify({"status": "error", "message": "File not found"})
-    
+
+#turtle anchor    
 @file_app.route('/get_odm_logs', methods=['GET'])
 def get_odm_logs():
     logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
@@ -1013,6 +1017,55 @@ def get_odm_logs():
     else:
         print("Logs not found at path:", logs_path)  # Debug statement
         return jsonify({"error": "Logs not found"}), 404
+
+# def set_t4_ortho_progress(val):
+#     global t4_ortho_progress
+#     t4_ortho_progress = val
+
+
+@file_app.route('/get_t4_ortho_progress', methods=['GET'])
+def get_progress():
+    return jsonify({"progress": get_t4_ortho_progress()}), 200
+
+@file_app.route('/ground_based_ortho_t4', methods=['POST'])
+def ground_based_ortho_t4():
+    try:
+        set_t4_ortho_progress(0)
+        data = request.json
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        year = data.get('year')
+        experiment = data.get('experiment')
+        platform = data.get('platform')
+        sensor = data.get('sensor')
+        even_odd_dir = data.get('direction')
+        oddbed = (even_odd_dir == 'true')
+        # platform = "T4-Rover"
+        # date = "2022-07-25"
+        # sensor = "RGB"
+        print("platform: ", platform)
+        print("date: ", date)
+        print("sensor:", sensor)
+
+        # def generate_orthophoto_T4(oddbed, geopath, source, temp, processed_path, date):
+        geo_path = os.path.join(data_root_dir, "Raw", year, experiment, location, population, date, platform, sensor, "Metadata", "msgs_synced.csv")
+        source = os.path.join(data_root_dir, "Raw", year, experiment, location, population, date, platform, sensor, "Images") + "/"
+        temp = os.path.join(data_root_dir, "Intermediate", year, experiment, location, population, date, platform, sensor) + "/"
+        processed_path = os.path.join(data_root_dir, "Processed", year, experiment, location, population, date, platform, sensor) + "/"
+        # update_consts(oddbed, geopath, source, temp)
+        df = read_geo_file(geo_path)
+        files = [f for f in os.listdir(source) if os.path.isfile(os.path.join(source, f))]
+        df = df[df.img_name.isin(files)]
+        process_images(df, 500, temp, oddbed, geo_path, source)
+        merge_georeferenced_images(processed_path + f'{date}-RGB.tif')
+        create_tiled_pyramid(processed_path + f'{date}-RGB.tif', processed_path + f'{date}-RGB-Pyramid.tif')
+
+        return jsonify({"message": "Ground Based Ortho for T4 Completed"}), 200
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return jsonify({"message": "[Error] Ground Based Ortho for T4 Failed", "error": str(e)}), 500
+
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
