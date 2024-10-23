@@ -21,7 +21,7 @@ import json
 # Add script directory to path
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from create_geotiff_pyramid import create_tiled_pyramid
-from thermal_camera.flir_one_pro_extract import extract_thermal_images
+from thermal_camera.flir_one_pro_extract import extract_thermal_images_NIRFormat as extract_thermal_images
 from utils import check_nvidia_smi
 
 def _create_directory_structure(args):
@@ -229,7 +229,7 @@ def run_odm(args):
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')        # Check if the sensor is thermal
         if args.sensor.lower() == 'thermal':
             # Extract thermal images if the sensor is thermal
-            extracted_folder_name = os.path.join('Images_extracted','thermal')
+            extracted_folder_name = os.path.join('Images_extracted')
             extract_thermal_images(image_pth, extracted_folder_name)
             image_pth = image_pth.replace('Images', extracted_folder_name)
         # Run ODM
