@@ -283,6 +283,95 @@ def delete_files():
         return jsonify({'message': 'Files and directories deleted successfully.'}), 200
 
     except Exception as e:
+        return jsonify({'message': 'Cache directory not found'}), 404
+    
+@file_app.route('/best_locate_file', methods=['POST'])
+def get_best_locate_file():
+    try:
+        data = request.json
+        if not data or len(data) == 0:
+            return jsonify(None), 200  # No locate files provided, return None
+        
+        print(f"All locate files: {data}")
+        
+        # Pattern to match Locate ID
+        pattern = r'Locate-([^/]+)/locate\.csv'
+        
+        if len(data) == 1:
+            # Handle case when there's only one locate file
+            best_locate = data[0]
+            match = re.search(pattern, best_locate)
+            if match:
+                best_locate_match = match.group(1)
+                return jsonify(best_locate_match), 200  # Return the ID of the single locate file
+            else:
+                return jsonify(None), 200  # No match found, return None
+        else:
+            # Handle case when there are multiple locate files
+            best_locate_match = None
+            locate_matches = {}
+            for locate_file in data:
+                match = re.search(pattern, locate_file)
+                if match:
+                    locate_id = match.group(1)
+                    base_path = Path(os.path.dirname(locate_file))
+                    date = base_path.parts[-5]
+                    platform = base_path.parts[-4]
+                    sensor = base_path.parts[-3]
+                    
+                    # get mAP of model
+                    date_index = base_path.parts.index(date[0]) if date[0] in base_path.parts else None
+                    if date_index and date_index > 0:
+                        # Construct a new path from the parts up to the folder before the known date
+                        root_path = Path(*base_path.parts[:date_index])
+                        results_file = root_path / 'Training' / platform / f'{sensor} Plant Detection' / f'Plant-{model_id[0]}' / 'results.csv'
+                    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)
+                    locate_matches[locate_id] = mAP
+                    
+            # get the locate file with the highest mAP
+            if locate_matches:
+                best_locate_match = max(locate_matches, key=locate_matches.get)
+            
+            return jsonify(best_locate_match), 200  # Return the first matching locate ID or None if no match
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500  # Catch-all for unexpected errors
+
+@file_app.route('/best_model_file', methods=['POST'])
+def get_best_model_file():
+    
+    try:
+        
+        data = request.json
+        if not data or len(data) == 0:
+            return jsonify(None), 200
+        
+        if len(data) == 1:
+            return jsonify(data[0]), 200
+        
+        else:
+            best_model = None
+            model_matches = {}
+            for model_file in data:
+                base_path = Path(model_file).parent.parent
+                run = base_path.name
+                match = re.search(r'-([A-Za-z0-9]+)$', run)
+                id = match.group(1)
+                results_file = base_path / 'results.csv'
+
+                # get mAP of model
+                df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
+                model_matches[id] = mAP
+                
+            # get the model file with the highest mAP
+            if model_matches:
+                best_model = max(model_matches, key=model_matches.get)
+                
+            return jsonify(best_model), 200
+    
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
@@ -1497,7 +1586,7 @@ def check_model_details(key, value = None):
     
     # get mAP of model
     df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
     values.extend([mAP])
     
     # get run name
@@ -1758,7 +1847,7 @@ def check_locate_details(key):
         root_path = Path(*base_path.parts[:date_index])
         results_file = root_path / 'Training' / platform / f'{sensor} Plant Detection' / f'Plant-{model_id[0]}' / 'results.csv'
     df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)
     # values.extend([mAP])
     
     # collate details
