@@ -215,6 +215,9 @@ def run_odm(args):
     Run ODM on the temporary directory.
     '''
     metadata_file_name = 'ortho_metadata.json'
+    project_path = args.temp_dir
+    metadata_file = os.path.join(project_path, 'code', metadata_file_name)
+    args.metadata_file = metadata_file
     try:
         # Reset ODM if the arguments are different
         reset_odm(args, metadata_file_name=metadata_file_name)
@@ -232,14 +235,22 @@ def run_odm(args):
             extracted_folder_name = os.path.join('Images_extracted')
             extract_thermal_images(image_pth, extracted_folder_name)
             image_pth = image_pth.replace('Images', extracted_folder_name)
+
+            # Copy geo.txt file to the temporary directory
+            geo_txt_path = image_pth.replace('Images_extracted', 'geo.txt')
+
+            if os.path.exists(geo_txt_path):
+                shutil.copy(geo_txt_path, os.path.join(args.temp_dir, 'code', 'geo.txt'))
+
         # Run ODM
-        project_path = args.temp_dir
-        if project_path[-1] == '/':
-            project_path = project_path[:-1]
-        if os.path.basename(project_path) != 'project':
-            project_path = os.path.join(project_path, 'project')
-        
-        print('Project Path: ', project_path)
+        pth = args.temp_dir
+
+        if pth[-1] == '/':
+            pth = pth[:-1]
+        if os.path.basename(pth) != 'project':
+            pth = os.path.join(pth, 'project')
+        print('Project Path: ', pth)
+        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
         options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
@@ -261,6 +272,10 @@ def run_odm(args):
                 print('Starting ODM with high options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+            
+            if args.sensor.lower() == 'thermal':
+                #options += ' --radiometric-calibration camera'
+                pass
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
             volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
@@ -302,16 +317,17 @@ def run_odm(args):
 if __name__ == '__main__':
     # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--year', type=str, help='Year of the data collection',default='2024')
-    parser.add_argument('--experiment', type=str, help='Experiment name', default='GEMINI')
+    parser.add_argument('--year', type=str, help='Year of the data collection',default='2023')
+    parser.add_argument('--experiment', type=str, help='Experiment name', default='Davis')
     parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
     parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
-    parser.add_argument('--date', type=str, help='Date of the data collection', default='2024-07-15')
+    parser.add_argument('--date', type=str, help='Date of the data collection', default='2023-07-18')
     parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
     parser.add_argument('--sensor', type=str, help='Sensor used', default='thermal')
+    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/gemini/mnt/d/GEMINI-App-Data-DEMO/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/gemini/mnt/d/GEMINI-App-Data-DEMO')
+                        default='/home/GEMINI/temp/project')
+    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
                         choices=[' high', 'low', 'lowest', 'custom'], default='lowest')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
