@@ -283,6 +283,95 @@ def delete_files():
         return jsonify({'message': 'Files and directories deleted successfully.'}), 200
 
     except Exception as e:
+        return jsonify({'message': 'Cache directory not found'}), 404
+    
+@file_app.route('/best_locate_file', methods=['POST'])
+def get_best_locate_file():
+    try:
+        data = request.json
+        if not data or len(data) == 0:
+            return jsonify(None), 200  # No locate files provided, return None
+        
+        print(f"All locate files: {data}")
+        
+        # Pattern to match Locate ID
+        pattern = r'Locate-([^/]+)/locate\.csv'
+        
+        if len(data) == 1:
+            # Handle case when there's only one locate file
+            best_locate = data[0]
+            match = re.search(pattern, best_locate)
+            if match:
+                best_locate_match = match.group(1)
+                return jsonify(best_locate_match), 200  # Return the ID of the single locate file
+            else:
+                return jsonify(None), 200  # No match found, return None
+        else:
+            # Handle case when there are multiple locate files
+            best_locate_match = None
+            locate_matches = {}
+            for locate_file in data:
+                match = re.search(pattern, locate_file)
+                if match:
+                    locate_id = match.group(1)
+                    base_path = Path(os.path.dirname(locate_file))
+                    date = base_path.parts[-5]
+                    platform = base_path.parts[-4]
+                    sensor = base_path.parts[-3]
+                    
+                    # get mAP of model
+                    date_index = base_path.parts.index(date[0]) if date[0] in base_path.parts else None
+                    if date_index and date_index > 0:
+                        # Construct a new path from the parts up to the folder before the known date
+                        root_path = Path(*base_path.parts[:date_index])
+                        results_file = root_path / 'Training' / platform / f'{sensor} Plant Detection' / f'Plant-{model_id[0]}' / 'results.csv'
+                    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)
+                    locate_matches[locate_id] = mAP
+                    
+            # get the locate file with the highest mAP
+            if locate_matches:
+                best_locate_match = max(locate_matches, key=locate_matches.get)
+            
+            return jsonify(best_locate_match), 200  # Return the first matching locate ID or None if no match
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500  # Catch-all for unexpected errors
+
+@file_app.route('/best_model_file', methods=['POST'])
+def get_best_model_file():
+    
+    try:
+        
+        data = request.json
+        if not data or len(data) == 0:
+            return jsonify(None), 200
+        
+        if len(data) == 1:
+            return jsonify(data[0]), 200
+        
+        else:
+            best_model = None
+            model_matches = {}
+            for model_file in data:
+                base_path = Path(model_file).parent.parent
+                run = base_path.name
+                match = re.search(r'-([A-Za-z0-9]+)$', run)
+                id = match.group(1)
+                results_file = base_path / 'results.csv'
+
+                # get mAP of model
+                df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+                mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
+                model_matches[id] = mAP
+                
+            # get the model file with the highest mAP
+            if model_matches:
+                best_model = max(model_matches, key=model_matches.get)
+                
+            return jsonify(best_model), 200
+    
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
@@ -469,6 +558,7 @@ def upload_chunk():
     chunk.save(chunk_save_path)
     
     # Check if all parts are uploaded
+    print(f"Chunk {chunk_index} of {total_chunks} received")
     if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
         # Reassemble file
         with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
@@ -1260,88 +1350,106 @@ def start_cvat():
     # Create the directory if it doesn't exist
     os.makedirs(clone_dir, exist_ok=True)
     
+    # Define the path for the compose directory
+    compose_dir = os.path.join(clone_dir, 'cvat')
+
     try:
-        # Check if the CVAT container is already running
+        # Get a list of all containers with 'cvat' or 'traefik' in their name
         result = subprocess.run(
-            ["docker", "ps", "--filter", "name=cvat", "--format", "{{.Names}}"],
+            ["docker", "ps", "-a", "--filter", "name=cvat", "--format", "{{.Names}}"],
             stdout=subprocess.PIPE
         )
-        container_running = 'cvat' in result.stdout.decode('utf-8')
+        cvat_containers = result.stdout.decode('utf-8').strip().split('\n')
+        cvat_containers = [container for container in cvat_containers if container]  # filter out empty strings
+
+        # Add traefik to the list of containers to restart
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=traefik", "--format", "{{.Names}}"],
+            stdout=subprocess.PIPE
+        )
+        traefik_containers = result.stdout.decode('utf-8').strip().split('\n')
+        traefik_containers = [container for container in traefik_containers if container]  # filter out empty strings
+
+        # Combine the lists of containers
+        all_containers = cvat_containers + traefik_containers
+
     except Exception as e:
-        return jsonify({"error": f"Error checking for CVAT container: {str(e)}"}), 404
-    
+        return jsonify({"error": f"Error checking for CVAT or Traefik containers: {str(e)}"}), 404
+
     try:
-        if not container_running:
+        if all_containers:
+            # Restart each container with 'cvat' or 'traefik' in its name
+            print(f"Restarting containers: {all_containers}")
+            for container in all_containers:
+                subprocess.run(["docker", "restart", container])
+            print("All relevant containers have been restarted.")
+        else:
             # Clone the repository if needed and run docker-compose
-            if not os.path.exists(os.path.join(clone_dir, 'cvat')):
+            if not os.path.exists(compose_dir):
                 subprocess.run(
                     ["git", "clone", "https://github.com/cvat-ai/cvat"], cwd=clone_dir
                 )
                 
             # Check if docker-compose.yml exists before starting docker-compose
-            compose_file = os.path.join(clone_dir, 'cvat', 'docker-compose.yml')
+            compose_file = os.path.join(compose_dir, 'docker-compose.yml')
             if not os.path.exists(compose_file):
                 return jsonify({"error": "docker-compose.yml not found in the cloned repository"}), 404
             
             # Start CVAT with docker-compose
-            compose_dir = os.path.join(clone_dir, 'cvat')
             subprocess.run(
                 ["docker-compose", "up", "-d"], cwd=compose_dir
             )
             print("Starting CVAT container with docker-compose...")
 
-            # Wait for specific services to be fully up and running
-            services_to_check = ["cvat_server", "cvat_ui"]
-            max_retries = 30
-            for i in range(max_retries):
-                # Check the status of the containers
-                result = subprocess.run(
-                    ["docker-compose", "ps", "--services", "--filter", "status=running"], cwd=compose_dir, stdout=subprocess.PIPE
-                )
-                running_services = result.stdout.decode('utf-8').strip().split('\n')
-
-                # Check if all expected services are running
-                if all(service in running_services for service in services_to_check):
-                    print("All required CVAT services are running.")
-                    break
-
-                print(f"Waiting for CVAT services to start... ({i + 1}/{max_retries})")
-                time.sleep(5)  # Wait 5 seconds before checking again
-
-            if i == max_retries - 1:
-                return jsonify({"error": "CVAT services failed to start in time"}), 500
-
-            # Create superuser via docker exec
-            subprocess.run(
-                ["docker", "exec", "-it", "cvat", "bash", "-ic", "python3 ~/manage.py createsuperuser"]
+        # Wait for specific services to be fully up and running
+        services_to_check = ["cvat_server", "cvat_ui"]
+        max_retries = 30
+        for i in range(max_retries):
+            # Check the status of the containers
+            result = subprocess.run(
+                ["docker-compose", "ps", "--services", "--filter", "status=running"], cwd=compose_dir, stdout=subprocess.PIPE
             )
-            print("CVAT superuser created.")
+            running_services = result.stdout.decode('utf-8').strip().split('\n')
 
-            # Poll the CVAT server to check if it's running
-            cvat_url = "http://localhost:8080/api/server/about"
-            for i in range(max_retries):
-                try:
-                    response = requests.get(cvat_url)
-                    if response.status_code == 200:
-                        print("CVAT server is up and running.")
-                        break
-                except requests.exceptions.RequestException:
-                    pass  # Server is not ready yet
+            # Check if all expected services are running
+            if all(service in running_services for service in services_to_check):
+                print("All required CVAT services are running.")
+                break
 
-                print(f"Waiting for CVAT to start... ({i + 1}/{max_retries})")
-                time.sleep(5)  # Wait 5 seconds before checking again
+            print(f"Waiting for CVAT services to start... ({i + 1}/{max_retries})")
+            time.sleep(5)  # Wait 5 seconds before checking again
 
-            # If the server didn't start within the max retries, return an error
-            if i == max_retries - 1:
-                return jsonify({"error": "CVAT server failed to start in time"}), 500
+        if i == max_retries - 1:
+            return jsonify({"error": "CVAT services failed to start in time"}), 500
 
-            return jsonify({"status": "CVAT container started and superuser created"})
-        else:
-            print("CVAT container already running")
-            return jsonify({"status": "CVAT container already running"})
+        # Create superuser via docker exec
+        subprocess.run(
+            ["docker", "exec", "-it", "cvat_server", "bash", "-c", "'python3 ~/manage.py createsuperuser'"]
+        )
+        print("CVAT superuser created.")
+
+        # Poll the CVAT server to check if it's running
+        cvat_url = "http://localhost:8080/api/server/about"
+        for i in range(max_retries):
+            try:
+                response = requests.get(cvat_url)
+                if response.status_code == 200:
+                    print("CVAT server is up and running.")
+                    break
+            except requests.exceptions.RequestException:
+                pass  # Server is not ready yet
+
+            print(f"Waiting for CVAT to start... ({i + 1}/{max_retries})")
+            time.sleep(5)  # Wait 5 seconds before checking again
+
+        # If the server didn't start within the max retries, return an error
+        if i == max_retries - 1:
+            return jsonify({"error": "CVAT server failed to start in time"}), 500
+
+        return jsonify({"status": "CVAT and Traefik containers restarted and superuser created"})
     except Exception as e:
-        print(f"Error starting CVAT container: {str(e)}")
-        return jsonify({"error": f"Error starting CVAT container: {str(e)}"}), 404
+        print(f"Error starting CVAT or Traefik containers: {str(e)}")
+        return jsonify({"error": f"Error starting CVAT or Traefik containers: {str(e)}"}), 404
 
 ### ROVER LABELS PREPARATION ###
 @file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
@@ -1478,7 +1586,7 @@ def check_model_details(key, value = None):
     
     # get mAP of model
     df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
     values.extend([mAP])
     
     # get run name
@@ -1739,7 +1847,7 @@ def check_locate_details(key):
         root_path = Path(*base_path.parts[:date_index])
         results_file = root_path / 'Training' / platform / f'{sensor} Plant Detection' / f'Plant-{model_id[0]}' / 'results.csv'
     df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].max(), 2)
+    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)
     # values.extend([mAP])
     
     # collate details
