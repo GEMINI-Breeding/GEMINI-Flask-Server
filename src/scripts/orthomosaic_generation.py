@@ -261,22 +261,20 @@ def run_odm(args):
         with open(log_file, 'w') as f:
             # See options from https://docs.opendronemap.org/arguments/
             #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            common_options = "--dsm --orthophoto-resolution 2.0" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            common_options = "--dsm --orthophoto-resolution 0.01" # orthophoto-resolution gsd is usually 0.27cm/pixel
             if args.reconstruction_quality == 'Custom':
                 #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
                 options = f"{args.custom_options} {common_options}"
                 print('Starting ODM with custom options...')
-            elif args.reconstruction_quality == 'Low':
-                options = f"--pc-quality medium --min-num-features 8000 {common_options}" 
-                print('Starting ODM with low options...')
-            elif args.reconstruction_quality == 'Lowest':
-                options = f"--fast-orthophoto --dsm {common_options}"
-                print('Starting ODM with Lowest options...')
-            elif args.reconstruction_quality == 'High':
-                options = f"--pc-quality high --min-num-features 16000 {common_options}"
-                print('Starting ODM with high options...')
+            elif args.reconstruction_quality == 'Default':
+                options = f"--fast-orthophoto {common_options}"
+                print('Starting ODM with default options...')
             else:
-                raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+                raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
+            
+            if args.sensor.lower() == 'thermal':
+                #options += ' --radiometric-calibration camera'
+                pass
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
             volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
@@ -330,10 +328,9 @@ if __name__ == '__main__':
     parser.add_argument('--experiment', type=str, help='Experiment name')
     parser.add_argument('--sensor', type=str, help='Sensor used')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/GEMINI/temp/project')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
-    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=['High', 'Low', 'Custom'], default='low')
+                        default='/home/GEMINI/GEMINI-App-Data/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
+    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (default, custom)',
+                        choices=['Default', 'Custom'], default='default')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
