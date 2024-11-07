@@ -21,7 +21,6 @@ import json
 # Add current directory to path
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from create_geotiff_pyramid import create_tiled_pyramid
-from thermal_camera.flir_one_pro_extract import extract_thermal_images
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -211,11 +210,9 @@ def reset_odm(args):
             image_pth = data['image_pth']
             prev_arg = make_odm_args_from_path(image_pth)
             if odm_args_checker(prev_arg, args):
-                print("Already processed. Try Copying to Processed folder.")
-                if _process_outputs(args) == True:
-                    reset_odm_temp = True
-                else:
-                    reset_odm_temp = False # Don't reset the ODM. The output files are missing.
+                _process_outputs(args)
+                print("Already processed. Copying to Processed folder.")
+                return
             else:
                 # Reset the ODM if the arguments are different
                 reset_odm_temp = True
@@ -243,33 +240,9 @@ def run_odm(args):
     '''
     Run ODM on the temporary directory.
     '''
-    metadata_file_name = 'ortho_metadata.json'
-    project_path = args.temp_dir
-    metadata_file = os.path.join(project_path, 'code', metadata_file_name)
-    args.metadata_file = metadata_file
-    try:
-        # Reset ODM if the arguments are different
-        reset_odm(args, metadata_file_name=metadata_file_name)
-    except Exception as e:
-        # Handle exception: log it, set a flag, etc.
-        print(f"Error in thread: {e}")
-        return
     
     try:
         _create_directory_structure(args)
-
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')        # Check if the sensor is thermal
-        if args.sensor.lower() == 'thermal':
-            # Extract thermal images if the sensor is thermal
-            extracted_folder_name = os.path.join('Images_extracted')
-            extract_thermal_images(image_pth, extracted_folder_name)
-            image_pth = image_pth.replace('Images', extracted_folder_name)
-
-            # Copy geo.txt file to the temporary directory
-            geo_txt_path = image_pth.replace('Images_extracted', 'geo.txt')
-
-            if os.path.exists(geo_txt_path):
-                shutil.copy(geo_txt_path, os.path.join(args.temp_dir, 'code', 'geo.txt'))
 
         # Run ODM
         pth = args.temp_dir
@@ -278,6 +251,8 @@ def run_odm(args):
             pth = pth[:-1]
         if os.path.basename(pth) != 'project':
             pth = os.path.join(pth, 'project')
+        
+        
         print('Project Path: ', pth)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
@@ -295,11 +270,7 @@ def run_odm(args):
                 options = f"--fast-orthophoto {common_options}"
                 print('Starting ODM with default options...')
             else:
-                raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
-            
-            if args.sensor.lower() == 'thermal':
-                #options += ' --radiometric-calibration camera'
-                pass
+                raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality)
             # Create the command
             # It will mount pth to /datasets and image_pth to /datasets/code/images
             volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
@@ -312,16 +283,24 @@ def run_odm(args):
             # command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
             # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
             # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
-            # Save image_pth and  docker command to metadata yaml file
-            
-            with open(metadata_file, 'w') as file:
-                # Export arg to data
-                metadata = vars(args)
-                metadata['image_pth'] = image_pth
-                metadata['command'] = command
-                metadata['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                # yaml.dump(data, file, sort_keys=False)
-                json.dump(metadata, file)
+            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+            # Save image_pth and  docker command to recipe yaml file
+            data = {
+                'year': args.year,
+                'experiment': args.experiment,
+                'location': args.location,
+                'population': args.population,
+                'date': args.date,
+                'platform': args.platform,
+                'sensor': args.sensor,
+                'reconstruction_quality': args.reconstruction_quality,
+                'custom_options': args.custom_options,
+                'image_pth': image_pth,
+                'command': command,
+            }
+            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            with open(recipe_file, 'w') as file:
+                yaml.dump(data, file, sort_keys=False)
 
             # Parse this with space to list
             command = command.split()
@@ -338,18 +317,17 @@ def run_odm(args):
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--year', type=str, help='Year of the data collection',default='2023')
-    parser.add_argument('--experiment', type=str, help='Experiment name', default='Davis')
-    parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
-    parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
-    parser.add_argument('--date', type=str, help='Date of the data collection', default='2023-07-18')
-    parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
-    parser.add_argument('--sensor', type=str, help='Sensor used', default='thermal')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
+    parser.add_argument('--date', type=str, help='Date of the data collection')
+    parser.add_argument('--location', type=str, help='Location of the data collection')
+    parser.add_argument('--population', type=str, help='Population for the dataset')
+    parser.add_argument('--year', type=str, help='Year of the data collection')
+    parser.add_argument('--experiment', type=str, help='Experiment name')
+    parser.add_argument('--sensor', type=str, help='Sensor used')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/GEMINI/GEMINI-App-Data/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
-    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (default, custom)',
-                        choices=['Default', 'Custom'], default='default')
+                        default='/home/GEMINI/temp/project')
+    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
+    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
+                        choices=['High', 'Low', 'Custom'], default='low')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()

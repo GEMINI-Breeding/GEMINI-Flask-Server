@@ -1,22 +1,19 @@
 import argparse
 from osgeo import gdal
 
-def create_tiled_pyramid(input_path, output_path, verbose=False):
+def create_tiled_pyramid(input_path, output_path):
     # Open the original raster in read mode
     ds = gdal.Open(input_path, gdal.GA_ReadOnly)
 
     # Check the projection information
     projection = ds.GetProjection()
-    if verbose:
-        print('Original Projection:', projection)
+    print('Original Projection:', projection)
 
     # Reproject the raster to Web Mercator
-    if verbose:
-        print('Reprojecting...')
+    print('Reprojecting...')
     ds = gdal.Warp('', ds, format='MEM', dstSRS='EPSG:3857')
     projection = ds.GetProjection()
-    if verbose:
-        print('New Projection:', projection)
+    print('New Projection:', projection)
 
     # Create a new raster in write mode with the same properties as the original raster
     driver = gdal.GetDriverByName('GTiff')
