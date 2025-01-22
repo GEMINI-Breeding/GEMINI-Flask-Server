@@ -283,7 +283,7 @@ def run_odm(args):
             else:
                 docker_image = "opendronemap/odm"
 
-            command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options} --orthophoto-png" # 'code' is the default project name
             # command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
             # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
             # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
