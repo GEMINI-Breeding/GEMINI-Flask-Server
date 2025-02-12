@@ -5,11 +5,13 @@ import os
 import cv2
 import shapely
 import re
+import json
 import utm
 import time
 import warnings
 import multiprocessing
 import random
+import rasterio
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -21,6 +23,13 @@ from ultralytics import YOLO
 from tqdm import tqdm
 from shapely.geometry import Point
 from tqdm.contrib.concurrent import process_map
+from rasterio.transform import from_origin
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.crs import CRS
+from rasterio.io import MemoryFile
+from transformers import pipeline
+from PIL import Image
+from matplotlib import cm
 
 warnings.filterwarnings('ignore')
 
@@ -28,6 +37,11 @@ warnings.filterwarnings('ignore')
 device = torch.device("cpu")
 num_workers = int(multiprocessing.cpu_count() / 1.5)
 progress = 0
+
+print('Loading Depth Anything...')
+DA_DEVICE = 'cuda' if cuda.getCudaEnabledDeviceCount() > 0 else 'cpu'
+PIPE = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf", device=DA_DEVICE)
+CAMERA_HEIGHT = 1.2 # meters
 
 class StereoWrapper:
     """
@@ -218,7 +232,7 @@ def conversion(
             for c in chunk:
                 # interpolate and process disparity maps (check create stereo for process)
                 disparity_args = [images_path, camera, synced, images, c]
-                outs = np.array(process_disparity(disparity_args))
+                outs = np.array(process_depth(disparity_args))
                 outs_chunk.append(outs)
         else:
             for c in chunk:
@@ -233,7 +247,7 @@ def conversion(
             df = ts_dfs[chunk[s]]
             df = df.reset_index(drop=True)
             if type(outs_chunk[s]) != int:
-                enens = boxes_to_utm(outs_chunk[s], df)
+                enens = boxes_to_utm(outs_chunk[s], df, skip_stereo)
                 box_utm.append(enens)
                 orig_pixels.append(df)
             
@@ -410,7 +424,8 @@ def nms(
 
 def boxes_to_utm(
     out3d: np.ndarray, 
-    dets: pd
+    dets: pd,
+    skip_stereo: bool
 ) -> list:
     """
     Convert bboxes into utm coordinates using outputs from stereo function
@@ -450,58 +465,190 @@ def boxes_to_utm(
         box = dets.loc[r, 'bbox_np'].astype(int)
         score = dets.loc[r, 'score']
         
-        if (box[1] < 512) | (box[1]+box[3] > (1024+512)): #minimize box overlap
-            continue
-        
-        box_shift = 90 # 90 if testing with camera A annots
-        
-        e1 = xy[box[1], box[0]-box_shift, 0]
-        n1 = xy[box[1], box[0]-box_shift, 1]
-        
-        if (box[0]-90+box[2] > 2591) and ((box[1]+box[3]) > 2047):
-            e2 = xy[2047, 2592, 0]
-            n2 = xy[2047, 2592, 1]
-        elif (box[0]-box_shift+box[2] > 2591) and ((box[1]+box[3]) < 2047):
-            e2 = xy[(box[1]+box[3]), 2591, 0]
-            n2 = xy[(box[1]+box[3]), 2591, 1]
-        elif (box[0]-box_shift+box[2] < 2591) and ((box[1]+box[3]) > 2047):
-            e2 = xy[2047, (box[0]-box_shift+box[2]), 0]
-            n2 = xy[2047, (box[0]-box_shift+box[2]), 1]
-        else:        
-            e2 = xy[(box[1]+box[3]), (box[0]-box_shift+box[2]), 0]
-            n2 = xy[(box[1]+box[3]), (box[0]-box_shift+box[2]), 1]
+        if not skip_stereo: # NOTE: This is for t4 setup
+            if (box[1] < 512) | (box[1]+box[3] > (1024+512)): #minimize box overlap
+                continue
+            
+            box_shift = 90 # 90 if testing with camera A annots
+            
+            e1 = xy[box[1], box[0]-box_shift, 0]
+            n1 = xy[box[1], box[0]-box_shift, 1]
+            
+            if (box[0]-90+box[2] > 2591) and ((box[1]+box[3]) > 2047):
+                e2 = xy[2047, 2592, 0]
+                n2 = xy[2047, 2592, 1]
+            elif (box[0]-box_shift+box[2] > 2591) and ((box[1]+box[3]) < 2047):
+                e2 = xy[(box[1]+box[3]), 2591, 0]
+                n2 = xy[(box[1]+box[3]), 2591, 1]
+            elif (box[0]-box_shift+box[2] < 2591) and ((box[1]+box[3]) > 2047):
+                e2 = xy[2047, (box[0]-box_shift+box[2]), 0]
+                n2 = xy[2047, (box[0]-box_shift+box[2]), 1]
+            else:        
+                e2 = xy[(box[1]+box[3]), (box[0]-box_shift+box[2]), 0]
+                n2 = xy[(box[1]+box[3]), (box[0]-box_shift+box[2]), 1]
+                
+        else: # NOTE: This is for anything else
+            
+            # calculate end points, clipped to image dimensions
+            x1 = min(box[0], xy.shape[1] - 1)
+            y1 = min(box[1], xy.shape[0] - 1)
+            x2 = min(box[0] + box[2], xy.shape[1] - 1)
+            y2 = min(box[1] + box[3], xy.shape[0] - 1)
+
+            # extract coordinates
+            e1 = xy[y1, x1, 0]
+            n1 = xy[y1, x1, 1]
+            e2 = xy[y2, x2, 0]
+            n2 = xy[y2, x2, 1]
         
         enen = [dets.loc[r, 'timestamp'], e1, n1, e2, n2, score]
         enens.append(enen)
     
     return enens
 
-def process_disparity(args):
+def save_as_geotiff(image_data, e_top_left, n_top_left, output_file, pixel_size_x, pixel_size_y):
+    """
+    Saves an image with UTM coordinates as a GeoTIFF file reprojected to Web Mercator (EPSG:3857).
+
+    Args:
+        image_data (np.array): RGB image data.
+        e_top_left (float): UTM Easting coordinate of the top-left corner.
+        n_top_left (float): UTM Northing coordinate of the top-left corner.
+        output_file (str): Path to save the GeoTIFF file.
+        pixel_size_x (float): Pixel resolution in the x direction in meters.
+        pixel_size_y (float): Pixel resolution in the y direction in meters.
+    """
+    # Set UTM transform with top-left coordinates
+    transform = from_origin(e_top_left, n_top_left, pixel_size_x, pixel_size_y)
+    utm_crs = CRS.from_epsg(32610)  # Replace 32610 with your UTM zone EPSG code
+
+    # Convert image to RGB if needed
+    image_data = cv2.cvtColor(image_data, cv2.COLOR_BGR2RGB)
+
+    # Create an in-memory UTM image
+    with MemoryFile() as memfile:
+        with memfile.open(
+            driver='GTiff',
+            height=image_data.shape[0],
+            width=image_data.shape[1],
+            count=3,
+            dtype=image_data.dtype,
+            crs=utm_crs,
+            transform=transform
+        ) as src:
+            src.write(image_data[:, :, 0], 1)  # Red channel
+            src.write(image_data[:, :, 1], 2)  # Green channel
+            src.write(image_data[:, :, 2], 3)  # Blue channel
+
+            # Reproject to Web Mercator (EPSG:3857)
+            transform, width, height = calculate_default_transform(
+                src.crs, 'EPSG:3857', src.width, src.height, *src.bounds)
+            kwargs = src.meta.copy()
+            kwargs.update({
+                'crs': 'EPSG:3857',
+                'transform': transform,
+                'width': width,
+                'height': height
+            })
+
+            # Save the final GeoTIFF in Web Mercator
+            with rasterio.open(output_file, 'w', **kwargs) as dst:
+                for i in range(1, src.count + 1):
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs='EPSG:3857',
+                        resampling=Resampling.nearest
+                    )
+                    
+def calculate_pixel_size(out3d):
+    # Get the shape of the out3d array
+    h, w, _ = out3d.shape
+    
+    # Calculate center coordinates
+    center_y, center_x = h // 2, w // 2
+
+    # Calculate pixel size in the x direction (easting) at the center
+    dx = np.abs(out3d[center_y, center_x + 1, 0] - out3d[center_y, center_x, 0])  # Difference in easting
+
+    # Calculate pixel size in the y direction (northing) at the center
+    dy = np.abs(out3d[center_y + 1, center_x, 1] - out3d[center_y, center_x, 1])  # Difference in northing
+
+    return dx, dy
+
+def process_depth(args):
     
     images_path, camera, synced, images, ts = args
     
-    # pointclouds are stored in a folder called Disparity
-    disparity_path = images_path.replace("Images", "Disparity")
+    # metadata path
+    metadata_path = str(images_path).replace('Images', 'Metadata')
+    intrinsics_json = Path(metadata_path) / f'{camera}_calibration.json'
+    with open(intrinsics_json, 'r') as f:
+        data = json.load(f)
+    intrinsic_matrix = data['cameraData'][2]['intrinsicMatrix']
     
     # get row that matches timestamp
     sync_row = synced.loc[synced[f'/{camera}/rgb'] == ts, :]
+    
+    # return 0 if no row is found
+    if len(sync_row) == 0:
+        return 0
     heading = sync_row['direction'].values[0]
     
     try:
-        # load disparity map and rgb image
+        # load rgb image
         rgb_file = sync_row[f'/{camera}/rgb_file'].values[0]
-        disparity_file = sync_row[f'/{camera}/disparity_file'].values[0]
-        rgb_im = cv2.imread(os.path.join(images_path, camera, rgb_file), cv2.IMREAD_COLOR)
-        out3d = np.load(os.path.join(disparity_path, camera, disparity_file))
+        rgb_im = cv2.imread(Path(images_path) / rgb_file[1:], cv2.IMREAD_COLOR)
+        
+        # rotate image based on heading
+        if heading == 'North':
+            # flip along the horizontal axis
+            rgb_im = cv2.flip(rgb_im, 0)
+            
+            # rotate counter clockwise by 90 degrees
+            rgb_im = cv2.rotate(rgb_im, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # get depth image using depth anything
+        img_for_depth = Image.open(Path(images_path) / rgb_file[1:]) # depth anything using Pillow
+        rel_depth = PIPE(img_for_depth)["depth"]
+        rel_depth = np.array(rel_depth)
+        
+        # save grascale image for debugging (as png with heatmap) # TODO: DEBUG REMOVE LATER
+        normalized_depth = rel_depth / 255.0
+        colormap = cm.get_cmap('viridis')
+        heatmap = colormap(normalized_depth)  # This gives an RGBA array
+        heatmap_rgb = (heatmap[:, :, :3] * 255).astype(np.uint8)
+        heatmap_image = Image.fromarray(heatmap_rgb)
+        heatmap_image.save(f"/mnt/d/Temporary/locate_test/depth/{ts}.png")
+        
+        # scale depth to actual height
+        center = (rel_depth.shape[1] // 2, rel_depth.shape[0] // 2)
+        center_depth = rel_depth[center[1], center[0]]
+        scale = CAMERA_HEIGHT / center_depth
+        abs_depth = rel_depth * scale
+        abs_depth = abs_depth.astype(np.float64)
+        
+        # create 3d
+        fx, fy, cx, cy = intrinsic_matrix[0], intrinsic_matrix[4], intrinsic_matrix[2], intrinsic_matrix[5]
+        h, w = abs_depth.shape
+        x = np.tile(np.arange(w), (h, 1))
+        y = np.tile(np.arange(h), (w, 1)).T
+        Z = abs_depth
+        X = (x - cx) * Z / fx
+        Y = (y - cy) * Z / fy
+        out3d = np.stack((X, Y, Z), axis=-1)
         
         # grab location
-        lon = sync_row['lon_interp_adj'].values[0]
-        lat = sync_row['lat_interp_adj'].values[0]
+        lon = sync_row['lon'].values[0]
+        lat = sync_row['lat'].values[0]
         e, n, _, _ = utm.from_latlon(lat, lon)
         
-        # meters to cm
-        e *= 100
-        n *= 100
+        # # meters to cm
+        # e *= 100
+        # n *= 100
         
         # process out3d
         out3d_np = out3d.astype(np.float64)
@@ -510,30 +657,19 @@ def process_disparity(args):
         multiplier_np[:,:,0] = -1
         multiplier = cv2.UMat(multiplier_np)
         out3d = cv2.multiply(out3d, multiplier)
-        
-        # convert to real coordinates
-        if heading == 'North':
-            out3d = cv2.flip(out3d, 0)
-            out3d = cv2.flip(out3d, 1)
-            left_im = cv2.flip(left_im, 0)
-            left_im = cv2.flip(left_im, 1)
-            out3d = cv2.multiply(out3d, multiplier)
-        if heading == 'East':
-            # Rotate 90 degrees clockwise
-            out3d = cv2.rotate(out3d, cv2.ROTATE_90_CLOCKWISE)
-            left_im = cv2.rotate(left_im, cv2.ROTATE_90_CLOCKWISE)
-        if heading == 'West':
-            # Rotate 90 degrees counterclockwise
-            out3d = cv2.rotate(out3d, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            left_im = cv2.rotate(left_im, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        else:
-            e -= 0.0 # shift camera over x cm to align with other heading
             
         add_matrix_np = np.ones_like(out3d.get(), dtype=np.float64)
         add_matrix_np[:, :, 0] *= e
         add_matrix_np[:, :, 1] *= n
         add_matrix_umat = cv2.UMat(add_matrix_np)
         out3d = cv2.add(out3d, add_matrix_umat)
+        
+        # save tiff file for debugging
+        pixel_size_x, pixel_size_y = calculate_pixel_size(out3d.get())
+        e_top_left = out3d.get()[0, 0, 0]
+        n_top_left = out3d.get()[0, 0, 1]
+        output_file = Path('/mnt/d/Temporary/locate_test/temp') / f'{ts}.tif'
+        save_as_geotiff(rgb_im, e_top_left, n_top_left, output_file, pixel_size_x, pixel_size_y)
         
     except Exception as e:
         print(f'Failed to read cam sync files: {e}')
@@ -747,6 +883,17 @@ def update_progress(
     # write in text file (make text file if it doesnt exist)
     with open(save/'locate_progress.txt', 'w') as file:
         file.write(str(progress))
+        
+def extract_longest_digits(path):
+    # Find all sequences of digits in the path
+    matches = re.findall(r'\d+', path)
+    if matches:
+        # Return the longest sequence of digits as an integer
+        longest_match = max(matches, key=len)
+        return int(longest_match)
+    else:
+        print(f"No numeric sequence found in path: {path}")
+        return float('inf')  # Use a large number to push unmatched paths to the end
 
 def main(
     images_path: Path,
@@ -775,7 +922,7 @@ def main(
     
     # parse through parent directory for images
     images = parse_dir(images_path, metadata, camera, task='inference')
-    images = sorted(images, key=lambda path: int(re.search(r'\d{19}', path).group()))
+    images = sorted(images, key=extract_longest_digits)
     if accelerate:
         images = images[::3]
     update_progress(save, 'images')

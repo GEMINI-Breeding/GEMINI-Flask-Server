@@ -573,3 +573,14 @@ def extract_binary(
     if not save_path.exists():
         save_path.mkdir(parents=True, exist_ok=True)
     msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+    
+if __name__ == '__main__':
+    
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--file_names', type=str, nargs='+', required=True,
+                    help='Path to binary files')
+    ap.add_argument('--output_path', type=Path, required=True,
+                    help='Path to output directory') 
+    args = ap.parse_args()
+    
+    extract_binary(args.file_names, args.output_path)
