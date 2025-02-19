@@ -49,42 +49,23 @@ file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 
-@file_app.route('/convert_tif_to_png', methods=['POST'])
-def convert_tif_to_png():
+@file_app.route('/get_tif_to_png', methods=['POST'])
+def get_tif_to_png():
     data = request.json
-    file_path = data['filePath']
+    tif_path = data['filePath']
     
-    # Construct the full file path
-    full_file_path = os.path.join(data_root_dir, file_path)
+    # Construct the full file paths
+    tif_full_path = os.path.join(data_root_dir, tif_path)
     
-    if not os.path.exists(full_file_path):
-        return jsonify({'error': f'File not found: {full_file_path}'}), 404
+    # Generate PNG path by replacing .tif extension
+    png_path = tif_full_path.replace('.tif', '.png')
+    
+    if not os.path.exists(png_path):
+        return jsonify({'error': f'PNG file not found: {png_path}'}), 404
     
     try:
-        # Open the TIFF image using rasterio
-        with rasterio.open(full_file_path) as src:
-            # Read the image data
-            image_data = src.read()
-            
-            # Convert to RGB if necessary
-            if image_data.shape[0] > 3:
-                image_data = image_data[:3]
-            
-            # Transpose the data to the correct shape for PIL
-            image_data = np.transpose(image_data, (1, 2, 0))
-            
-            # Create a PIL Image
-            img = Image.fromarray(np.uint8(image_data))
-            
-            # Create a byte stream to hold the PNG image
-            byte_io = io.BytesIO()
-            # Save the image as PNG to the byte stream
-            img.save(byte_io, 'PNG')
-            # Seek to the beginning of the stream
-            byte_io.seek(0)
-        
-        # Send the PNG image as a file
-        return send_file(byte_io, mimetype='image/png')
+        # Open and send the existing PNG file
+        return send_file(png_path, mimetype='image/png')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
