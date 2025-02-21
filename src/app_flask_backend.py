@@ -1239,6 +1239,40 @@ def get_ortho_metadata():
         return jsonify({"error": "Invalid JSON in metadata file"}), 500
     except Exception as e:
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+    
+@file_app.route('/download_ortho', methods=['POST'])
+def download_ortho():
+    data = request.get_json()
+    try:
+        file_path = os.path.join(
+            data_root_dir,
+            'Processed',
+            data['year'],
+            data['experiment'],
+            data['location'],
+            data['population'],
+            data['date'],
+            data['platform'],
+            data['sensor'],
+            f"{data['date']}-RGB.png"
+        )
+        if not os.path.exists(file_path):
+            print(f"File not found: {file_path}")
+            return jsonify({'error': f'File not found: {file_path}'}), 404
+        
+        # Returns the file as an attachment so that the browser downloads it.
+        print(f"Sending file: {file_path}")
+        return send_file(
+            file_path,
+            mimetype="image/png",
+            as_attachment=True,
+            download_name=os.path.basename(file_path)  # For Flask 2.0+
+        )
+        
+    except Exception as e:
+        print(f"An error occurred while downloading the ortho: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+        
 
 @file_app.route('/delete_ortho', methods=['POST'])
 def delete_ortho():
