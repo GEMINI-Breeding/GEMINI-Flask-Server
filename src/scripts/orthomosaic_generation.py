@@ -8,7 +8,12 @@ from glob import glob
 from math import log
 from concurrent.futures import ThreadPoolExecutor
 import time
+import rasterio
+import numpy as np
+import io
 from datetime import datetime
+from PIL import Image
+from PIL.Image import Resampling
 
 # Third-party library imports
 import cv2
@@ -235,6 +240,29 @@ def odm_args_checker(arg1, arg2):
         arg1.sensor == arg2.sensor
     ])
 
+def convert_tif_to_png(tif_path):
+    
+    Image.MAX_IMAGE_PIXELS = None
+    
+    try:
+        directory = os.path.dirname(tif_path)
+        filename = os.path.basename(tif_path)
+        filename_without_ext = os.path.splitext(filename)[0]
+        png_path = os.path.join(directory, filename_without_ext + '.png')
+        
+        with Image.open(tif_path) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            max_size = (1024, 1024)  # Example maximum dimensions
+            img.thumbnail(max_size, Resampling.LANCZOS)
+            
+            img.save(png_path, 'PNG')
+            print(f"Successfully converted {tif_path} to {png_path}")
+            
+    except Exception as e:
+        print(f"Error saving tif as png: {str(e)}")
+        print(f"Error saving tif as png: {e}")
 
 def run_odm(args):
     '''
@@ -314,6 +342,9 @@ def run_odm(args):
         
         _process_outputs(args)
         save_ortho_metadata(args)  # Call save_ortho_metadata here
+        
+        # save png image
+        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
