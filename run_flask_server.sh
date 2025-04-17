@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# echo current directory
+# Echo current directory
 echo "Current directory: $(pwd)"
-# Change to the directory of GEMINI-Flask-Server
-pushd $(pwd)/../GEMINI-Flask-Server 
-# bash ./install_flask_server.sh
 
-# Read conda path from your ~/.bashrc and parse the conda path before :$PATH
-if [[ "$(uname)" == "Darwin" ]]; then
-    conda_path=$(pcregrep -o '__conda_setup="\$\(\K[^:]+/bin' ~/.zshrc | awk -F':' '{print $1}' | tr -d "'")
-else
-    conda_path=$(grep -oP 'export PATH="\K[^:]+/bin' ~/.bashrc)
-fi
+# Change to the GEMINI-Flask-Server directory
+pushd "$(pwd)/../GEMINI-Flask-Server"
 
-echo "Conda Path: $conda_path"
-# Activate conda environment
-source $conda_path/activate .conda/
+# Resolve the full absolute path to the .conda environment
+conda_env_path="$(cd ./.conda && pwd)"
+echo "Resolved Conda environment path: $conda_env_path"
+
+# Initialize Conda in the current shell session
+echo "Sourcing conda from: $(conda info --base)/etc/profile.d/conda.sh"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+
+# Activate the Conda environment by path
+echo "Activating Conda environment at: $conda_env_path"
+conda activate "$conda_env_path"
 
 # Use default arguments when they are not provided (data_root_dir, port)
 if [ -z "$1" ]; then
