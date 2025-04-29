@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 
+set -e  # Exit immediately if a command exits with a non-zero status
+
+# Function to detect OS and set Miniconda URL
+detect_os_and_set_miniconda_url() {
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "Detected Linux OS."
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+        SHELL_CONFIG="$HOME/.bashrc"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "Detected macOS."
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
+        SHELL_CONFIG="$HOME/.bash_profile"
+    else
+        echo "Unsupported OS type: $OSTYPE"
+        exit 1
+    fi
+}
+
 # Function to download and install Miniconda
 install_miniconda() {
     echo "Conda is not installed. Downloading and installing Miniconda..."
-
-    ARCH=$(uname -m)
-    if [[ "$ARCH" == "arm64" ]]; then
-        # Apple Silicon
-        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
-    else
-        # Intel
-        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
-    fi
-
     MINICONDA_SCRIPT=$(basename "$MINICONDA_URL")
 
     # Download the Miniconda installer
@@ -21,19 +29,18 @@ install_miniconda() {
     # Run the Miniconda installer
     bash "$MINICONDA_SCRIPT" -b -p "$HOME/miniconda"
 
-    # Initialize conda
+    # Initialize conda for the correct shell
     "$HOME/miniconda/bin/conda" init
 
     # Remove the installer script
     rm "$MINICONDA_SCRIPT"
 
-    # Source the new conda configuration (detects shell type)
-    if [[ "$SHELL" == *zsh ]]; then
-        source "$HOME/.zshrc"
-    else
-        source "$HOME/.bash_profile"
-    fi
+    # Source the updated shell configuration
+    source "$SHELL_CONFIG"
 }
+
+# Main script starts here
+detect_os_and_set_miniconda_url
 
 # Check if Conda is installed
 if ! command -v conda &> /dev/null; then
