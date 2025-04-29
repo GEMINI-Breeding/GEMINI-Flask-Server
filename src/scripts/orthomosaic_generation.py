@@ -8,7 +8,12 @@ from glob import glob
 from math import log
 from concurrent.futures import ThreadPoolExecutor
 import time
+import rasterio
+import numpy as np
+import io
 from datetime import datetime
+from PIL import Image
+from PIL.Image import Resampling
 
 # Third-party library imports
 import cv2
@@ -23,6 +28,14 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from create_geotiff_pyramid import create_tiled_pyramid
 from thermal_camera.flir_one_pro_extract import extract_thermal_images_NIRFormat as extract_thermal_images
 from utils import check_nvidia_smi
+
+def _copy_image(src_folder, dest_folder, image_name):
+    
+    src_path = os.path.join(src_folder, image_name)
+    dest_path = os.path.join(dest_folder, image_name)
+
+    if not os.path.exists(dest_path):
+        shutil.copy(src_path, dest_path)
 
 def _create_directory_structure(args):
     
@@ -184,11 +197,9 @@ def reset_odm(args, metadata_file_name=None):
             image_pth = data['image_pth']
             prev_arg = make_odm_args_from_metadata(data)
             if odm_args_checker(prev_arg, args):
-                print("Already processed. Try Copying to Processed folder.")
-                if _process_outputs(args) == True:
-                    return
-                else:
-                    reset_odm_temp = True
+                _process_outputs(args)
+                print("Already processed. Copying to Processed folder.")
+                return
             else:
                 # Reset the ODM if the arguments are different
                 reset_odm_temp = True
@@ -210,37 +221,37 @@ def odm_args_checker(arg1, arg2):
         arg1.sensor == arg2.sensor
     ])
 
+def convert_tif_to_png(tif_path):
+    
+    Image.MAX_IMAGE_PIXELS = None
+    
+    try:
+        directory = os.path.dirname(tif_path)
+        filename = os.path.basename(tif_path)
+        filename_without_ext = os.path.splitext(filename)[0]
+        png_path = os.path.join(directory, filename_without_ext + '.png')
+        
+        with Image.open(tif_path) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            max_size = (1024, 1024)  # Example maximum dimensions
+            img.thumbnail(max_size, Resampling.LANCZOS)
+            
+            img.save(png_path, 'PNG')
+            print(f"Successfully converted {tif_path} to {png_path}")
+            
+    except Exception as e:
+        print(f"Error saving tif as png: {str(e)}")
+        print(f"Error saving tif as png: {e}")
+
 def run_odm(args):
     '''
     Run ODM on the temporary directory.
     '''
-    metadata_file_name = 'ortho_metadata.json'
-    project_path = args.temp_dir
-    metadata_file = os.path.join(project_path, 'code', metadata_file_name)
-    args.metadata_file = metadata_file
-    try:
-        # Reset ODM if the arguments are different
-        reset_odm(args, metadata_file_name=metadata_file_name)
-    except Exception as e:
-        # Handle exception: log it, set a flag, etc.
-        print(f"Error in thread: {e}")
-        return
     
     try:
         _create_directory_structure(args)
-
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')        # Check if the sensor is thermal
-        if args.sensor.lower() == 'thermal':
-            # Extract thermal images if the sensor is thermal
-            extracted_folder_name = os.path.join('Images_extracted')
-            extract_thermal_images(image_pth, extracted_folder_name)
-            image_pth = image_pth.replace('Images', extracted_folder_name)
-
-            # Copy geo.txt file to the temporary directory
-            geo_txt_path = image_pth.replace('Images_extracted', 'geo.txt')
-
-            if os.path.exists(geo_txt_path):
-                shutil.copy(geo_txt_path, os.path.join(args.temp_dir, 'code', 'geo.txt'))
 
         # Run ODM
         pth = args.temp_dir
@@ -249,6 +260,8 @@ def run_odm(args):
             pth = pth[:-1]
         if os.path.basename(pth) != 'project':
             pth = os.path.join(pth, 'project')
+        
+        
         print('Project Path: ', pth)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
@@ -256,22 +269,17 @@ def run_odm(args):
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
             # See options from https://docs.opendronemap.org/arguments/
-            common_options = "--dsm" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            reconstruction_quality = args.reconstruction_quality.lower()
-            if reconstruction_quality == 'custom':
+            #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            common_options = "--dsm --orthophoto-resolution 0.01" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            if args.reconstruction_quality == 'Custom':
+                #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
                 options = f"{args.custom_options} {common_options}"
                 print('Starting ODM with custom options...')
-            elif reconstruction_quality == 'low':
-                options = f"{common_options} --pc-quality medium --min-num-features 8000 --orthophoto-resolution 2.0" 
-                print('Starting ODM with low options...')
-            elif reconstruction_quality == 'lowest':
-                options = f"{common_options} --fast-orthophoto "
-                print('Starting ODM with Lowest options...')
-            elif reconstruction_quality == 'high':
-                options = f"{common_options} --pc-quality high --min-num-features 16000 --orthophoto-resolution 0.5"
-                print('Starting ODM with high options...')
+            elif args.reconstruction_quality == 'Default':
+                options = f"--fast-orthophoto {common_options}"
+                print('Starting ODM with default options...')
             else:
-                raise ValueError('Invalid reconstruction quality: {}. Must be one of: low, high, custom'.format(args.reconstruction_quality))
+                raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
             
             if args.sensor.lower() == 'thermal':
                 #options += ' --radiometric-calibration camera'
@@ -289,17 +297,24 @@ def run_odm(args):
             # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
             # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
             # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
-            # Save image_pth and  docker command to metadata yaml file
-            metadata_file = os.path.join(project_path, 'code', metadata_file_name)
-            with open(metadata_file, 'w') as file:
-                # Export arg to data
-                metadata = vars(args)
-                metadata['image_pth'] = image_pth
-                metadata['command'] = command
-                metadata['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                # yaml.dump(data, file, sort_keys=False)
-                json.dump(metadata, file)
-                args.metadata_file = metadata_file
+            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+            # Save image_pth and  docker command to recipe yaml file
+            data = {
+                'year': args.year,
+                'experiment': args.experiment,
+                'location': args.location,
+                'population': args.population,
+                'date': args.date,
+                'platform': args.platform,
+                'sensor': args.sensor,
+                'reconstruction_quality': args.reconstruction_quality,
+                'custom_options': args.custom_options,
+                'image_pth': image_pth,
+                'command': command,
+            }
+            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            with open(recipe_file, 'w') as file:
+                yaml.dump(data, file, sort_keys=False)
 
             # Parse this with space to list
             command = command.split()
@@ -308,7 +323,10 @@ def run_odm(args):
             process.wait()
         
         _process_outputs(args)
+        save_ortho_metadata(args)  # Call save_ortho_metadata here
         
+        # save png image
+        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
@@ -317,19 +335,16 @@ def run_odm(args):
 if __name__ == '__main__':
     # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
-    parser.add_argument('--year', type=str, help='Year of the data collection',default='2023')
-    parser.add_argument('--experiment', type=str, help='Experiment name', default='Davis')
-    parser.add_argument('--location', type=str, help='Location of the data collection', default='Davis')
-    parser.add_argument('--population', type=str, help='Population for the dataset', default='Legumes')
-    parser.add_argument('--date', type=str, help='Date of the data collection', default='2023-07-18')
-    parser.add_argument('--platform', type=str, help='Platform used', default='Drone')
-    parser.add_argument('--sensor', type=str, help='Sensor used', default='thermal')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-App-Data')
+    parser.add_argument('--date', type=str, help='Date of the data collection')
+    parser.add_argument('--location', type=str, help='Location of the data collection')
+    parser.add_argument('--population', type=str, help='Population for the dataset')
+    parser.add_argument('--year', type=str, help='Year of the data collection')
+    parser.add_argument('--experiment', type=str, help='Experiment name')
+    parser.add_argument('--sensor', type=str, help='Sensor used')
     parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
-                        default='/home/GEMINI/temp/project')
-    parser.add_argument('--data_root_dir', type=str, help='Root directory for the data', default='/home/GEMINI/GEMINI-Data')
-    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (high, low, custom)',
-                        choices=[' high', 'low', 'lowest', 'custom'], default='lowest')
+                        default='/home/GEMINI/GEMINI-App-Data/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
+    parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (default, custom)',
+                        choices=['Default', 'Custom'], default='default')
     parser.add_argument('--custom_options', nargs='+', help='Custom options for ODM (e.g. --orthophoto-resolution 0.01)', 
                         required=False)
     args = parser.parse_args()
