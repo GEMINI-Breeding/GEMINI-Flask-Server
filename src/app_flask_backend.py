@@ -2204,11 +2204,13 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
-    parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"port: {args.port}")
+    print(f"flask_port: {args.flask_port}")
+    print(f"titiler_port: {args.titiler_port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
@@ -2223,11 +2225,11 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
+    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
