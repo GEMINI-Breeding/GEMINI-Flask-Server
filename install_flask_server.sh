@@ -26,17 +26,23 @@ install_miniconda() {
     # Download the Miniconda installer
     curl -LO "$MINICONDA_URL"
 
+    # Remove previous Miniconda if it exists
+    if [ -d "$HOME/miniconda" ]; then
+        echo "Existing Miniconda installation found at $HOME/miniconda. Removing it first..."
+        rm -rf "$HOME/miniconda"
+    fi
+
     # Run the Miniconda installer
     bash "$MINICONDA_SCRIPT" -b -p "$HOME/miniconda"
 
-    # Initialize conda for the correct shell
+    # Initialize conda for the shell (modifies .bashrc, etc)
     "$HOME/miniconda/bin/conda" init
 
     # Remove the installer script
     rm "$MINICONDA_SCRIPT"
 
-    # Source the updated shell configuration
-    source "$SHELL_CONFIG"
+    # Make Conda available NOW (important!)
+    source "$HOME/miniconda/etc/profile.d/conda.sh"
 }
 
 # Main script starts here
