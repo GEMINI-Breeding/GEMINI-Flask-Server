@@ -27,7 +27,7 @@ install_miniconda() {
     curl -LO "$MINICONDA_URL"
 
     # Run the Miniconda installer
-    bash "$MINICONDA_SCRIPT" -b -p "$HOME/miniconda"
+    bash "$MINICONDA_SCRIPT" -b -u -p "$HOME/miniconda"
 
     # Initialize conda for the correct shell
     "$HOME/miniconda/bin/conda" init
