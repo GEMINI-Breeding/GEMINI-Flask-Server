@@ -35,7 +35,11 @@ def _copy_image(src_folder, dest_folder, image_name):
     dest_path = os.path.join(dest_folder, image_name)
 
     if not os.path.exists(dest_path):
-        shutil.copy(src_path, dest_path)
+        try:
+            shutil.copy(src_path, dest_path)
+        except PermissionError:
+            # Fallback to using system cp command if shutil.copy fails
+            os.system(f'cp "{src_path}" "{dest_path}"')
 
 def _create_directory_structure(args):
     
@@ -45,16 +49,16 @@ def _create_directory_structure(args):
     '''
 
     # Create the temporary directory structure
-    pth = args.temp_dir
+    project_path = args.temp_dir
 
-    if pth[-1] == '/':
-        pth = pth[:-1]
-    if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')
+    if project_path[-1] == '/':
+        project_path = project_path[:-1]
+    if os.path.basename(project_path) != 'project':
+        project_path = os.path.join(project_path, 'project')
 
-    if not os.path.exists(pth):
-        os.makedirs(pth)
-        os.makedirs(os.path.join(pth, 'code'))
+    if not os.path.exists(project_path):
+        os.makedirs(project_path)
+        os.makedirs(os.path.join(project_path, 'code'))
 
 
     # Copy the gcp_list.txt to the temporary directory
@@ -72,7 +76,10 @@ def _create_directory_structure(args):
             if len(lines) < 2:
                 print("GCP file has less than 2 lines...Ignoring")
             else:
-                shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
+                try:
+                    shutil.copy(gcp_pth, os.path.join(project_path, 'code', 'gcp_list.txt'))
+                except PermissionError:
+                    os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
 
 def _process_outputs(args):
 
@@ -113,7 +120,10 @@ def _process_outputs(args):
 
     # Copy the metadata file to the output folder
     metadata_file = args.metadata_file.split('/')[-1]
-    shutil.copy(args.metadata_file, os.path.join(output_folder, metadata_file))
+    try:
+        shutil.copy(args.metadata_file, os.path.join(output_folder, metadata_file))
+    except PermissionError:
+        os.system(f'cp "{args.metadata_file}" "{os.path.join(output_folder, metadata_file)}"')
 
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
     # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
@@ -254,15 +264,15 @@ def run_odm(args):
         _create_directory_structure(args)
 
         # Run ODM
-        pth = args.temp_dir
+        project_path = args.temp_dir
 
-        if pth[-1] == '/':
-            pth = pth[:-1]
-        if os.path.basename(pth) != 'project':
-            pth = os.path.join(pth, 'project')
+        if project_path[-1] == '/':
+            project_path = project_path[:-1]
+        if os.path.basename(project_path) != 'project':
+            project_path = os.path.join(project_path, 'project')
         
         
-        print('Project Path: ', pth)
+        print('Project Path: ', project_path)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
         options = ""
@@ -272,7 +282,7 @@ def run_odm(args):
             #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
             common_options = "--dsm --orthophoto-resolution 0.01" # orthophoto-resolution gsd is usually 0.27cm/pixel
             if args.reconstruction_quality == 'Custom':
-                #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
+                
                 options = f"{args.custom_options} {common_options}"
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Default':
@@ -293,7 +303,10 @@ def run_odm(args):
                 docker_image = "opendronemap/odm"
             # Create a container name with the project name
             container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
-            command = f"docker run --name {container_name} -i --rm {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
+            command = f"docker run --name {container_name} -i --rm {volumes} {docker_image} \
+                        --feature-type sift \
+                        --gcp /datasets/code/gcp_list.txt  \
+                        --project-path /datasets code {options}" # 'code' is the default project name
             # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
             # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
             # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
@@ -312,7 +325,7 @@ def run_odm(args):
                 'image_pth': image_pth,
                 'command': command,
             }
-            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
             with open(recipe_file, 'w') as file:
                 yaml.dump(data, file, sort_keys=False)
 
@@ -323,7 +336,6 @@ def run_odm(args):
             process.wait()
         
         _process_outputs(args)
-        save_ortho_metadata(args)  # Call save_ortho_metadata here
         
         # save png image
         convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))

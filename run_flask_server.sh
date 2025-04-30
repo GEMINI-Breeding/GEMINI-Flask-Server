@@ -33,7 +33,7 @@ echo "data_root_dir: $data_root_dir"
 
 # Read the port from the arguments
 if [ -z "$2" ]; then
-    flask_port=5050 # Default port
+    flask_port=5000 # Default port
 else
     flask_port=$2
 fi

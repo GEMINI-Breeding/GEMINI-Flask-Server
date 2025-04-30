@@ -635,17 +635,6 @@ def get_gcp_selcted_images():
             is_running = True
 
     if is_running==False:
-        # Remove previous npy files for debugging
-        if 0:
-            npy_path = os.path.join(image_folder, '../image_names.npy')
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            npy_path = npy_path.replace(".npy", "_prev.npy")
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            if os.path.exists(npy_path.replace("prev", "final")):
-                os.remove(npy_path.replace("prev", "final"))
-            
         # Run the function to load the images in using process deamon
         p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
         p.start()
@@ -761,7 +750,7 @@ def process_drone_tiff():
 
 
 @file_app.route('/save_array', methods=['POST'])
-def save_array():
+def save_array(debug=False):
     data = request.json
     if 'array' not in data:
         return jsonify({"message": "Missing array in data"}), 400
@@ -772,7 +761,8 @@ def save_array():
     sensor = data['sensor']
     processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
     save_directory = os.path.join(data_root_dir, processed_path)
-    print(save_directory, flush=True)
+    if debug:
+        print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -802,7 +792,8 @@ def save_array():
     # Merge new data with existing data
     for item in data['array']:
         if 'pointX' in item and 'pointY' in item:
-            print(item, flush=True)
+            if debug:
+                print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
             existing_data[image_name] = {
                 'gcp_lon': item['gcp_lon'],
@@ -2203,8 +2194,8 @@ if __name__ == "__main__":
 
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
+    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
     parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
