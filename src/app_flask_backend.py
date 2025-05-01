@@ -124,13 +124,13 @@ def stream_output(process):
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
     base_dir = Path(data_root_dir) / 'Raw'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
     return jsonify(combined_structure), 200
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
     base_dir = Path(data_root_dir) / 'Processed'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
     return jsonify(combined_structure), 200
 
 # endpoint to list files
@@ -546,9 +546,7 @@ def upload_chunk():
             for i in range(int(total_chunks)):
                 with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
                     full_file.write(part_file.read())
-                os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))  # Clean up chunk
 
-        os.remove(os.path.join(full_dir_path, 'cache'))  # Clean up cache directory
         time.sleep(60)  # Wait for 60 seconds
         return "File reassembled and saved successfully", 200
     else:
