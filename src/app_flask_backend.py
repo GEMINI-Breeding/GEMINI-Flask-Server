@@ -64,7 +64,7 @@ def get_tif_to_png():
         try:
             print(f"Converting {tif_full_path} to {png_path}")
             # Convert the TIF file to PNG
-            convert_tif_to_png(tif_full_path, png_path)
+            convert_tif_to_png(tif_full_path)
         except Exception as e:
             print(f"Error converting TIF to PNG: {e}")
             return jsonify({'error': str(e)}), 500
@@ -1262,8 +1262,23 @@ def download_ortho():
         )
         if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
-            return jsonify({'error': f'File not found: {file_path}'}), 404
-        
+            try:
+                print("Attempting to convert TIF to PNG...")
+                
+                # convert png to tif
+                tif_path = file_path.replace('.png', '.tif')
+                
+                # convert tif to png
+                if os.path.exists(tif_path):
+                    convert_tif_to_png(tif_path)
+                    
+                else:
+                    print(f"File not found: {tif_path}")
+                    return jsonify({'error': f'File not found: {file_path}'}), 404
+            except Exception as e:
+                print(f"An error occurred while converting the file: {str(e)}")
+                return jsonify({'error': str(e)}), 500
+
         # Returns the file as an attachment so that the browser downloads it.
         print(f"Sending file: {file_path}")
         return send_file(
