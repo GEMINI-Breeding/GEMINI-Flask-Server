@@ -34,7 +34,7 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
@@ -61,7 +61,13 @@ def get_tif_to_png():
     png_path = tif_full_path.replace('.tif', '.png')
     
     if not os.path.exists(png_path):
-        return jsonify({'error': f'PNG file not found: {png_path}'}), 404
+        try:
+            print(f"Converting {tif_full_path} to {png_path}")
+            # Convert the TIF file to PNG
+            convert_tif_to_png(tif_full_path, png_path)
+        except Exception as e:
+            print(f"Error converting TIF to PNG: {e}")
+            return jsonify({'error': str(e)}), 500
     
     try:
         # Open and send the existing PNG file
