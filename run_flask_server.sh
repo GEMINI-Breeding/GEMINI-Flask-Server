@@ -31,17 +31,23 @@ else
 fi
 echo "data_root_dir: $data_root_dir"
 
-# Read the port from gemini-app/src/DataContext.js
-if [[ "$(uname)" == "Darwin" ]]; then
-    # Use pcregrep on macOS
-    port=$(pcregrep -o1 'const \[flaskUrl, setFlaskUrl\] = useState\("http://127.0.0.1:\K([0-9]+)' ../gemini-app/src/DataContext.js)
+# Read the port from the arguments
+if [ -z "$2" ]; then
+    flask_port=5000 # Default port
 else
-    # Use grep -P on other systems
-    port=$(grep -oP 'const \[flaskUrl, setFlaskUrl\] = useState\("http://127.0.0.1:\K[0-9]+' ../gemini-app/src/DataContext.js)
+    flask_port=$2
 fi
-echo "Flask Port: $port"
+echo "Flask Port: $flask_port"
 
-python src/app_flask_backend.py --data_root_dir $data_root_dir --port $port
+# Read the port from the arguments
+if [ -z "$3" ]; then
+    titiler_port=8091 # Default port
+else
+    titiler_port=$3
+fi
+echo "Titiler Port: $titiler_port"
+
+python src/app_flask_backend.py --data_root_dir $data_root_dir --flask_port $flask_port --titiler_port $titiler_port
 
 # Change back to the original directory
 popd

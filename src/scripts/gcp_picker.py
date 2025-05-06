@@ -76,7 +76,11 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
             image_path = os.path.join(image_folder, filename)
 
             # Extract GPS coordinates from EXIF data
-            image = Image.open(image_path)
+            try:
+                image = Image.open(image_path)
+            except Exception as e:
+                print(e)
+                continue
             
             if 0:
                 buf = io.BytesIO()
@@ -132,10 +136,13 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
                     })
 
                 # Save the selected images to a dict
-                if len(selected_images) > 0:
+                if len(selected_images) % 10 == 0:
                     npy_path = os.path.join(image_folder, '../image_names.npy')
                     np.save(npy_path, {'files': files, 'selected_images': selected_images})
 
+    # Sort the selected_images by gcp_label
+    selected_images.sort(key=lambda x: x['gcp_label'])
+    
     # Save the selected images to a dict
     if selected_images != []:
         if os.path.exists(npy_path):
