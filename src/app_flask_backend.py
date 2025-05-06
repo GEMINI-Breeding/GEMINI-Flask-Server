@@ -565,6 +565,35 @@ def check_uploaded_chunks():
 
     return jsonify({'uploadedChunksCount': uploaded_chunks_count}), 200
 
+@file_app.route('/clear_upload_dir', methods=['POST'])
+def clear_upload_dir():
+    # 1. Grab the user-supplied relative path
+    dir_path = request.json.get('dirPath', '').strip()
+    if not dir_path:
+        return jsonify({'message': 'No directory specified'}), 400
+
+    # 2. Resolve base and target
+    base = Path(UPLOAD_BASE_DIR).resolve()
+    target = (base / dir_path).resolve()
+
+    # 3. Safety checks
+    #  - must be a subdirectory of base
+    #  - must not be equal to base itself
+    if not str(target).startswith(str(base) + os.sep):
+        return jsonify({'message': 'Invalid path'}), 400
+    if target == base:
+        return jsonify({'message': 'Refusing to delete root directory'}), 400
+
+    # 4. Delete
+    if target.exists():
+        try:
+            shutil.rmtree(target)
+            return jsonify({'message': f'{dir_path} cleared successfully'}), 200
+        except Exception as e:
+            print(f"Failed to delete {target}: {e}")
+            return jsonify({'message': f'Failed to clear dir: {e}'}), 500
+    else:
+        return jsonify({'message': 'Directory not found'}), 404
 
 @file_app.route('/clear_upload_cache', methods=['POST'])
 def clear_upload_cache():
@@ -581,7 +610,7 @@ def clear_upload_cache():
             
         # remove the cache directory
         os.rmdir(cache_dir_path)
-        time.sleep(60)  # Wait for 60 seconds
+        # time.sleep(60)  # Wait for 60 seconds
         return jsonify({'message': 'Cache cleared successfully'}), 200
     except Exception as e:
         print(f'Error clearing cache: {str(e)}')
