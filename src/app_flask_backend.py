@@ -1307,30 +1307,36 @@ def delete_ortho():
         print(f"An error occurred while deleting {ortho_path}: {str(e)}")
     return jsonify({"message": "Ortho file deleted successfully"}), 200
 
-def update_progress_file(progress_file, progress):
+def update_progress_file(progress_file, progress, debug=False):
     with open(progress_file, 'w') as pf:
         pf.write(f"{progress}%")
         latest_data['ortho'] = progress
-        print('Ortho progress updated:', progress)
+        if debug:
+            print('Ortho progress updated:', progress)
                
 def monitor_log_updates(logs_path, progress_file):
     
     try:
-        progress_points = [
-            "Running opensfm stage",
-            "Export reconstruction stats",
-            "Estimated depth-maps",
-            "Geometric-consistent estimated depth-maps",
-            "Filtered depth-maps",
-            "Fused depth-maps",
-            "Point visibility checks",
-            "Decimated faces",
-            "Running odm_georeferencing stage",
-            "running pdal translate"
+        progress_stages = [
+            "Initializing ODM", # After create a log file
+            "Running dataset stage", # After spin up a docker container
+            "Finished dataset stage", # After finish loading dataset
+            "Computing pair matching", # After finish feature extraction, before the pair matching
+            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
+            "Export reconstruction stats", # After Ceres Solver Report
+            "Finished opensfm stage", # After Undistorting images
+            "Densifying point-cloud completed", # After fusing depth maps
+            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
+            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
+            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
+            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
+            "Finished odm_dem stage", # After Finished odm_dem stage
+            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
+            "Finished odm_report stage",  # After Finished odm_report stage
+            "Finished odm_postprocess stage", # Finished odm_postprocess stage
+            "ODM app finished"
         ]
         
-        completed_stages = set()
-        progress_increment = 10  # Each stage completion increases progress by 10%
         with open(progress_file, 'w') as file:
             file.write("0")
         
@@ -1345,23 +1351,28 @@ def monitor_log_updates(logs_path, progress_file):
         with open(logs_path, 'r') as file:
             # Start by reading the file from the beginning
             file.seek(0)
-            
+            current_stage = -1
             while True:
-                line = file.readline()
+                line = file.readline() # It will read the file line by line
                 if line:
-                    if "ODM app finished" in line:
-                        update_progress_file(progress_file, 100)
-                        print("Progress updated: 100%")
-                        return
-                    else:
-                        for point in progress_points:
-                            if point in line and point not in completed_stages:
-                                completed_stages.add(point)
-                                current_progress = len(completed_stages) * progress_increment
-                                update_progress_file(progress_file, current_progress)
-                                print(f"Progress updated: {current_progress}%")
+                    # print(line)
+                    found_stages_msg = False
+                    for idx, step in enumerate(progress_stages):
+                        if step in line:
+                            found_stages_msg = True
+                            current_stage = idx
+                            break
+
+                    if found_stages_msg and current_stage > -1:
+                        current_progress = (current_stage+1) / len(progress_stages) * 100
+                        update_progress_file(progress_file, round(current_progress))
+                        print(progress_stages[current_stage])
+                        print(f"Progress updated: {current_progress:.1f}%")
+                        if current_stage == len(progress_stages) - 1:
+                            break
                 else:
-                    time.sleep(1)  # Sleep briefly to avoid busy waiting
+                    time.sleep(10)  # Sleep briefly to avoid busy waiting
+
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
@@ -2214,7 +2225,7 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
     parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 

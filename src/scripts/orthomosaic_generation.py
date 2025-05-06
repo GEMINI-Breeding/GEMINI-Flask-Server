@@ -258,6 +258,17 @@ def convert_tif_to_png(tif_path):
 def run_odm(args):
     '''
     Run ODM on the temporary directory.
+    See options from https://docs.opendronemap.org/arguments/
+
+    Possible considerations & Options:
+    ```bash
+    --fast-orthophoto
+    --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
+    --dsm --orthophoto-resolution 0.01
+    ```
+    
+    Notes:
+    - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
     '''
     
     try:
@@ -275,18 +286,19 @@ def run_odm(args):
         print('Project Path: ', project_path)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
-        options = ""
+        odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
-            # See options from https://docs.opendronemap.org/arguments/
-            #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            common_options = "--dsm --orthophoto-resolution 0.01" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            base_options = ""
+            
+            # TODO: Add if statement for larger dataset. len(images) > 1000
+            base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+
             if args.reconstruction_quality == 'Custom':
-                
-                options = f"{args.custom_options} {common_options}"
+                odm_options = f"{base_options} {args.custom_options} "
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Default':
-                options = f"--fast-orthophoto {common_options}"
+                odm_options = f"{base_options}" 
                 print('Starting ODM with default options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
@@ -294,23 +306,24 @@ def run_odm(args):
             if args.sensor.lower() == 'thermal':
                 #options += ' --radiometric-calibration camera'
                 pass
-            # Create the command
+
             # It will mount pth to /datasets and image_pth to /datasets/code/images
             volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
-            if check_nvidia_smi():
-                docker_image = "--gpus all opendronemap/odm:gpu"
-            else:
-                docker_image = "opendronemap/odm"
+            
             # Create a container name with the project name
             container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
+
+            if check_nvidia_smi():
+                docker_image = "--gpus all opendronemap/odm:gpu"
+                odm_options += " --feature-type sift"
+            else:
+                docker_image = "opendronemap/odm"
+
+            # Create the command
             command = f"docker run --name {container_name} -i --rm {volumes} {docker_image} \
-                        --feature-type sift \
                         --gcp /datasets/code/gcp_list.txt  \
-                        --project-path /datasets code {options}" # 'code' is the default project name
-            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
-            # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
-            # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
-            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+                        --project-path /datasets code {odm_options}" # 'code' is the default project name
+            
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
