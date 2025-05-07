@@ -34,7 +34,7 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
@@ -61,13 +61,7 @@ def get_tif_to_png():
     png_path = tif_full_path.replace('.tif', '.png')
     
     if not os.path.exists(png_path):
-        try:
-            print(f"Converting {tif_full_path} to {png_path}")
-            # Convert the TIF file to PNG
-            convert_tif_to_png(tif_full_path)
-        except Exception as e:
-            print(f"Error converting TIF to PNG: {e}")
-            return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'PNG file not found: {png_path}'}), 404
     
     try:
         # Open and send the existing PNG file
@@ -130,13 +124,13 @@ def stream_output(process):
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
     base_dir = Path(data_root_dir) / 'Raw'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
     return jsonify(combined_structure), 200
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
     base_dir = Path(data_root_dir) / 'Processed'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+    combined_structure = await process_directories_in_parallel(base_dir, max_depth=7)
     return jsonify(combined_structure), 200
 
 # endpoint to list files
@@ -552,7 +546,9 @@ def upload_chunk():
             for i in range(int(total_chunks)):
                 with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
                     full_file.write(part_file.read())
+                os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))  # Clean up chunk
 
+        os.remove(os.path.join(full_dir_path, 'cache'))  # Clean up cache directory
         time.sleep(60)  # Wait for 60 seconds
         return "File reassembled and saved successfully", 200
     else:
@@ -639,6 +635,17 @@ def get_gcp_selcted_images():
             is_running = True
 
     if is_running==False:
+        # Remove previous npy files for debugging
+        if 0:
+            npy_path = os.path.join(image_folder, '../image_names.npy')
+            if os.path.exists(npy_path):
+                os.remove(npy_path)
+            npy_path = npy_path.replace(".npy", "_prev.npy")
+            if os.path.exists(npy_path):
+                os.remove(npy_path)
+            if os.path.exists(npy_path.replace("prev", "final")):
+                os.remove(npy_path.replace("prev", "final"))
+            
         # Run the function to load the images in using process deamon
         p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
         p.start()
@@ -754,7 +761,7 @@ def process_drone_tiff():
 
 
 @file_app.route('/save_array', methods=['POST'])
-def save_array(debug=False):
+def save_array():
     data = request.json
     if 'array' not in data:
         return jsonify({"message": "Missing array in data"}), 400
@@ -765,8 +772,7 @@ def save_array(debug=False):
     sensor = data['sensor']
     processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
     save_directory = os.path.join(data_root_dir, processed_path)
-    if debug:
-        print(save_directory, flush=True)
+    print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -796,8 +802,7 @@ def save_array(debug=False):
     # Merge new data with existing data
     for item in data['array']:
         if 'pointX' in item and 'pointY' in item:
-            if debug:
-                print(item, flush=True)
+            print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
             existing_data[image_name] = {
                 'gcp_lon': item['gcp_lon'],
@@ -1253,23 +1258,8 @@ def download_ortho():
         )
         if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
-            try:
-                print("Attempting to convert TIF to PNG...")
-                
-                # convert png to tif
-                tif_path = file_path.replace('.png', '.tif')
-                
-                # convert tif to png
-                if os.path.exists(tif_path):
-                    convert_tif_to_png(tif_path)
-                    
-                else:
-                    print(f"File not found: {tif_path}")
-                    return jsonify({'error': f'File not found: {file_path}'}), 404
-            except Exception as e:
-                print(f"An error occurred while converting the file: {str(e)}")
-                return jsonify({'error': str(e)}), 500
-
+            return jsonify({'error': f'File not found: {file_path}'}), 404
+        
         # Returns the file as an attachment so that the browser downloads it.
         print(f"Sending file: {file_path}")
         return send_file(
@@ -1307,35 +1297,30 @@ def delete_ortho():
         print(f"An error occurred while deleting {ortho_path}: {str(e)}")
     return jsonify({"message": "Ortho file deleted successfully"}), 200
 
-def update_progress_file(progress_file, progress, debug=False):
+def update_progress_file(progress_file, progress):
     with open(progress_file, 'w') as pf:
         pf.write(f"{progress}%")
         latest_data['ortho'] = progress
-        if debug:
-            print('Ortho progress updated:', progress)
+        print('Ortho progress updated:', progress)
                
 def monitor_log_updates(logs_path, progress_file):
     
     try:
-        progress_stages = [
-            "Running dataset stage", # After spin up a docker container
-            "Finished dataset stage", # After finish loading dataset
-            "Computing pair matching", # After finish feature extraction, before the pair matching
-            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
-            "Export reconstruction stats", # After Ceres Solver Report
-            "Finished opensfm stage", # After Undistorting images
-            "Densifying point-cloud completed", # After fusing depth maps
-            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
-            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
-            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
-            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
-            "Finished odm_dem stage", # After Finished odm_dem stage
-            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
-            "Finished odm_report stage",  # After Finished odm_report stage
-            "Finished odm_postprocess stage", # Finished odm_postprocess stage
-            "ODM app finished"
+        progress_points = [
+            "Running opensfm stage",
+            "Export reconstruction stats",
+            "Estimated depth-maps",
+            "Geometric-consistent estimated depth-maps",
+            "Filtered depth-maps",
+            "Fused depth-maps",
+            "Point visibility checks",
+            "Decimated faces",
+            "Running odm_georeferencing stage",
+            "running pdal translate"
         ]
         
+        completed_stages = set()
+        progress_increment = 10  # Each stage completion increases progress by 10%
         with open(progress_file, 'w') as file:
             file.write("0")
         
@@ -1350,28 +1335,23 @@ def monitor_log_updates(logs_path, progress_file):
         with open(logs_path, 'r') as file:
             # Start by reading the file from the beginning
             file.seek(0)
-            current_stage = -1
+            
             while True:
-                line = file.readline() # It will read the file line by line
+                line = file.readline()
                 if line:
-                    # print(line)
-                    found_stages_msg = False
-                    for idx, step in enumerate(progress_stages):
-                        if step in line:
-                            found_stages_msg = True
-                            current_stage = idx
-                            break
-
-                    if found_stages_msg and current_stage > -1:
-                        current_progress = (current_stage+1) / len(progress_stages) * 100
-                        update_progress_file(progress_file, round(current_progress))
-                        print(progress_stages[current_stage])
-                        print(f"Progress updated: {current_progress:.1f}%")
-                        if current_stage == len(progress_stages) - 1:
-                            break
+                    if "ODM app finished" in line:
+                        update_progress_file(progress_file, 100)
+                        print("Progress updated: 100%")
+                        return
+                    else:
+                        for point in progress_points:
+                            if point in line and point not in completed_stages:
+                                completed_stages.add(point)
+                                current_progress = len(completed_stages) * progress_increment
+                                update_progress_file(progress_file, current_progress)
+                                print(f"Progress updated: {current_progress}%")
                 else:
-                    time.sleep(10)  # Sleep briefly to avoid busy waiting
-
+                    time.sleep(1)  # Sleep briefly to avoid busy waiting
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
@@ -2191,6 +2171,141 @@ def done_extract():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
+''' DUMMY ENDPOINTS'''
+@file_app.route('/run_ground_ortho', methods=['POST'])
+def run_ground_ortho_endpoint():
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    year = data.get('year')
+    experiment = data.get('experiment')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    temp_dir = data.get('temp_dir')
+    reconstruction_quality = data.get('reconstruction_quality')
+    # custom_options = data.get('custom_options')
+    pipeline_type = data.get('pipeline_type', 'ground')
+
+    if not temp_dir:
+        temp_dir = os.path.join(data_root_dir, 'temp/project')
+    if not reconstruction_quality:
+        reconstruction_quality = 'Default'
+
+    # Store the current pipeline type for progress tracking
+    with open(os.path.join(data_root_dir, 'temp', 'current_pipeline.json'), 'w') as f:
+        json.dump({"pipeline_type": pipeline_type}, f)
+
+    try:
+        os.makedirs(os.path.join(data_root_dir, 'temp'), exist_ok=True)
+        os.makedirs(os.path.join(data_root_dir, 'temp/project/code'), exist_ok=True)
+        
+        # Logs file for displaying progress
+        logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
+        with open(logs_path, 'w') as log_file:
+            log_file.write("Starting ground-based ortho generation process...\n")
+        
+        # Temp progress file to track progress
+        progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
+        with open(progress_file, 'w') as pf:
+            pf.write("0")
+            
+        # INSERT REAL PIPELINE HERE
+        # Simulate the ground ortho progress using thread
+        thread = threading.Thread(target=simulate_ground_ortho_progress, 
+                                  args=(logs_path, progress_file, data_root_dir, location, population, date, year, experiment, platform, sensor), 
+                                  daemon=True)
+        thread.start()
+
+        return jsonify({"status": "success", "message": "Ground-based ortho processing started successfully"})
+    except Exception as e:
+        print('Error has occurred: ', e)
+        return make_response(jsonify({"status": "error", "message": f"Ground-based ortho processing failed to start {str(e)}"}), 404)
+
+def simulate_ground_ortho_progress(logs_path, progress_file, data_root_dir, location, population, date, year, experiment, platform, sensor):
+    """
+    Makes random progress updates to simulate the ground ortho generation process.
+    """
+    # Simulate the process steps with delays (inspired by ODM logs)
+    progress_steps = [
+        "Loading source images...",
+        "Analyzing ground-based image characteristics...",
+        "Detecting features in images...",
+        "Matching features across images...",
+        "Estimating camera poses...",
+        "Building initial point cloud...",
+        "Refining point cloud...",
+        "Creating dense point cloud...",
+        "Generating mesh...",
+        "Texturing mesh...",
+        "Creating final orthomosaic..."
+    ]
+    
+    try:
+        for i, step in enumerate(progress_steps):
+            with open(logs_path, 'a') as log_file:
+                log_file.write(f"{step}\n")
+            
+            # progress percentage
+            progress = int((i + 1) / len(progress_steps) * 100)
+            with open(progress_file, 'w') as pf:
+                pf.write(f"{progress}")
+                latest_data['ortho'] = progress
+                print('Ground Ortho progress updated:', progress)
+            
+            time.sleep(5)
+        
+        # sample output dir
+        processed_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+        os.makedirs(processed_dir, exist_ok=True)
+        
+        # fake metadata
+        metadata_path = os.path.join(processed_dir, 'ortho_metadata.json')
+        metadata = {
+            "quality": "Default",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "pipeline_type": "ground"
+        }
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+        
+        with open(logs_path, 'a') as log_file:
+            log_file.write("Ground-based ortho generation complete!\n")
+            
+    except Exception as e:
+        with open(logs_path, 'a') as log_file:
+            log_file.write(f"Error in ground-based ortho generation: {str(e)}\n")
+        print(f"Error in ground-based ortho simulation: {str(e)}")
+
+@file_app.route('/get_ground_ortho_logs', methods=['GET'])
+def get_ground_ortho_logs():
+    logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+    # print("Ground Ortho Logs Path:", logs_path)
+    if os.path.exists(logs_path):
+        with open(logs_path, 'r') as log_file:
+            lines = log_file.readlines()
+            latest_logs = lines[-10:] # last 10 lines
+        return jsonify({"log_content": ''.join(latest_logs)}), 200
+    else:
+        print("Ground Ortho Logs not found at path:", logs_path)
+        return jsonify({"error": "Logs not found"}), 404
+
+@file_app.route('/get_current_pipeline', methods=['GET'])
+def get_current_pipeline():
+    pipeline_path = os.path.join(data_root_dir, 'temp', 'current_pipeline.json')
+    if os.path.exists(pipeline_path):
+        try:
+            with open(pipeline_path, 'r') as f:
+                data = json.load(f)
+            return jsonify(data), 200
+        except Exception as e:
+            return jsonify({"pipeline_type": "aerial", "error": str(e)}), 200
+    else:
+        # Default to aerial if file doesn't exist
+        return jsonify({"pipeline_type": "aerial"}), 200
+
+'''END OF DUMMY ENDPOINTS'''
+
 # FastAPI app
 app = FastAPI()
 
@@ -2223,14 +2338,12 @@ if __name__ == "__main__":
 
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
-    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
+    parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"flask_port: {args.flask_port}")
-    print(f"titiler_port: {args.titiler_port}")
+    print(f"port: {args.port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
@@ -2245,11 +2358,11 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
+    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
