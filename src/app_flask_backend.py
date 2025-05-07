@@ -13,7 +13,7 @@ import argparse
 import select
 import multiprocessing
 import requests
-from multiprocessing import active_children
+from multiprocessing import active_children, Process
 from pathlib import Path
 
 # Third-party library imports
@@ -48,6 +48,7 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
+extraction_processes = {}
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -477,28 +478,48 @@ def check_files():
 
     return jsonify(new_files), 200
 
+@file_app.route('/cancel_extraction', methods=['POST'])
+def cancel_extraction():
+    data = request.json
+    dir_path = data.get('dirPath')
+    p = extraction_processes.pop(dir_path, None)
+    if not p:
+        return jsonify({'status': 'no active extraction for this path'}), 404
 
+    p.terminate()  # force-kill the worker
+    p.join()
+    return jsonify({'status': 'cancelled'}), 200
+
+def _cleanup_files(file_paths):
+    for p in file_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+def _extraction_worker(file_paths, output_path):
+    # this must live at module scope so it can be pickled
+    extract_binary(file_paths, output_path)
+    _cleanup_files(file_paths)
+    
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
     data = request.json
-    # files = secure_filename(data['files'])
-    files = data['files']  # Assuming this is a list of filenames
-    files = [secure_filename(file) for file in files]  # Secure each filename individually
+    files = [secure_filename(f) for f in data['files']]
     dir_path = data['dirPath']
-    
-    # parameters
-    # file_names = os.path.join(UPLOAD_BASE_DIR, dir_path, file)
-    file_names = [Path(os.path.join(UPLOAD_BASE_DIR, dir_path, file)) for file in files]
-    output_path = Path(os.path.join(UPLOAD_BASE_DIR, dir_path))
-    
-    # run extraction
-    print("Extracting binary file...")
-    extract_binary(file_names, output_path)
-    
-    # delete the binary file
-    for file_name in file_names:
-        os.remove(file_name)
-    return jsonify({'status': 'success'}), 200
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
+    output_path = Path(UPLOAD_BASE_DIR) / dir_path
+
+    # spawn a background process using our top-level worker
+    p = Process(
+        target=_extraction_worker,
+        args=(file_paths, output_path),
+        daemon=True
+    )
+    p.start()
+    extraction_processes[dir_path] = p
+
+    return jsonify({'status': 'started'}), 200
 
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
@@ -571,6 +592,7 @@ def clear_upload_dir():
     dir_path = request.json.get('dirPath', '').strip()
     if not dir_path:
         return jsonify({'message': 'No directory specified'}), 400
+    print(f"Clearing upload directory: {dir_path}")
 
     # 2. Resolve base and target
     base = Path(UPLOAD_BASE_DIR).resolve()
