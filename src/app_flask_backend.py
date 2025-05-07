@@ -1318,7 +1318,6 @@ def monitor_log_updates(logs_path, progress_file):
     
     try:
         progress_stages = [
-            "Initializing ODM", # After create a log file
             "Running dataset stage", # After spin up a docker container
             "Finished dataset stage", # After finish loading dataset
             "Computing pair matching", # After finish feature extraction, before the pair matching

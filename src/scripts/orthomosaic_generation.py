@@ -83,15 +83,15 @@ def _create_directory_structure(args):
 
 def _process_outputs(args):
 
-    pth = args.temp_dir
+    project_path = args.temp_dir
 
-    if pth[-1] == '/':
-        pth = pth[:-1]
-    if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')    
+    if project_path[-1] == '/':
+        project_path = project_path[:-1]
+    if os.path.basename(project_path) != 'project':
+        project_path = os.path.join(project_path, 'project')    
 
-    ortho_file = os.path.join(pth, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
-    dem_file = os.path.join(pth, 'code', 'odm_dem', 'dsm.tif')
+    ortho_file = os.path.join(project_path, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
+    dem_file = os.path.join(project_path, 'code', 'odm_dem', 'dsm.tif')
 
     output_folder = os.path.join(args.data_root_dir, 'Processed', args.year, args. experiment, args.location, args.population, args.date, args.platform, args.sensor)
     print(f"Output folder: {output_folder}")
@@ -126,12 +126,11 @@ def _process_outputs(args):
         os.system(f'cp "{args.metadata_file}" "{os.path.join(output_folder, metadata_file)}"')
 
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
-    # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
-    #     os.makedirs(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
-    # shutil.move(os.path.join(pth, 'code'), os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
+    temp_folder = os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)
+    if not os.path.exists(temp_folder):
+        os.makedirs(temp_folder)
+    shutil.move(os.path.join(project_path, 'code'), temp_folder)
     
-    # Delete the temporary directory
-    # shutil.rmtree(pth)
     print("Processing complete.")
     return True
 
@@ -265,6 +264,8 @@ def run_odm(args):
     --fast-orthophoto
     --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
     --dsm --orthophoto-resolution 0.01
+    --feature-type sift # But its slower?
+    --dsm --dem-resolution 0.03 --orthophoto-resolution 0.03
     ```
     
     Notes:
@@ -292,7 +293,7 @@ def run_odm(args):
             base_options = ""
             
             # TODO: Add if statement for larger dataset. len(images) > 1000
-            base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+            base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low --dsm"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
@@ -315,7 +316,6 @@ def run_odm(args):
 
             if check_nvidia_smi():
                 docker_image = "--gpus all opendronemap/odm:gpu"
-                odm_options += " --feature-type sift"
             else:
                 docker_image = "opendronemap/odm"
 
