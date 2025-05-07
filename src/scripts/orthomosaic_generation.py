@@ -125,11 +125,13 @@ def _process_outputs(args):
     except PermissionError:
         os.system(f'cp "{args.metadata_file}" "{os.path.join(output_folder, metadata_file)}"')
 
+    # TODO: Copy the ODM Log, and camera positions too
+
     # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
-    temp_folder = os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)
-    if not os.path.exists(temp_folder):
-        os.makedirs(temp_folder)
-    shutil.move(os.path.join(project_path, 'code'), temp_folder)
+    # temp_folder = os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)
+    # if not os.path.exists(temp_folder):
+    #     os.makedirs(temp_folder)
+    # shutil.move(os.path.join(project_path, 'code'), temp_folder)
     
     print("Processing complete.")
     return True
@@ -265,7 +267,7 @@ def run_odm(args):
     --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
     --dsm --orthophoto-resolution 0.01
     --feature-type sift # But its slower?
-    --dsm --dem-resolution 0.03 --orthophoto-resolution 0.03
+    --dem-resolution 0.03 --orthophoto-resolution 0.03 # This can be added to the custom option
     ```
     
     Notes:
@@ -290,10 +292,12 @@ def run_odm(args):
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
-            base_options = ""
-            
-            # TODO: Add if statement for larger dataset. len(images) > 1000
-            base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low --dsm"
+            base_options = "--dsm"
+
+            image_list = os.listdir(image_pth)
+            if len(image_list) > 1000:
+                print("Running ODM with large dataset...")
+                base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
