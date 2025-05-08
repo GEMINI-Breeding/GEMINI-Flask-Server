@@ -34,7 +34,7 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
@@ -62,7 +62,13 @@ def get_tif_to_png():
     png_path = tif_full_path.replace('.tif', '.png')
     
     if not os.path.exists(png_path):
-        return jsonify({'error': f'PNG file not found: {png_path}'}), 404
+        try:
+            print(f"Converting {tif_full_path} to {png_path}")
+            # Convert the TIF file to PNG
+            convert_tif_to_png(tif_full_path)
+        except Exception as e:
+            print(f"Error converting TIF to PNG: {e}")
+            return jsonify({'error': str(e)}), 500
     
     try:
         # Open and send the existing PNG file
@@ -506,7 +512,7 @@ def _extraction_worker(file_paths, output_path):
 def extract_binary_file():
     data = request.json
     files = [secure_filename(f) for f in data['files']]
-    dir_path = data['dirPath']
+    dir_path = data['localDirPath']
     file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
     output_path = Path(UPLOAD_BASE_DIR) / dir_path
 
@@ -523,7 +529,7 @@ def extract_binary_file():
 
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
-    dir_path = request.json['dirPath']
+    dir_path = request.json['localDirPath']
     dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     
     try:
@@ -577,7 +583,7 @@ def upload_chunk():
 def check_uploaded_chunks():
     data = request.json
     file_identifier = data['fileIdentifier']
-    dir_path = data['dirPath']
+    dir_path = data['localDirPath']
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     
@@ -684,17 +690,6 @@ def get_gcp_selcted_images():
             is_running = True
 
     if is_running==False:
-        # Remove previous npy files for debugging
-        if 0:
-            npy_path = os.path.join(image_folder, '../image_names.npy')
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            npy_path = npy_path.replace(".npy", "_prev.npy")
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            if os.path.exists(npy_path.replace("prev", "final")):
-                os.remove(npy_path.replace("prev", "final"))
-            
         # Run the function to load the images in using process deamon
         p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
         p.start()
@@ -810,7 +805,7 @@ def process_drone_tiff():
 
 
 @file_app.route('/save_array', methods=['POST'])
-def save_array():
+def save_array(debug=False):
     data = request.json
     if 'array' not in data:
         return jsonify({"message": "Missing array in data"}), 400
@@ -821,7 +816,8 @@ def save_array():
     sensor = data['sensor']
     processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
     save_directory = os.path.join(data_root_dir, processed_path)
-    print(save_directory, flush=True)
+    if debug:
+        print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -851,7 +847,8 @@ def save_array():
     # Merge new data with existing data
     for item in data['array']:
         if 'pointX' in item and 'pointY' in item:
-            print(item, flush=True)
+            if debug:
+                print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
             existing_data[image_name] = {
                 'gcp_lon': item['gcp_lon'],
@@ -1307,8 +1304,23 @@ def download_ortho():
         )
         if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
-            return jsonify({'error': f'File not found: {file_path}'}), 404
-        
+            try:
+                print("Attempting to convert TIF to PNG...")
+                
+                # convert png to tif
+                tif_path = file_path.replace('.png', '.tif')
+                
+                # convert tif to png
+                if os.path.exists(tif_path):
+                    convert_tif_to_png(tif_path)
+                    
+                else:
+                    print(f"File not found: {tif_path}")
+                    return jsonify({'error': f'File not found: {file_path}'}), 404
+            except Exception as e:
+                print(f"An error occurred while converting the file: {str(e)}")
+                return jsonify({'error': str(e)}), 500
+
         # Returns the file as an attachment so that the browser downloads it.
         print(f"Sending file: {file_path}")
         return send_file(
@@ -1346,30 +1358,40 @@ def delete_ortho():
         print(f"An error occurred while deleting {ortho_path}: {str(e)}")
     return jsonify({"message": "Ortho file deleted successfully"}), 200
 
-def update_progress_file(progress_file, progress):
+def update_progress_file(progress_file, progress, debug=False):
     with open(progress_file, 'w') as pf:
         pf.write(f"{progress}%")
         latest_data['ortho'] = progress
-        print('Ortho progress updated:', progress)
+        if debug:
+            print('Ortho progress updated:', progress)
                
 def monitor_log_updates(logs_path, progress_file):
     
     try:
-        progress_points = [
-            "Running opensfm stage",
-            "Export reconstruction stats",
-            "Estimated depth-maps",
-            "Geometric-consistent estimated depth-maps",
-            "Filtered depth-maps",
-            "Fused depth-maps",
-            "Point visibility checks",
-            "Decimated faces",
-            "Running odm_georeferencing stage",
-            "running pdal translate"
-        ]
+        progress_stages = [
+            "Running dataset stage", # After spin up a docker container
+            "Finished dataset stage", # After finish loading dataset
+            "Computing pair matching", # After finish feature extraction, before the pair matching
+            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
+            "Export reconstruction stats", # After Ceres Solver Report
+            "Finished opensfm stage", # After Undistorting images
+            "Densifying point-cloud completed", # After fusing depth maps
+            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
+            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
+            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
+            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
+            "Finished odm_dem stage", # After Finished odm_dem stage
+            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
+            "Finished odm_report stage",  # After Finished odm_report stage
+            "Finished odm_postprocess stage", # Finished odm_postprocess stage
+            "ODM app finished",             # ODM Processes are done, but some additional steps left
+            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
+            "Generated RGB-Pyramid.tif",
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+        ]   
         
-        completed_stages = set()
-        progress_increment = 10  # Each stage completion increases progress by 10%
         with open(progress_file, 'w') as file:
             file.write("0")
         
@@ -1384,23 +1406,28 @@ def monitor_log_updates(logs_path, progress_file):
         with open(logs_path, 'r') as file:
             # Start by reading the file from the beginning
             file.seek(0)
-            
+            current_stage = -1
             while True:
-                line = file.readline()
+                line = file.readline() # It will read the file line by line
                 if line:
-                    if "ODM app finished" in line:
-                        update_progress_file(progress_file, 100)
-                        print("Progress updated: 100%")
-                        return
-                    else:
-                        for point in progress_points:
-                            if point in line and point not in completed_stages:
-                                completed_stages.add(point)
-                                current_progress = len(completed_stages) * progress_increment
-                                update_progress_file(progress_file, current_progress)
-                                print(f"Progress updated: {current_progress}%")
+                    # print(line)
+                    found_stages_msg = False
+                    for idx, step in enumerate(progress_stages):
+                        if step in line:
+                            found_stages_msg = True
+                            current_stage = idx
+                            break
+
+                    if found_stages_msg and current_stage > -1:
+                        current_progress = (current_stage+1) / len(progress_stages) * 100
+                        update_progress_file(progress_file, round(current_progress))
+                        print(progress_stages[current_stage])
+                        print(f"Progress updated: {current_progress:.1f}%")
+                        if current_stage == len(progress_stages) - 1:
+                            break
                 else:
-                    time.sleep(1)  # Sleep briefly to avoid busy waiting
+                    time.sleep(10)  # Sleep briefly to avoid busy waiting
+
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
@@ -2239,25 +2266,17 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 # app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
-    if 0:
-        # Get current script dir
-        script_dir = os.path.dirname(os.path.realpath(__file__))
-        # Get default data_root_dir
-        with open(f'{script_dir}/../../gemini-app/package.json', 'r') as file:
-            content = file.read()
-            match = re.search(r'run_flask_server.sh (\S+) \d+', content)
-            if match:
-                print(match.group(1))
-                # data_root_dir = match.group(1)
-
+    
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
-    parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"port: {args.port}")
+    print(f"flask_port: {args.flask_port}")
+    print(f"titiler_port: {args.titiler_port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
@@ -2272,11 +2291,11 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
+    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
