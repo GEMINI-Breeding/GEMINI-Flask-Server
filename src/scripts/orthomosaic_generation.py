@@ -138,15 +138,8 @@ def _process_outputs(args, debug=False):
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
     
-    # Copy the metadata file to the output folder
-    metadata_file = args.metadata_file.split('/')[-1]
-    try:
-        shutil.copy(args.metadata_file, os.path.join(output_folder, metadata_file))
-    except PermissionError:
-        os.system(f'cp "{args.metadata_file}" "{os.path.join(output_folder, metadata_file)}"')
-
-
-    additional_files = ['cameras.json','images.json', 'recipe.yaml', 'logs.txt', 'logs.json','benchmark.txt']
+    additional_files = ['benchmark.txt', 'cameras.json','gcp_list.txt', 'images.json','img_list.txt',
+                        'logs.txt', 'logs.json','options', 'recipe.yaml']
     for file in additional_files:
         file_path = os.path.join(project_path, 'code', file)
         try:
@@ -324,9 +317,11 @@ def run_odm(args):
             base_options = "--dsm"
 
             image_list = os.listdir(image_pth)
-            if len(image_list) > 1000:
+            if len(image_list) > 1000: # TODO: Update this rule
                 print("Running ODM with large dataset...")
                 base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+            else:
+                base_options += "--dem-resolution 0.25 --orthophoto-resolution 0.25"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
