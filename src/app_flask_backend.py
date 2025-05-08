@@ -1333,8 +1333,13 @@ def monitor_log_updates(logs_path, progress_file):
             "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
             "Finished odm_report stage",  # After Finished odm_report stage
             "Finished odm_postprocess stage", # Finished odm_postprocess stage
-            "ODM app finished"
-        ]
+            "ODM app finished",             # ODM Processes are done, but some additional steps left
+            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
+            "Generated RGB-Pyramid.tif",
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+        ]   
         
         with open(progress_file, 'w') as file:
             file.write("0")
@@ -2210,17 +2215,7 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 # app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
-    if 0:
-        # Get current script dir
-        script_dir = os.path.dirname(os.path.realpath(__file__))
-        # Get default data_root_dir
-        with open(f'{script_dir}/../../gemini-app/package.json', 'r') as file:
-            content = file.read()
-            match = re.search(r'run_flask_server.sh (\S+) \d+', content)
-            if match:
-                print(match.group(1))
-                # data_root_dir = match.group(1)
-
+    
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)

@@ -41,6 +41,23 @@ def _copy_image(src_folder, dest_folder, image_name):
             # Fallback to using system cp command if shutil.copy fails
             os.system(f'cp "{src_path}" "{dest_path}"')
 
+def append_to_log(project_path, message, verbose=False):
+    """
+    Append a message to the logs.txt file.
+    
+    Args:
+        project_path (str): Path to the project directory
+        message (str): Message to append to the log file
+    """
+    log_file = os.path.join(project_path, 'code', 'logs.txt')
+    with open(log_file, 'a') as f:
+        # Add timestamp to the message
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        msg = f"[{timestamp}] {message}\n"
+        f.write(msg)
+        if verbose:
+            print(msg)
+        
 def _create_directory_structure(args):
     
     '''
@@ -81,7 +98,7 @@ def _create_directory_structure(args):
                 except PermissionError:
                     os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
 
-def _process_outputs(args):
+def _process_outputs(args, debug=False):
 
     project_path = args.temp_dir
 
@@ -89,7 +106,8 @@ def _process_outputs(args):
         project_path = project_path[:-1]
     if os.path.basename(project_path) != 'project':
         project_path = os.path.join(project_path, 'project')    
-
+    
+    log_file = os.path.join(project_path, 'code', 'logs.txt')
     ortho_file = os.path.join(project_path, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
     dem_file = os.path.join(project_path, 'code', 'odm_dem', 'dsm.tif')
 
@@ -103,6 +121,9 @@ def _process_outputs(args):
     if os.path.exists(ortho_file):
         output_path = os.path.join(output_folder, args.date+'-RGB.tif')
         os.system(f'cp {ortho_file} {output_path}')
+        append_to_log(project_path, "Copied RGB.tif", verbose=True)
+        create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
+        append_to_log(project_path, "Generated RGB-Pyramid.tif", verbose=True)
     else:
         print(f"Error: Orthomosaic file {ortho_file} does not exist.")
         return False
@@ -110,14 +131,13 @@ def _process_outputs(args):
     if os.path.exists(dem_file):
         output_path = os.path.join(output_folder, args.date+'-DEM.tif')
         os.system(f'cp {dem_file} {output_path}')
+        append_to_log(project_path, "Copied DEM.tif", verbose=True)
+        create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
+        append_to_log(project_path, "Generated DEM-Pyramid.tif", verbose=True)
     else:
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
-    # Process pyramids
-    print("Processing pyramids")
-    create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
-    create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
-
+    
     # Copy the metadata file to the output folder
     metadata_file = args.metadata_file.split('/')[-1]
     try:
@@ -125,15 +145,22 @@ def _process_outputs(args):
     except PermissionError:
         os.system(f'cp "{args.metadata_file}" "{os.path.join(output_folder, metadata_file)}"')
 
-    # TODO: Copy the ODM Log, and camera positions too
 
-    # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
-    # temp_folder = os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)
-    # if not os.path.exists(temp_folder):
-    #     os.makedirs(temp_folder)
-    # shutil.move(os.path.join(project_path, 'code'), temp_folder)
-    
-    print("Processing complete.")
+    additional_files = ['cameras.json','images.json', 'recipe.yaml', 'logs.txt', 'logs.json','benchmark.txt']
+    for file in additional_files:
+        file_path = os.path.join(project_path, 'code', file)
+        try:
+            shutil.copy(file_path, os.path.join(output_folder))
+        except PermissionError:
+            os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
+
+    if debug:
+        debug_tmp = project_path.replace('temp','temp'+args.year + args. experiment + args.location + args.population + args.date + args.platform + args.sensor)
+        if not os.path.exists(debug_tmp):
+            os.makedirs(output_folder)
+        os.system(f'mv "{project_path}" "{debug_tmp}"')
+
+    append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
     return True
 
 def make_odm_args_from_metadata(metadata):
@@ -262,16 +289,18 @@ def run_odm(args):
     See options from https://docs.opendronemap.org/arguments/
 
     Possible considerations & Options:
-    ```bash
+
     --fast-orthophoto
     --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
     --dsm --orthophoto-resolution 0.01
     --feature-type sift # But its slower?
-    --dem-resolution 0.03 --orthophoto-resolution 0.03 # This can be added to the custom option
-    ```
-    
+    --dem-resolution 0.3 --orthophoto-resolution 0.3 # This can be added to the custom option. Make resoltuion to 0.3cm / pix
+    if set set this to lower than 0.24, (e.g. 0.03), we will get this error
+    [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)
+ 
     Notes:
     - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
+    
     '''
     
     try:
