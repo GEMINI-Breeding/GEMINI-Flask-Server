@@ -29,7 +29,7 @@ if [ -z "$1" ]; then
 else
     data_root_dir=$1
 fi
-echo "data_root_dir: $data_root_dir"
+# echo "data_root_dir: $data_root_dir"
 
 # Read the port from the arguments
 if [ -z "$2" ]; then
@@ -37,7 +37,7 @@ if [ -z "$2" ]; then
 else
     flask_port=$2
 fi
-echo "Flask Port: $flask_port"
+# echo "Flask Port: $flask_port"
 
 # Read the port from the arguments
 if [ -z "$3" ]; then
@@ -45,7 +45,7 @@ if [ -z "$3" ]; then
 else
     titiler_port=$3
 fi
-echo "Titiler Port: $titiler_port"
+# echo "Titiler Port: $titiler_port"
 
 python src/app_flask_backend.py --data_root_dir $data_root_dir --flask_port $flask_port --titiler_port $titiler_port
 

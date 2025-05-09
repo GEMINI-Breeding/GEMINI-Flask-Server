@@ -36,7 +36,7 @@ from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
 from scripts.utils import process_directories_in_parallel
-from scripts.gcp_picker import collect_gcp_candidate
+from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
 
 # Paths to scripts
@@ -451,7 +451,19 @@ def upload_files():
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
+    
+    # Read msgs_synced.csv once if it's an image upload
+    existing_paths = set()
+    msgs_synced_file = None
+    existing_df = None
+    
+    if data_type == 'image':
+        msgs_synced_file = os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv")
+        if os.path.isfile(msgs_synced_file):
+            existing_df = pd.read_csv(msgs_synced_file)
+            existing_paths = set(existing_df['image_path'].values)
 
+    exif_data_list = []
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
         if data_type == 'fieldDesign':
@@ -463,9 +475,25 @@ def upload_files():
 
         if upload_new_files_only and os.path.isfile(file_path):
             print(f"Skipping {filename} because it already exists in {dir_path}")
-            continue  # Skip existing file
+        else:
+            file.save(file_path)
 
-        file.save(file_path)
+        # For image files, extract EXIF data
+        if data_type.lower() == 'image':
+            if file_path not in existing_paths:
+                msg = get_image_exif(file_path)
+                if msg and msg['image_path'] not in existing_paths:
+                    exif_data_list.append(msg)
+                    existing_paths.add(msg['image_path'])  # Add to set to prevent duplicates in current batch
+
+    # Update msgs_synced.csv once with all new EXIF data
+    if data_type.lower() == 'image' and exif_data_list:
+        if existing_df is not None and not existing_df.empty:
+            # Append multiple rows at once
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+        else:
+            # Create a new CSV with headers
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -609,70 +637,50 @@ def run_script():
     return jsonify({'message': 'Script started'}), 200
 
 
-@file_app.route('/process_images', methods=['POST'])
+@file_app.route('/get_gcp_selcted_images', methods=['POST'])
 def get_gcp_selcted_images():
     global data_root_dir
     try:
-        location = request.json['location']
-        population = request.json['population']
-        date = request.json['date']
-        radius_meters = request.json['radius_meters']
-        year = request.json['year']
-        experiment = request.json['experiment']
-        sensor = request.json['sensor']
-        platform = request.json['platform']
-        prefix = data_root_dir+'/Raw'
-        image_folder = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, 'Images')
+        image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
+                                    request.json['experiment'], request.json['location'], 
+                                    request.json['population'], request.json['date'], 
+                                    request.json['platform'], request.json['sensor'], 'Images')
+        selected_images = collect_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
+        status = "DONE"
     except Exception as e:
         print(e)
         selected_images = []
-        files = []
         status = "DONE"
         return jsonify({'selected_images': selected_images,
-                    'num_total': len(files),
+                    'num_total': len(selected_images),
                     'status':status}), 200
-
-    # Check if the process is already running
-    is_running = False
-    for p in active_children():
-        if p.name == 'collect_gcp_candidate':
-            is_running = True
-
-    if is_running==False:
-        # Run the function to load the images in using process deamon
-        p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
-        p.start()
-        print("Process started")
-
-    p.join()
-    # Check if there are npy file that contains the image names
-    npy_list = ["image_names_final.npy", "image_names.npy"]
-    try:
-        for npy_file in npy_list:
-            npy_path = os.path.join(image_folder, '../'+npy_file)
-            if os.path.exists(npy_path):
-                if "final" in npy_file:
-                    status = "DONE"
-                else:
-                    status = "RUNNING"
-                saved_dict = np.load(npy_path, allow_pickle=True).item()
-                files = saved_dict['files']
-                selected_images = saved_dict['selected_images']
-                break
-            else:
-                status = "RUNNING"
-                selected_images = []
-                files = []
-    
-    except Exception as e:
-        print(e)
-        selected_images = []
-        files = []
-        status = "DONE"
 
     # Return the selected images and their corresponding GPS coordinates
     return jsonify({'selected_images': selected_images,
-                    'num_total': len(files),
+                    'num_total': len(selected_images),
+                    'status':status}), 200
+
+@file_app.route('/refresh_gcp_selcted_images', methods=['POST'])
+def refresh_gcp_selcted_images():
+    global data_root_dir
+    try:
+        image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
+                                    request.json['experiment'], request.json['location'], 
+                                    request.json['population'], request.json['date'], 
+                                    request.json['platform'], request.json['sensor'], 'Images')
+        selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
+        status = "DONE"
+    except Exception as e:
+        print(e)
+        selected_images = []
+        status = "DONE"
+        return jsonify({'selected_images': selected_images,
+                    'num_total': len(selected_images),
+                    'status':status}), 200
+
+    # Return the selected images and their corresponding GPS coordinates
+    return jsonify({'selected_images': selected_images,
+                    'num_total': len(selected_images),
                     'status':status}), 200
 
 @file_app.route('/get_drone_extract_progress', methods=['GET'])
