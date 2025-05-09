@@ -98,7 +98,7 @@ def _create_directory_structure(args):
                 except PermissionError:
                     os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
 
-def _process_outputs(args, debug=False):
+def process_outputs(args, debug=False):
 
     project_path = args.temp_dir
 
@@ -139,7 +139,7 @@ def _process_outputs(args, debug=False):
         return False
     
     additional_files = ['benchmark.txt', 'cameras.json','gcp_list.txt', 'images.json','img_list.txt',
-                        'logs.txt', 'logs.json','options', 'recipe.yaml']
+                        'logs.txt', 'log.json','options', 'recipe.yaml']
     for file in additional_files:
         file_path = os.path.join(project_path, 'code', file)
         try:
@@ -228,7 +228,7 @@ def reset_odm(args, metadata_file_name=None):
             image_pth = data['image_pth']
             prev_arg = make_odm_args_from_metadata(data)
             if odm_args_checker(prev_arg, args):
-                _process_outputs(args)
+                process_outputs(args)
                 print("Already processed. Copying to Processed folder.")
                 return
             else:
@@ -309,14 +309,14 @@ def run_odm(args):
         
         
         print('Project Path: ', project_path)
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
-        print('Image Path: ', image_pth)
+        image_path = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        print('Image Path: ', image_path)
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
             base_options = "--dsm"
 
-            image_list = os.listdir(image_pth)
+            image_list = os.listdir(image_path)
             if len(image_list) > 1000: # TODO: Update this rule
                 print("Running ODM with large dataset...")
                 base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
@@ -337,7 +337,7 @@ def run_odm(args):
                 pass
 
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            volumes = f"-v {project_path}:/datasets -v {image_path}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
             
             # Create a container name with the project name
             container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
@@ -363,7 +363,7 @@ def run_odm(args):
                 'sensor': args.sensor,
                 'reconstruction_quality': args.reconstruction_quality,
                 'custom_options': args.custom_options,
-                'image_pth': image_pth,
+                'image_pth': image_path,
                 'command': command,
             }
             recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
@@ -376,7 +376,7 @@ def run_odm(args):
             process = subprocess.Popen(command,stdout=f, stderr=subprocess.STDOUT)
             process.wait()
         
-        _process_outputs(args)
+        process_outputs(args)
         
         # save png image
         convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))

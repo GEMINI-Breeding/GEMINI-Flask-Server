@@ -647,6 +647,12 @@ def get_gcp_selcted_images():
                                     request.json['platform'], request.json['sensor'], 'Images')
         selected_images = collect_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
+
+        # Return the selected images and their corresponding GPS coordinates
+        return jsonify({'selected_images': selected_images,
+                        'num_total': len(selected_images),
+                        'status':status}), 200
+    
     except Exception as e:
         print(e)
         selected_images = []
@@ -655,10 +661,6 @@ def get_gcp_selcted_images():
                     'num_total': len(selected_images),
                     'status':status}), 200
 
-    # Return the selected images and their corresponding GPS coordinates
-    return jsonify({'selected_images': selected_images,
-                    'num_total': len(selected_images),
-                    'status':status}), 200
 
 @file_app.route('/refresh_gcp_selcted_images', methods=['POST'])
 def refresh_gcp_selcted_images():
@@ -670,16 +672,16 @@ def refresh_gcp_selcted_images():
                                     request.json['platform'], request.json['sensor'], 'Images')
         selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
+        
+        # Return the selected images and their corresponding GPS coordinates
+        return jsonify({'selected_images': selected_images,
+                        'num_total': len(selected_images),
+                        'status':status}), 200
     except Exception as e:
         print(e)
         selected_images = []
         status = "DONE"
         return jsonify({'selected_images': selected_images,
-                    'num_total': len(selected_images),
-                    'status':status}), 200
-
-    # Return the selected images and their corresponding GPS coordinates
-    return jsonify({'selected_images': selected_images,
                     'num_total': len(selected_images),
                     'status':status}), 200
 
@@ -1346,7 +1348,7 @@ def monitor_log_updates(logs_path, progress_file):
             "Generated RGB-Pyramid.tif",
             "Copied DEM.tif",
             "Generated DEM-Pyramid.tif",
-            "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+            # "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
         ]   
         
         with open(progress_file, 'w') as file:
