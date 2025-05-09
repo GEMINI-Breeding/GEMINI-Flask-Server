@@ -628,7 +628,7 @@ def clear_upload_cache():
     
     try:
         print('Clearing cache...')
-        dir_path = request.json['dirPath']
+        dir_path = request.json['localDirPath']
         cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
         
         # loop through each file in cache directory and remove it
