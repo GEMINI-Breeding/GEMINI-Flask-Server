@@ -9,6 +9,7 @@ import yaml
 import random
 import string
 import shutil
+import traceback
 import argparse
 import select
 import multiprocessing
@@ -49,6 +50,7 @@ file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 extraction_processes = {}
+extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -504,10 +506,27 @@ def _cleanup_files(file_paths):
             pass
 
 def _extraction_worker(file_paths, output_path):
-    # this must live at module scope so it can be pickled
-    extract_binary(file_paths, output_path)
-    _cleanup_files(file_paths)
-    
+    global extraction_status
+
+    try:
+        extraction_status = "in_progress"
+        extract_binary(file_paths, output_path)
+        
+        # cleanup files
+        _cleanup_files(file_paths)
+        
+        extraction_status = "done"
+    except Exception as e:
+        print(f"[ERROR] Extraction failed: {e}")
+        # print full traceback
+        traceback.print_exc()
+        extraction_status = "failed"
+
+@file_app.route('/get_binary_status', methods=['GET'])
+def get_binary_status():
+    print(f"Extraction status: {extraction_status}")
+    return jsonify({'status': extraction_status}), 200
+
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
     data = request.json
@@ -515,13 +534,25 @@ def extract_binary_file():
     dir_path = data['localDirPath']
     file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
     output_path = Path(UPLOAD_BASE_DIR) / dir_path
+    
+    def extract_timestamp(filename):
+        match = re.match(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d+)", filename)
+        return match.group(1) if match else filename  # fallback to filename if no match
 
-    # spawn a background process using our top-level worker
-    p = Process(
-        target=_extraction_worker,
-        args=(file_paths, output_path),
-        daemon=True
-    )
+    # Sort files by timestamp before constructing paths
+    files_sorted = sorted(files, key=extract_timestamp)
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files_sorted]
+
+    print(f"Extracting binary files: {file_paths}")
+
+    # Start new background process
+    global extraction_status
+    if extraction_status == "in_progress":
+        print("Extraction already in progress")
+        return jsonify({'status': 'already running'}), 429
+
+    extraction_status = "in_progress"
+    p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)
     p.start()
     extraction_processes[dir_path] = p
 
@@ -540,7 +571,7 @@ def get_binary_progress():
                 # print(f'progress.txt found in {progress_file_path}')
                 with open(progress_file_path, 'r') as file:
                     progress = int(file.read().strip())
-                print(f'Binary extraction progress: {progress}%')
+                print(f'Binary extraction progress: {progress}')
                 return jsonify({'progress': progress}), 200
         
         # If no progress.txt is found

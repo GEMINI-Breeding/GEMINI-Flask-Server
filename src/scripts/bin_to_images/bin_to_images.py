@@ -515,6 +515,9 @@ def extract_binary(file_names, output_path) -> None:
         output_path (Path): The path to the folder where the converted data will be written.
         disparity_scale (int): Scale for amplifying disparity color mapping. Default: 1.
     """
+    # print out file names
+    print(f"Extracting {len(file_names)} files.")
+    
     # make output directory
     base = 'RGB'
     output_path = output_path / base
@@ -587,6 +590,7 @@ def extract_binary(file_names, output_path) -> None:
             f.write(str(counter))
     
     # sync messages # *: only do this once all the msgs synceds are read
+    print(f'image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs)}')
     msgs = image_dfs + gps_dfs
     msgs_synced: list[np.array] = sync_msgs(msgs)
     msgs_synced_conc = np.concatenate(msgs_synced, axis=1)
@@ -604,20 +608,24 @@ def extract_binary(file_names, output_path) -> None:
     msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
     
 if __name__ == '__main__':
-    
     ap = argparse.ArgumentParser()
-    ap.add_argument('--file_names', type=str, required=True, help='Path to the events file.')
-    ap.add_argument('--output_path', type=str, required=True, help='Path to the folder where the converted data will be written.')
-    
+    ap.add_argument('--file_names', type=str, nargs='+', required=True,
+                    help='List of paths to the event files.')
+    ap.add_argument('--output_path', type=str, required=True,
+                    help='Path to the folder where the converted data will be written.')
+
     args = ap.parse_args()
-    file_names = Path(args.file_names)
+    file_names = [Path(f) for f in args.file_names]
     output_path = Path(args.output_path)
-    if not file_names.exists():
-        raise RuntimeError(f"File {file_names} does not exist.")
+
+    # Check that all file paths exist
+    for f in file_names:
+        if not f.exists():
+            raise RuntimeError(f"File {f} does not exist.")
     
-    # make output directory
+    # Make output directory
     if not output_path.exists():
-        output_path.mkdir(parents=True, exist_ok=True) # *: this path should not change
-        
-    # extract binary file
-    extract_binary([file_names], output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    # Extract binary files
+    extract_binary(file_names, output_path)
