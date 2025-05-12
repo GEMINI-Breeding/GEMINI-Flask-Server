@@ -486,6 +486,19 @@ def check_files():
 
     return jsonify(new_files), 200
 
+@file_app.route("/get_binary_report", methods=["POST"])
+def get_binary_report():
+    data = request.json
+    # Construct file path based on metadata
+    report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
+    
+    try:
+        with open(report_path, "r") as f:
+            content = f.read()
+        return content, 200
+    except Exception as e:
+        return f"Error loading report: {str(e)}", 500
+
 @file_app.route('/cancel_extraction', methods=['POST'])
 def cancel_extraction():
     data = request.json
@@ -499,6 +512,7 @@ def cancel_extraction():
     return jsonify({'status': 'cancelled'}), 200
 
 def _cleanup_files(file_paths):
+    global extraction_status
     for p in file_paths:
         try:
             os.remove(p)
@@ -514,7 +528,6 @@ def _extraction_worker(file_paths, output_path):
         
         # cleanup files
         _cleanup_files(file_paths)
-        
         extraction_status = "done"
     except Exception as e:
         print(f"[ERROR] Extraction failed: {e}")
@@ -547,9 +560,9 @@ def extract_binary_file():
 
     # Start new background process
     global extraction_status
-    if extraction_status == "in_progress":
-        print("Extraction already in progress")
-        return jsonify({'status': 'already running'}), 429
+    # if extraction_status == "in_progress":
+    #     print("Extraction already in progress")
+    #     return jsonify({'status': 'already running'}), 429
 
     extraction_status = "in_progress"
     p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)

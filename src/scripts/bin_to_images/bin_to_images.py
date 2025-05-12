@@ -234,7 +234,7 @@ def extract_images(
     events_dict: Dict[str, List[EventLogPosition]],
     calibrations: Dict[str, dict],
     output_path: Path,
-    current_ts: int
+    current_ts: int,
 ) -> bool:
     """Extracts images as jpg and stores timestamps into a csv file where they are synced based
     on their sequence number.
@@ -319,6 +319,7 @@ def extract_images(
     # split dataframe based on columns
     dfs = []
     ts_cols_list = []
+    images_report = {}
     unique_camera_ids = {s.split('/')[1] for s in image_topics if s.startswith('/oak')}
     for i in unique_camera_ids:
         i = CAMERA_POSITIONS[i]
@@ -327,6 +328,12 @@ def extract_images(
         # check for missing topics
         existing_cols = [col for col in ts_cols if col in ts_df.columns]
         missing_cols = [col for col in ts_cols if col not in ts_df.columns]
+        
+        # report existing and missing columns
+        images_report[i] = {
+            'existing': existing_cols,
+            'missing': missing_cols
+        }
         
         if missing_cols:
             print(f"Warning: Skipping missing columns for camera '{i}': {missing_cols}")
@@ -349,7 +356,7 @@ def extract_images(
         dfs.append(ts_df_split.to_numpy(dtype='float64'))
         ts_cols_list += existing_cols
         
-    return dfs, ts_cols_list
+    return dfs, ts_cols_list, images_report
 
 def extract_gps(
     gps_topics: List[str],
@@ -370,6 +377,7 @@ def extract_gps(
     
     df = {}
     gps_cols_list = {}
+    gps_metric_summary = {}
     
     # initialize save path
     save_path = output_path / 'Metadata'
@@ -446,9 +454,25 @@ def extract_gps(
         gps_df.to_csv(f"{save_path}/gps_{gps_name}.csv", index=False)
         df[gps_name] = gps_df.to_numpy(dtype='float64')
         gps_cols_list[gps_name] = gps_df.columns.tolist()
+        
+        # record gps metric summary (average values)
+        if gps_name == 'pvt':
+            gps_metric_summary['pvt'] = {
+                'avg_heading_accuracy': gps_df['heading_accuracy'].mean(),
+                'avg_speed_accuracy': gps_df['speed_accuracy'].mean(),
+                'avg_horizontal_accuracy': gps_df['horizontal_accuracy'].mean(),
+                'avg_vertical_accuracy': gps_df['vertical_accuracy'].mean(),
+            }
+        elif gps_name == 'relposned':
+            gps_metric_summary['relposned'] = {
+                'avg_accuracy_north': gps_df['accuracy_north'].mean(),
+                'avg_accuracy_east': gps_df['accuracy_east'].mean(),
+                'avg_accuracy_down': gps_df['accuracy_down'].mean(),
+                'avg_accuracy_length': gps_df['accuracy_length'].mean(),
+                'avg_accuracy_heading': gps_df['accuracy_heading'].mean()
+            }
 
-    return df, gps_cols_list
-
+    return df, gps_cols_list, gps_metric_summary
 
 def extract_calibrations(
     calib_topics: List[str],
@@ -529,9 +553,20 @@ def extract_binary(file_names, output_path) -> None:
     skip_pointer = 0
     with open(f"{output_path}/progress.txt", "w") as f:
         f.write("0")
+        
+    # create a report file
+    report_path = output_path / 'report.txt'
+    with open(report_path, "w") as f:
+        f.write("Report of the conversion process:\n")
+        f.write(f"Number of files: {len(file_names)}\n")
+        f.write(f"Output path: {output_path}\n")
     
     # extract each bin file
     for file_name in tqdm(file_names):
+        
+        # write name of binary file to the report
+        with open(report_path, "a") as f:
+            f.write(f"\n--- File: {file_name} ---\n")
         
         # create the file reader
         reader = EventsFileReader(file_name)
@@ -566,19 +601,55 @@ def extract_binary(file_names, output_path) -> None:
         if len(calibrations) == 0:
             print("Warning: No calibration files found. Skipping point cloud generation from disparity images.")
             calibrations = None
-            # TODO: Add a tracker for missing topics
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- Calibration ---\n")
+
+            # for each key in calibration, log into the report file
+            for key, value in calibrations.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      Camera: {key}\n")
 
         # extract gps topics
         gps_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in GPS_TYPES)]
-        gps_dfs, gps_cols = extract_gps(gps_topics, events_dict, output_path, current_ts)
+        gps_dfs, gps_cols, gps_metric_summary = extract_gps(gps_topics, events_dict, output_path, current_ts)
         if len(gps_dfs) == 0:
             raise RuntimeError(f"Failed to extract gps event file")
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- GPS ---\n")
+                
+            # for each key in gps, log into the report file
+            for key, value in gps_metric_summary.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      GPS: {key}\n")
+                    for metric, val in value.items():
+                        f.write(f"        {metric}: {val}\n")
+
+            # for each key in gps, log into the report file
+            for key, value in gps_dfs.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      GPS: {key}\n")
 
         # extract image topics
         image_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in IMAGE_TYPES)]
-        image_dfs, images_cols = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
+        image_dfs, images_cols, images_report = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
         if len(image_dfs) == 0:
             raise RuntimeError(f"Failed to extract image event file")
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- Images ---\n")
+                
+            # for each key in image, log into the report file
+            with open(report_path, "a") as f:
+                f.write(f"      Images: {image_topics}\n")
+                for key, value in images_report.items():
+                    f.write(f"        Camera: {key}\n")
+                    f.write(f"          Existing topics: {value['existing']}\n")
+                    f.write(f"          Missing topics: {value['missing']}\n")
         
         # *: Interpolate GPS data to query at camera timestamps
         gps_dfs = interpolate_gps(gps_dfs = gps_dfs, image_dfs = image_dfs, skip_pointer = skip_pointer, save_path = output_path, columns = gps_cols)
