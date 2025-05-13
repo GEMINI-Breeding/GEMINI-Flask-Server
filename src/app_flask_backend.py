@@ -9,11 +9,12 @@ import yaml
 import random
 import string
 import shutil
+import traceback
 import argparse
 import select
 import multiprocessing
 import requests
-from multiprocessing import active_children
+from multiprocessing import active_children, Process
 from pathlib import Path
 
 # Third-party library imports
@@ -48,6 +49,8 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
+extraction_processes = {}
+extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -483,32 +486,94 @@ def check_files():
 
     return jsonify(new_files), 200
 
+@file_app.route("/get_binary_report", methods=["POST"])
+def get_binary_report():
+    data = request.json
+    # Construct file path based on metadata
+    report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
+    
+    try:
+        with open(report_path, "r") as f:
+            content = f.read()
+        return content, 200
+    except Exception as e:
+        return f"Error loading report: {str(e)}", 500
+
+@file_app.route('/cancel_extraction', methods=['POST'])
+def cancel_extraction():
+    data = request.json
+    dir_path = data.get('dirPath')
+    p = extraction_processes.pop(dir_path, None)
+    if not p:
+        return jsonify({'status': 'no active extraction for this path'}), 404
+
+    p.terminate()  # force-kill the worker
+    p.join()
+    return jsonify({'status': 'cancelled'}), 200
+
+def _cleanup_files(file_paths):
+    global extraction_status
+    for p in file_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+def _extraction_worker(file_paths, output_path):
+    global extraction_status
+
+    try:
+        extraction_status = "in_progress"
+        extract_binary(file_paths, output_path)
+        
+        # cleanup files
+        _cleanup_files(file_paths)
+        extraction_status = "done"
+    except Exception as e:
+        print(f"[ERROR] Extraction failed: {e}")
+        # print full traceback
+        traceback.print_exc()
+        extraction_status = "failed"
+
+@file_app.route('/get_binary_status', methods=['GET'])
+def get_binary_status():
+    print(f"Extraction status: {extraction_status}")
+    return jsonify({'status': extraction_status}), 200
 
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
     data = request.json
-    # files = secure_filename(data['files'])
-    files = data['files']  # Assuming this is a list of filenames
-    files = [secure_filename(file) for file in files]  # Secure each filename individually
-    dir_path = data['dirPath']
+    files = [secure_filename(f) for f in data['files']]
+    dir_path = data['localDirPath']
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
+    output_path = Path(UPLOAD_BASE_DIR) / dir_path
     
-    # parameters
-    # file_names = os.path.join(UPLOAD_BASE_DIR, dir_path, file)
-    file_names = [Path(os.path.join(UPLOAD_BASE_DIR, dir_path, file)) for file in files]
-    output_path = Path(os.path.join(UPLOAD_BASE_DIR, dir_path))
-    
-    # run extraction
-    print("Extracting binary file...")
-    extract_binary(file_names, output_path)
-    
-    # delete the binary file
-    for file_name in file_names:
-        os.remove(file_name)
-    return jsonify({'status': 'success'}), 200
+    def extract_timestamp(filename):
+        match = re.match(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d+)", filename)
+        return match.group(1) if match else filename  # fallback to filename if no match
+
+    # Sort files by timestamp before constructing paths
+    files_sorted = sorted(files, key=extract_timestamp)
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files_sorted]
+
+    print(f"Extracting binary files: {file_paths}")
+
+    # Start new background process
+    global extraction_status
+    # if extraction_status == "in_progress":
+    #     print("Extraction already in progress")
+    #     return jsonify({'status': 'already running'}), 429
+
+    extraction_status = "in_progress"
+    p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)
+    p.start()
+    extraction_processes[dir_path] = p
+
+    return jsonify({'status': 'started'}), 200
 
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
-    dir_path = request.json['dirPath']
+    dir_path = request.json['localDirPath']
     dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     
     try:
@@ -519,7 +584,7 @@ def get_binary_progress():
                 # print(f'progress.txt found in {progress_file_path}')
                 with open(progress_file_path, 'r') as file:
                     progress = int(file.read().strip())
-                print(f'Binary extraction progress: {progress}%')
+                print(f'Binary extraction progress: {progress}')
                 return jsonify({'progress': progress}), 200
         
         # If no progress.txt is found
@@ -562,7 +627,7 @@ def upload_chunk():
 def check_uploaded_chunks():
     data = request.json
     file_identifier = data['fileIdentifier']
-    dir_path = data['dirPath']
+    dir_path = data['localDirPath']
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     
@@ -571,13 +636,43 @@ def check_uploaded_chunks():
 
     return jsonify({'uploadedChunksCount': uploaded_chunks_count}), 200
 
+@file_app.route('/clear_upload_dir', methods=['POST'])
+def clear_upload_dir():
+    # 1. Grab the user-supplied relative path
+    dir_path = request.json.get('dirPath', '').strip()
+    if not dir_path:
+        return jsonify({'message': 'No directory specified'}), 400
+    print(f"Clearing upload directory: {dir_path}")
+
+    # 2. Resolve base and target
+    base = Path(UPLOAD_BASE_DIR).resolve()
+    target = (base / dir_path).resolve()
+
+    # 3. Safety checks
+    #  - must be a subdirectory of base
+    #  - must not be equal to base itself
+    if not str(target).startswith(str(base) + os.sep):
+        return jsonify({'message': 'Invalid path'}), 400
+    if target == base:
+        return jsonify({'message': 'Refusing to delete root directory'}), 400
+
+    # 4. Delete
+    if target.exists():
+        try:
+            shutil.rmtree(target)
+            return jsonify({'message': f'{dir_path} cleared successfully'}), 200
+        except Exception as e:
+            print(f"Failed to delete {target}: {e}")
+            return jsonify({'message': f'Failed to clear dir: {e}'}), 500
+    else:
+        return jsonify({'message': 'Directory not found'}), 404
 
 @file_app.route('/clear_upload_cache', methods=['POST'])
 def clear_upload_cache():
     
     try:
         print('Clearing cache...')
-        dir_path = request.json['dirPath']
+        dir_path = request.json['localDirPath']
         cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
         
         # loop through each file in cache directory and remove it
@@ -587,7 +682,7 @@ def clear_upload_cache():
             
         # remove the cache directory
         os.rmdir(cache_dir_path)
-        time.sleep(60)  # Wait for 60 seconds
+        # time.sleep(60)  # Wait for 60 seconds
         return jsonify({'message': 'Cache cleared successfully'}), 200
     except Exception as e:
         print(f'Error clearing cache: {str(e)}')
@@ -639,17 +734,6 @@ def get_gcp_selcted_images():
             is_running = True
 
     if is_running==False:
-        # Remove previous npy files for debugging
-        if 0:
-            npy_path = os.path.join(image_folder, '../image_names.npy')
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            npy_path = npy_path.replace(".npy", "_prev.npy")
-            if os.path.exists(npy_path):
-                os.remove(npy_path)
-            if os.path.exists(npy_path.replace("prev", "final")):
-                os.remove(npy_path.replace("prev", "final"))
-            
         # Run the function to load the images in using process deamon
         p = multiprocessing.Process(name='collect_gcp_candidate', target=collect_gcp_candidate, args=(data_root_dir, image_folder, radius_meters))
         p.start()
@@ -765,7 +849,7 @@ def process_drone_tiff():
 
 
 @file_app.route('/save_array', methods=['POST'])
-def save_array():
+def save_array(debug=False):
     data = request.json
     if 'array' not in data:
         return jsonify({"message": "Missing array in data"}), 400
@@ -776,7 +860,8 @@ def save_array():
     sensor = data['sensor']
     processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
     save_directory = os.path.join(data_root_dir, processed_path)
-    print(save_directory, flush=True)
+    if debug:
+        print(save_directory, flush=True)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -806,7 +891,8 @@ def save_array():
     # Merge new data with existing data
     for item in data['array']:
         if 'pointX' in item and 'pointY' in item:
-            print(item, flush=True)
+            if debug:
+                print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
             existing_data[image_name] = {
                 'gcp_lon': item['gcp_lon'],
@@ -1316,30 +1402,40 @@ def delete_ortho():
         print(f"An error occurred while deleting {ortho_path}: {str(e)}")
     return jsonify({"message": "Ortho file deleted successfully"}), 200
 
-def update_progress_file(progress_file, progress):
+def update_progress_file(progress_file, progress, debug=False):
     with open(progress_file, 'w') as pf:
         pf.write(f"{progress}%")
         latest_data['ortho'] = progress
-        print('Ortho progress updated:', progress)
+        if debug:
+            print('Ortho progress updated:', progress)
                
 def monitor_log_updates(logs_path, progress_file):
     
     try:
-        progress_points = [
-            "Running opensfm stage",
-            "Export reconstruction stats",
-            "Estimated depth-maps",
-            "Geometric-consistent estimated depth-maps",
-            "Filtered depth-maps",
-            "Fused depth-maps",
-            "Point visibility checks",
-            "Decimated faces",
-            "Running odm_georeferencing stage",
-            "running pdal translate"
-        ]
+        progress_stages = [
+            "Running dataset stage", # After spin up a docker container
+            "Finished dataset stage", # After finish loading dataset
+            "Computing pair matching", # After finish feature extraction, before the pair matching
+            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
+            "Export reconstruction stats", # After Ceres Solver Report
+            "Finished opensfm stage", # After Undistorting images
+            "Densifying point-cloud completed", # After fusing depth maps
+            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
+            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
+            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
+            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
+            "Finished odm_dem stage", # After Finished odm_dem stage
+            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
+            "Finished odm_report stage",  # After Finished odm_report stage
+            "Finished odm_postprocess stage", # Finished odm_postprocess stage
+            "ODM app finished",             # ODM Processes are done, but some additional steps left
+            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
+            "Generated RGB-Pyramid.tif",
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+        ]   
         
-        completed_stages = set()
-        progress_increment = 10  # Each stage completion increases progress by 10%
         with open(progress_file, 'w') as file:
             file.write("0")
         
@@ -1354,23 +1450,28 @@ def monitor_log_updates(logs_path, progress_file):
         with open(logs_path, 'r') as file:
             # Start by reading the file from the beginning
             file.seek(0)
-            
+            current_stage = -1
             while True:
-                line = file.readline()
+                line = file.readline() # It will read the file line by line
                 if line:
-                    if "ODM app finished" in line:
-                        update_progress_file(progress_file, 100)
-                        print("Progress updated: 100%")
-                        return
-                    else:
-                        for point in progress_points:
-                            if point in line and point not in completed_stages:
-                                completed_stages.add(point)
-                                current_progress = len(completed_stages) * progress_increment
-                                update_progress_file(progress_file, current_progress)
-                                print(f"Progress updated: {current_progress}%")
+                    # print(line)
+                    found_stages_msg = False
+                    for idx, step in enumerate(progress_stages):
+                        if step in line:
+                            found_stages_msg = True
+                            current_stage = idx
+                            break
+
+                    if found_stages_msg and current_stage > -1:
+                        current_progress = (current_stage+1) / len(progress_stages) * 100
+                        update_progress_file(progress_file, round(current_progress))
+                        print(progress_stages[current_stage])
+                        print(f"Progress updated: {current_progress:.1f}%")
+                        if current_stage == len(progress_stages) - 1:
+                            break
                 else:
-                    time.sleep(1)  # Sleep briefly to avoid busy waiting
+                    time.sleep(10)  # Sleep briefly to avoid busy waiting
+
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
@@ -2209,25 +2310,17 @@ app.mount("/flask_app", WSGIMiddleware(file_app))
 # app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
-    if 0:
-        # Get current script dir
-        script_dir = os.path.dirname(os.path.realpath(__file__))
-        # Get default data_root_dir
-        with open(f'{script_dir}/../../gemini-app/package.json', 'r') as file:
-            content = file.read()
-            match = re.search(r'run_flask_server.sh (\S+) \d+', content)
-            if match:
-                print(match.group(1))
-                # data_root_dir = match.group(1)
-
+    
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI/GEMINI-App-Data',required=False)
-    parser.add_argument('--port', type=int, default=5050,required=False) # Default port is 5000
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
-    print(f"port: {args.port}")
+    print(f"flask_port: {args.flask_port}")
+    print(f"titiler_port: {args.titiler_port}")
 
     # Update global data_root_dir from the argument
     global data_root_dir
@@ -2242,11 +2335,11 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = "uvicorn titiler.application.main:app --reload --port 8091"
+    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()

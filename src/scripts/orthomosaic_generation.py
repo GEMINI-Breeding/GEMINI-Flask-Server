@@ -23,9 +23,11 @@ import yaml
 import json
 
 # Local application/library specific imports
-# Add current directory to path
+# Add script directory to path
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from create_geotiff_pyramid import create_tiled_pyramid
+from thermal_camera.flir_one_pro_extract import extract_thermal_images_NIRFormat as extract_thermal_images
+from utils import check_nvidia_smi
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -33,8 +35,29 @@ def _copy_image(src_folder, dest_folder, image_name):
     dest_path = os.path.join(dest_folder, image_name)
 
     if not os.path.exists(dest_path):
-        shutil.copy(src_path, dest_path)
+        try:
+            shutil.copy(src_path, dest_path)
+        except PermissionError:
+            # Fallback to using system cp command if shutil.copy fails
+            os.system(f'cp "{src_path}" "{dest_path}"')
 
+def append_to_log(project_path, message, verbose=False):
+    """
+    Append a message to the logs.txt file.
+    
+    Args:
+        project_path (str): Path to the project directory
+        message (str): Message to append to the log file
+    """
+    log_file = os.path.join(project_path, 'code', 'logs.txt')
+    with open(log_file, 'a') as f:
+        # Add timestamp to the message
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        msg = f"[{timestamp}] {message}\n"
+        f.write(msg)
+        if verbose:
+            print(msg)
+        
 def _create_directory_structure(args):
     
     '''
@@ -43,77 +66,64 @@ def _create_directory_structure(args):
     '''
 
     # Create the temporary directory structure
-    pth = args.temp_dir
+    project_path = args.temp_dir
 
-    if pth[-1] == '/':
-        pth = pth[:-1]
-    if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')
+    if project_path[-1] == '/':
+        project_path = project_path[:-1]
+    if os.path.basename(project_path) != 'project':
+        project_path = os.path.join(project_path, 'project')
 
-    if not os.path.exists(pth):
-        os.makedirs(pth)
-        os.makedirs(os.path.join(pth, 'code'))
+    if not os.path.exists(project_path):
+        os.makedirs(project_path)
+        os.makedirs(os.path.join(project_path, 'code'))
 
- 
-    if 0:
-        # Copy the images to the temporary directory
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
-        print(f"Image Path: {image_pth}")
-        os.makedirs(os.path.join(pth, 'code', 'images'))
-        images = os.listdir(os.path.join(image_pth))
-        extensions = ('.jpg', '.tif','.png')
-        images = [x for x in images if x.lower().endswith(extensions)]
-        if 0:
-            # Copy the images to the temporary directory
-            with ThreadPoolExecutor() as executor:
-                executor.map(lambda im_name: _copy_image(image_pth, 
-                                                    os.path.join(pth, 'code', 'images'), 
-                                                    im_name), 
-                                        images)
-        else:
-            print("Copying images")
-            for im_name in tqdm(images):
-                _copy_image(image_pth, os.path.join(pth, 'code', 'images'), im_name)
-    else:
-        # Do nothing because docker will mount the image folder to the container
-        pass
 
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
-    print(f"GCP Path: {gcp_pth}")
-    # Check if the file has more than 1 lines
-    filtered_gcp_list = []
-    with open(gcp_pth, 'r') as f:
-        lines = f.readlines()
-        if len(lines) < 2:
-            print("GCP file has less than 2 lines...Ignoring")
-        else:
-            shutil.copy(gcp_pth, os.path.join(pth, 'code', 'gcp_list.txt'))
+    # print(f"GCP Path: {gcp_pth}")
+    # Check if gcp_pth exists
+    if not os.path.exists(gcp_pth):
+        print(f"GCP file {gcp_pth} does not exist.")
+        return False
+    else:
+        # Check if the file exists but has more than 1 lines
+        filtered_gcp_list = []
+        with open(gcp_pth, 'r') as f:
+            lines = f.readlines()
+            if len(lines) < 2:
+                print("GCP file has less than 2 lines...Ignoring")
+            else:
+                try:
+                    shutil.copy(gcp_pth, os.path.join(project_path, 'code', 'gcp_list.txt'))
+                except PermissionError:
+                    os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
 
+def _process_outputs(args, debug=False):
 
-def _process_outputs(args):
+    project_path = args.temp_dir
 
-    pth = args.temp_dir
-
-    if pth[-1] == '/':
-        pth = pth[:-1]
-    if os.path.basename(pth) != 'project':
-        pth = os.path.join(pth, 'project')    
-
-    ortho_file = os.path.join(pth, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
-    dem_file = os.path.join(pth, 'code', 'odm_dem', 'dsm.tif')
+    if project_path[-1] == '/':
+        project_path = project_path[:-1]
+    if os.path.basename(project_path) != 'project':
+        project_path = os.path.join(project_path, 'project')    
+    
+    log_file = os.path.join(project_path, 'code', 'logs.txt')
+    ortho_file = os.path.join(project_path, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
+    dem_file = os.path.join(project_path, 'code', 'odm_dem', 'dsm.tif')
 
     output_folder = os.path.join(args.data_root_dir, 'Processed', args.year, args. experiment, args.location, args.population, args.date, args.platform, args.sensor)
     print(f"Output folder: {output_folder}")
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
- 
     # Copy the orthomosaic and DEM to the output folder
     # Check if the files exist
     if os.path.exists(ortho_file):
         output_path = os.path.join(output_folder, args.date+'-RGB.tif')
         os.system(f'cp {ortho_file} {output_path}')
+        append_to_log(project_path, "Copied RGB.tif", verbose=True)
+        create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
+        append_to_log(project_path, "Generated RGB-Pyramid.tif", verbose=True)
     else:
         print(f"Error: Orthomosaic file {ortho_file} does not exist.")
         return False
@@ -121,68 +131,51 @@ def _process_outputs(args):
     if os.path.exists(dem_file):
         output_path = os.path.join(output_folder, args.date+'-DEM.tif')
         os.system(f'cp {dem_file} {output_path}')
+        append_to_log(project_path, "Copied DEM.tif", verbose=True)
+        create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
+        append_to_log(project_path, "Generated DEM-Pyramid.tif", verbose=True)
     else:
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
-
     
-    
-    
-    # Process pyramids
-    print("Processing pyramids")
-    create_tiled_pyramid(ortho_file, os.path.join(output_folder, args.date+'-RGB-Pyramid.tif'))
-    create_tiled_pyramid(dem_file, os.path.join(output_folder, args.date+'-DEM-Pyramid.tif'))
+    additional_files = ['benchmark.txt', 'cameras.json','gcp_list.txt', 'images.json','img_list.txt',
+                        'logs.txt', 'logs.json','options', 'recipe.yaml']
+    for file in additional_files:
+        file_path = os.path.join(project_path, 'code', file)
+        try:
+            shutil.copy(file_path, os.path.join(output_folder))
+        except PermissionError:
+            os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
 
+    if debug:
+        debug_tmp = project_path.replace('temp','temp'+args.year + args. experiment + args.location + args.population + args.date + args.platform + args.sensor)
+        if not os.path.exists(debug_tmp):
+            os.makedirs(output_folder)
+        os.system(f'mv "{project_path}" "{debug_tmp}"')
 
-    # Copy the recipe file to the output folder
-    shutil.copy(os.path.join(pth, 'code', 'recipe.yaml'), os.path.join(output_folder, 'recipe.yaml'))
-
-    # Move ODM outputs to /var/tmp so they can be accessed if needed but deleted eventually
-    # if not os.path.exists(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor)):
-    #     os.makedirs(os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
-    # shutil.move(os.path.join(pth, 'code'), os.path.join('/var/tmp', args.location, args.population, args.date, args.sensor))
-    
-    # Delete the temporary directory
-    # shutil.rmtree(pth)
-    print("Processing complete.")
+    append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
     return True
 
-
-
-
-def check_nvidia_smi():
+def make_odm_args_from_metadata(metadata):
     '''
-    Check if nvidia-smi is installed on the system.
-    '''
-    # Check the output of "docker run --rm --gpus all nvidia/cuda:11.0.3-base nvidia-smi"
-    try:
-        output = subprocess.check_output(['docker', 'run', '--rm', '--gpus', 'all', 'nvidia/cuda:11.0.3-base', 'nvidia-smi'])
-        if 'NVIDIA-SMI' in output.decode('utf-8'):
-            return True
-        else:
-            return False
-    except Exception as e:
-        return False
+    Generate an argparse.Namespace object from the metadata file.
+    Example of yaml_data:
     
-def make_odm_args_from_path(path):
     '''
-    Generate an argparse.Namespace object from a path to the images.
-    Example path string: Raw/2022/GEMINI/Davis/Legumes/2022-06-20/Drone/RGB/Images
-    '''
-    parts = path.split('/')
-    sensor = parts[-2]
-    platform = parts[-3]
-    date = parts[-4]
-    population = parts[-5]
-    location = parts[-6]
-    experiment = parts[-7]
-    year = parts[-8]
-    data_root_dir = parts[-9]
-    temp_dir = os.path.join(data_root_dir, 'temp', 'project')
+    year = metadata['year']
+    experiment = metadata['experiment']
+    location = metadata['location']
+    population = metadata['population']
+    date = metadata['date']
+    platform = metadata['platform']
+    sensor = metadata['sensor']
+    reconstruction_quality = metadata['reconstruction_quality']
+    custom_options = metadata['custom_options']
+    image_pth = metadata['image_pth']
+    data_root_dir = metadata['data_root_dir']
+    temp_dir = metadata['temp_dir']
 
-    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, 'Low', [])
-
-
+    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options)
 
 def make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options):
     # Run ODM
@@ -201,19 +194,39 @@ def make_odm_args(data_root_dir, location, population, date, year, experiment, p
 
     return args
 
-def reset_odm(args):
+def reset_odm(args, metadata_file_name=None):
     # May be more appropriate to rename as "prep_odm" in the future to clarify functionality
     # This function now contains checks for existing processed data previously in run_odm
     drd = args.data_root_dir
-    pth = args.temp_dir
-    recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+    temp_dir = args.temp_dir
+
+    # Check if the temp directory exists
+    if not os.path.exists(temp_dir):
+        # No need to reset ODM
+        return
+
+    if metadata_file_name is None:
+        metadata_file_name = 'metadata.json'
+        
+    metadata_file = os.path.join(temp_dir, 'code', metadata_file_name)
+    # Check if the metadata file exists
+    if not os.path.exists(metadata_file):
+        # Try with yaml
+        metadata_file = os.path.join(temp_dir, 'code', metadata_file_name.replace('.json', '.yaml'))
+        
     reset_odm_temp = False
-    if os.path.exists(recipe_file):
-        # Read the recipe file
-        with open(recipe_file, 'r') as file:
-            data = yaml.load(file, Loader=yaml.FullLoader)
+    if os.path.exists(metadata_file):
+        # Read the metadata file
+        with open(metadata_file, 'r') as file:
+            if metadata_file.endswith('.json'):
+                data = json.load(file)
+            elif metadata_file.endswith('.yaml'):
+                data = yaml.load(file, Loader=yaml.FullLoader)
+            else:
+                raise ValueError('Invalid metadata file format. Must be either .yaml or .json')
+            
             image_pth = data['image_pth']
-            prev_arg = make_odm_args_from_path(image_pth)
+            prev_arg = make_odm_args_from_metadata(data)
             if odm_args_checker(prev_arg, args):
                 _process_outputs(args)
                 print("Already processed. Copying to Processed folder.")
@@ -225,8 +238,7 @@ def reset_odm(args):
         reset_odm_temp = True
     
     if reset_odm_temp:
-        temp_path = os.path.join(drd, 'temp')
-        shutil.rmtree(temp_path)
+        shutil.rmtree(temp_dir)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -267,35 +279,55 @@ def convert_tif_to_png(tif_path):
 def run_odm(args):
     '''
     Run ODM on the temporary directory.
+    See options from https://docs.opendronemap.org/arguments/
+
+    Possible considerations & Options:
+
+    --fast-orthophoto
+    --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
+    --dsm --orthophoto-resolution 0.01
+    --feature-type sift # But its slower?
+    --dem-resolution 0.3 --orthophoto-resolution 0.3 # This can be added to the custom option. Make resoltuion to 0.3cm / pix
+    if set set this to lower than 0.24, (e.g. 0.03), we will get this error
+    [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)
+ 
+    Notes:
+    - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
+    
     '''
     
     try:
         _create_directory_structure(args)
 
         # Run ODM
-        pth = args.temp_dir
+        project_path = args.temp_dir
 
-        if pth[-1] == '/':
-            pth = pth[:-1]
-        if os.path.basename(pth) != 'project':
-            pth = os.path.join(pth, 'project')
+        if project_path[-1] == '/':
+            project_path = project_path[:-1]
+        if os.path.basename(project_path) != 'project':
+            project_path = os.path.join(project_path, 'project')
         
         
-        print('Project Path: ', pth)
+        print('Project Path: ', project_path)
         image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
         print('Image Path: ', image_pth)
-        options = ""
-        log_file = os.path.join(pth, 'code', 'logs.txt')
+        odm_options = ""
+        log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
-            # See options from https://docs.opendronemap.org/arguments/
-            #common_options = "--dsm --orthophoto-resolution 2.0 --sfm-algorithm planar" # orthophoto-resolution gsd is usually 0.27cm/pixel
-            common_options = "--dsm --orthophoto-resolution 0.01" # orthophoto-resolution gsd is usually 0.27cm/pixel
+            base_options = "--dsm"
+
+            image_list = os.listdir(image_pth)
+            if len(image_list) > 1000: # TODO: Update this rule
+                print("Running ODM with large dataset...")
+                base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+            else:
+                base_options += "--dem-resolution 0.25 --orthophoto-resolution 0.25"
+
             if args.reconstruction_quality == 'Custom':
-                #process = subprocess.Popen(['opendronemap', 'code', '--project-path', pth, *args.custom_options, '--dsm'], stdout=f, stderr=subprocess.STDOUT)
-                options = f"{args.custom_options} {common_options}"
+                odm_options = f"{base_options} {args.custom_options} "
                 print('Starting ODM with custom options...')
             elif args.reconstruction_quality == 'Default':
-                options = f"--fast-orthophoto {common_options}"
+                odm_options = f"{base_options}" 
                 print('Starting ODM with default options...')
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
@@ -303,19 +335,23 @@ def run_odm(args):
             if args.sensor.lower() == 'thermal':
                 #options += ' --radiometric-calibration camera'
                 pass
-            # Create the command
+
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {pth}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            
+            # Create a container name with the project name
+            container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
+
             if check_nvidia_smi():
                 docker_image = "--gpus all opendronemap/odm:gpu"
             else:
                 docker_image = "opendronemap/odm"
 
-            command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
-            # command = f"docker run --name GEMINI-Container -i {volumes} {docker_image} --project-path /datasets code {options}" # 'code' is the default project name
-            # user_id = os.getenv("UID", os.getuid())  # Get the current user ID
-            # group_id = os.getenv("GID", os.getgid())  # Get the current group ID
-            # command = f"docker run --user {user_id}:{group_id} --name GEMINI-Container -i --rm {volumes} {docker_image} --project-path /datasets code {options}"
+            # Create the command
+            command = f"docker run --name {container_name} -i --rm {volumes} {docker_image} \
+                        --gcp /datasets/code/gcp_list.txt  \
+                        --project-path /datasets code {odm_options}" # 'code' is the default project name
+            
             # Save image_pth and  docker command to recipe yaml file
             data = {
                 'year': args.year,
@@ -330,7 +366,7 @@ def run_odm(args):
                 'image_pth': image_pth,
                 'command': command,
             }
-            recipe_file = os.path.join(pth, 'code', 'recipe.yaml')
+            recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
             with open(recipe_file, 'w') as file:
                 yaml.dump(data, file, sort_keys=False)
 
@@ -341,7 +377,6 @@ def run_odm(args):
             process.wait()
         
         _process_outputs(args)
-        save_ortho_metadata(args)  # Call save_ortho_metadata here
         
         # save png image
         convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))
@@ -351,6 +386,7 @@ def run_odm(args):
         print(f"Error in thread: {e}")
     
 if __name__ == '__main__':
+    # Main function for debugging
     parser = argparse.ArgumentParser(description='Generate an orthomosaic for a set of images')
     parser.add_argument('--date', type=str, help='Date of the data collection')
     parser.add_argument('--location', type=str, help='Location of the data collection')
@@ -367,26 +403,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Check if opendronemap is installed as a snap package
-    if shutil.which('opendronemap') is None:
-        print("Error: opendronemap is not installed. Please install it using 'sudo snap install opendronemap --edge'")
+    if shutil.which('docker') is None:
+        print("Error: docker is not installed. Please install docker")
         sys.exit(1)
     
     # Run ODM
     run_odm(args)
-
-def save_ortho_metadata(args):
-    metadata = {
-        "date": args.date,
-        "location": args.location,
-        "population": args.population,
-        "year": args.year,
-        "experiment": args.experiment,
-        "sensor": args.sensor,
-        "quality": args.reconstruction_quality,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-    
-    metadata_path = os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'ortho_metadata.json')
-    
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f)
