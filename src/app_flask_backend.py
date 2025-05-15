@@ -8,6 +8,7 @@ import glob
 import yaml
 import random
 import string
+import csv
 import shutil
 import traceback
 import argparse
@@ -155,6 +156,30 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+
+@file_app.route('/view_synced_data', methods=['POST'])
+def view_synced_data():
+    data = request.get_json()
+    base_dir = data.get('base_dir')  # Relative path like: IITA_Test/Nigeria/AmigaSample/2025-04-29/rover/RGB
+
+    if not base_dir:
+        return jsonify({'error': 'Missing base_dir'}), 400
+
+    # Construct full path to msgs_synced.csv
+    full_path = os.path.join(data_root_dir, base_dir, 'Metadata', 'msgs_synced.csv')
+    print(f"Full path to msgs_synced.csv: {full_path}")
+
+    if not os.path.exists(full_path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        with open(full_path, newline='') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        return jsonify({'data': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @file_app.route('/restore_images', methods=['POST'])
 def restore_images():
