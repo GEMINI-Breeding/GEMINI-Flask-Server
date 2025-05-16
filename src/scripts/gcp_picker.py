@@ -195,6 +195,7 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
         df_msgs_synced = pd.read_csv(msgs_synced_path)
         image_names_in_df = df_msgs_synced['image_path'].tolist()
     else:
+        df_msgs_synced = pd.DataFrame()
         image_names_in_df = []
 
     selected_images, df_msgs_synced, image_names_in_df = image_selection(data_root_dir,image_folder,

@@ -49,6 +49,24 @@ file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 
+def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
+    exif_data_list = []
+    
+    # Extract EXIF Data Extraction
+    for file_path in file_paths:
+        if data_type.lower() == 'image':
+            if file_path not in existing_paths:
+                msg = get_image_exif(file_path)
+                if msg and msg['image_path'] not in existing_paths:
+                    exif_data_list.append(msg)
+                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
+    
+    if data_type.lower() == 'image' and exif_data_list:
+        if existing_df is not None and not existing_df.empty:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+        else:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
     data = request.json
@@ -463,7 +481,8 @@ def upload_files():
             existing_df = pd.read_csv(msgs_synced_file)
             existing_paths = set(existing_df['image_path'].values)
 
-    exif_data_list = []
+    uploaded_file_paths = [] 
+
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
         if data_type == 'fieldDesign':
@@ -477,23 +496,16 @@ def upload_files():
             print(f"Skipping {filename} because it already exists in {dir_path}")
         else:
             file.save(file_path)
+            uploaded_file_paths.append(file_path)  
 
-        # For image files, extract EXIF data
-        if data_type.lower() == 'image':
-            if file_path not in existing_paths:
-                msg = get_image_exif(file_path)
-                if msg and msg['image_path'] not in existing_paths:
-                    exif_data_list.append(msg)
-                    existing_paths.add(msg['image_path'])  # Add to set to prevent duplicates in current batch
-
-    # Update msgs_synced.csv once with all new EXIF data
-    if data_type.lower() == 'image' and exif_data_list:
-        if existing_df is not None and not existing_df.empty:
-            # Append multiple rows at once
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-        else:
-            # Create a new CSV with headers
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+    
+    if data_type.lower() == 'image' and uploaded_file_paths:
+        thread = threading.Thread(
+            target=process_exif_data_async, 
+            args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
+        )
+        thread.daemon = True  # Stop the main thread
+        thread.start()
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -672,7 +684,7 @@ def refresh_gcp_selcted_images():
                                     request.json['platform'], request.json['sensor'], 'Images')
         selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
-        
+
         # Return the selected images and their corresponding GPS coordinates
         return jsonify({'selected_images': selected_images,
                         'num_total': len(selected_images),
@@ -1345,10 +1357,9 @@ def monitor_log_updates(logs_path, progress_file):
             "Finished odm_postprocess stage", # Finished odm_postprocess stage
             "ODM app finished",             # ODM Processes are done, but some additional steps left
             "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
-            "Generated RGB-Pyramid.tif",
-            "Copied DEM.tif",
             "Generated DEM-Pyramid.tif",
-            # "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+            "Copied DEM.tif",
+            "Generated RGB-Pyramid.tif",        # "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
         ]   
         
         with open(progress_file, 'w') as file:

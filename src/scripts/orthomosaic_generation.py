@@ -138,20 +138,45 @@ def process_outputs(args, debug=False):
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
     
-    additional_files = ['benchmark.txt', 'cameras.json','gcp_list.txt', 'images.json','img_list.txt',
-                        'logs.txt', 'log.json','options', 'recipe.yaml']
+    additional_files = ['benchmark.txt', 'cameras.json', 'images.json','img_list.txt',
+                        'logs.txt', 'log.json', 'options.json', 'recipe.yaml', 'odm_report']
     for file in additional_files:
         file_path = os.path.join(project_path, 'code', file)
-        try:
-            shutil.copy(file_path, os.path.join(output_folder))
-        except PermissionError:
-            os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
+        if os.path.exists(file_path):
+            dest_path = os.path.join(output_folder, os.path.basename(file_path))
+            try:
+                if os.path.isdir(file_path):
+                    # If it's a directory, use copytree
+                    if os.path.exists(dest_path):
+                        shutil.rmtree(dest_path)  # Remove existing directory
+                    shutil.copytree(file_path, dest_path)
+                else:
+                    # If it's a file, use copy
+                    shutil.copy(file_path, os.path.join(output_folder))
+            except (PermissionError, shutil.Error) as e:
+                # Use system command with appropriate flags
+                if os.path.isdir(file_path):
+                    os.system(f'cp -r "{file_path}" "{os.path.join(output_folder)}"')
+                else:
+                    os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
 
     if debug:
         debug_tmp = project_path.replace('temp','temp'+args.year + args. experiment + args.location + args.population + args.date + args.platform + args.sensor)
         if not os.path.exists(debug_tmp):
             os.makedirs(output_folder)
         os.system(f'mv "{project_path}" "{debug_tmp}"')
+
+    if 0:
+        # save png image
+        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB-Pyramid.tif'))
+    else:
+        # Just copy from the ODM result
+        file_path = os.path.join(project_path, 'code', 'opensfm','stats','ortho.png')
+        output_path = os.path.join(output_folder, args.date+'-RGB-Pyramid.png')
+        try:
+            shutil.copy(file_path, output_path)
+        except PermissionError:
+            os.system(f'cp "{file_path}" "{output_path}"')
 
     append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
     return True
@@ -293,7 +318,7 @@ def run_odm(args):
  
     Notes:
     - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
-    
+    --matcher-neighbors 10 
     '''
     
     try:
@@ -319,9 +344,9 @@ def run_odm(args):
             image_list = os.listdir(image_path)
             if len(image_list) > 1000: # TODO: Update this rule
                 print("Running ODM with large dataset...")
-                base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+                base_options += " --feature-quality medium --pc-quality medium"
             else:
-                base_options += "--dem-resolution 0.25 --orthophoto-resolution 0.25"
+                base_options += " --dem-resolution 0.25 --orthophoto-resolution 0.25"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
@@ -378,8 +403,8 @@ def run_odm(args):
         
         process_outputs(args)
         
-        # save png image
-        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))
+      
+
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
