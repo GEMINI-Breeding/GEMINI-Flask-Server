@@ -98,7 +98,7 @@ def _create_directory_structure(args):
                 except PermissionError:
                     os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
 
-def _process_outputs(args, debug=False):
+def process_outputs(args, debug=False):
 
     project_path = args.temp_dir
 
@@ -138,20 +138,45 @@ def _process_outputs(args, debug=False):
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
     
-    additional_files = ['benchmark.txt', 'cameras.json','gcp_list.txt', 'images.json','img_list.txt',
-                        'logs.txt', 'logs.json','options', 'recipe.yaml']
+    additional_files = ['benchmark.txt', 'cameras.json', 'images.json','img_list.txt',
+                        'logs.txt', 'log.json', 'options.json', 'recipe.yaml', 'odm_report']
     for file in additional_files:
         file_path = os.path.join(project_path, 'code', file)
-        try:
-            shutil.copy(file_path, os.path.join(output_folder))
-        except PermissionError:
-            os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
+        if os.path.exists(file_path):
+            dest_path = os.path.join(output_folder, os.path.basename(file_path))
+            try:
+                if os.path.isdir(file_path):
+                    # If it's a directory, use copytree
+                    if os.path.exists(dest_path):
+                        shutil.rmtree(dest_path)  # Remove existing directory
+                    shutil.copytree(file_path, dest_path)
+                else:
+                    # If it's a file, use copy
+                    shutil.copy(file_path, os.path.join(output_folder))
+            except (PermissionError, shutil.Error) as e:
+                # Use system command with appropriate flags
+                if os.path.isdir(file_path):
+                    os.system(f'cp -r "{file_path}" "{os.path.join(output_folder)}"')
+                else:
+                    os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
 
     if debug:
         debug_tmp = project_path.replace('temp','temp'+args.year + args. experiment + args.location + args.population + args.date + args.platform + args.sensor)
         if not os.path.exists(debug_tmp):
             os.makedirs(output_folder)
         os.system(f'mv "{project_path}" "{debug_tmp}"')
+
+    if 0:
+        # save png image
+        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB-Pyramid.tif'))
+    else:
+        # Just copy from the ODM result
+        file_path = os.path.join(project_path, 'code', 'opensfm','stats','ortho.png')
+        output_path = os.path.join(output_folder, args.date+'-RGB-Pyramid.png')
+        try:
+            shutil.copy(file_path, output_path)
+        except PermissionError:
+            os.system(f'cp "{file_path}" "{output_path}"')
 
     append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
     return True
@@ -228,7 +253,7 @@ def reset_odm(args, metadata_file_name=None):
             image_pth = data['image_pth']
             prev_arg = make_odm_args_from_metadata(data)
             if odm_args_checker(prev_arg, args):
-                _process_outputs(args)
+                process_outputs(args)
                 print("Already processed. Copying to Processed folder.")
                 return
             else:
@@ -283,17 +308,22 @@ def run_odm(args):
 
     Possible considerations & Options:
 
-    --fast-orthophoto
-    --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
-    --dsm --orthophoto-resolution 0.01
-    --feature-type sift # But its slower?
+    --fast-orthophoto       # It will skip 3D textured model generation
+    --sfm-algorithm planar  # Other possible matching algorithm but it's unstable
+    --feature-type sift     # Enables GPU accelerated feature extraction. But it's sometimes slower than CPU :(
+
+    --matcher-neighbors 10  # It will reduce the matching process time about 30%
     --dem-resolution 0.3 --orthophoto-resolution 0.3 # This can be added to the custom option. Make resoltuion to 0.3cm / pix
-    if set set this to lower than 0.24, (e.g. 0.03), we will get this error
-    [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)
- 
+    
+    --cog                   # Create Cloud-Optimized GeoTIFFs instead of normal GeoTIFFs. Default: False.
+    --build-overviews
+    --tiles
+    --copy-to <path>        # Copy output results to this folder after processing.
+
     Notes:
     - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
-    
+      If set set the resolution to lower than 0.24, (e.g. 0.01,  --dsm --orthophoto-resolution 0.01), ODM produce this error
+      [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)     
     '''
     
     try:
@@ -309,19 +339,19 @@ def run_odm(args):
         
         
         print('Project Path: ', project_path)
-        image_pth = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
-        print('Image Path: ', image_pth)
+        image_path = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        print('Image Path: ', image_path)
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
             base_options = "--dsm"
 
-            image_list = os.listdir(image_pth)
+            image_list = os.listdir(image_path)
             if len(image_list) > 1000: # TODO: Update this rule
                 print("Running ODM with large dataset...")
-                base_options += " --feature-quality low --matcher-neighbors 10 --pc-quality low"
+                base_options += " --feature-quality medium --pc-quality medium"
             else:
-                base_options += "--dem-resolution 0.25 --orthophoto-resolution 0.25"
+                base_options += " --dem-resolution 0.25 --orthophoto-resolution 0.25"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
@@ -337,7 +367,7 @@ def run_odm(args):
                 pass
 
             # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {project_path}:/datasets -v {image_pth}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
+            volumes = f"-v {project_path}:/datasets -v {image_path}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
             
             # Create a container name with the project name
             container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
@@ -363,7 +393,7 @@ def run_odm(args):
                 'sensor': args.sensor,
                 'reconstruction_quality': args.reconstruction_quality,
                 'custom_options': args.custom_options,
-                'image_pth': image_pth,
+                'image_pth': image_path,
                 'command': command,
             }
             recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
@@ -376,10 +406,10 @@ def run_odm(args):
             process = subprocess.Popen(command,stdout=f, stderr=subprocess.STDOUT)
             process.wait()
         
-        _process_outputs(args)
+        process_outputs(args)
         
-        # save png image
-        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB.tif'))
+      
+
     
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
