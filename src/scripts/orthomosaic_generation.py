@@ -308,17 +308,22 @@ def run_odm(args):
 
     Possible considerations & Options:
 
-    --fast-orthophoto
-    --dsm --orthophoto-resolution 2.0 --sfm-algorithm planar
-    --dsm --orthophoto-resolution 0.01
-    --feature-type sift # But its slower?
+    --fast-orthophoto       # It will skip 3D textured model generation
+    --sfm-algorithm planar  # Other possible matching algorithm but it's unstable
+    --feature-type sift     # Enables GPU accelerated feature extraction. But it's sometimes slower than CPU :(
+
+    --matcher-neighbors 10  # It will reduce the matching process time about 30%
     --dem-resolution 0.3 --orthophoto-resolution 0.3 # This can be added to the custom option. Make resoltuion to 0.3cm / pix
-    if set set this to lower than 0.24, (e.g. 0.03), we will get this error
-    [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)
- 
+    
+    --cog                   # Create Cloud-Optimized GeoTIFFs instead of normal GeoTIFFs. Default: False.
+    --build-overviews
+    --tiles
+    --copy-to <path>        # Copy output results to this folder after processing.
+
     Notes:
     - GEMINI DJI P4 10m GSD is usually 0.27cm/pixel
-    --matcher-neighbors 10 
+      If set set the resolution to lower than 0.24, (e.g. 0.01,  --dsm --orthophoto-resolution 0.01), ODM produce this error
+      [WARNING] Maximum resolution set to 1.0 * (GSD - 10.0%) (0.24 cm / pixel, requested resolution was 0.03 cm / pixel)     
     '''
     
     try:

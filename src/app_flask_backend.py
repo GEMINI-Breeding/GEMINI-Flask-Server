@@ -1359,7 +1359,7 @@ def monitor_log_updates(logs_path, progress_file):
             "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
             "Generated DEM-Pyramid.tif",
             "Copied DEM.tif",
-            "Generated RGB-Pyramid.tif",        # "Orthomosaic Generation Completed", # scripts/orthomosaic_generation.py L163
+            "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
         ]   
         
         with open(progress_file, 'w') as file:
