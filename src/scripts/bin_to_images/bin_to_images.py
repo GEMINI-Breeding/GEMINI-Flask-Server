@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from scipy.spatial import KDTree
 from scipy.interpolate import interp1d
 from google.protobuf import json_format
@@ -41,7 +41,7 @@ TYPES = IMAGE_TYPES + GPS_TYPES + CALIBRATION
 GPS_PVT = ['stamp','gps_time','longitude','latitude','altitude','heading_motion',
             'heading_accuracy','speed_accuracy','horizontal_accuracy','vertical_accuracy',
             'p_dop','height']
-GPS_REL = ['stamp','gps_time','relative_pose_north','relative_pose_east','relative_pose_down',
+GPS_REL = ['stamp','relative_pose_north','relative_pose_east','relative_pose_down',
             'relative_pose_heading','relative_pose_length','rel_pos_valid','rel_heading_valid',
             'accuracy_north','accuracy_east','accuracy_down','accuracy_length','accuracy_heading']
 
@@ -56,32 +56,41 @@ def interpolate_gps(
     gps_dfs_list = []
     save_path = save_path / 'Metadata'
     
-    # create gps interpolation function for each gps df
     for key, gps in gps_dfs.items():
-        gps_interp_fn = interp1d(
-            x = gps[skip_pointer:, 0],
-            y = gps[skip_pointer:, 1:],
-            axis = 0,
-            kind='linear',
-            fill_value='extrapolate'
+        fn = interp1d(
+            x=gps[skip_pointer:, 0],
+            y=gps[skip_pointer:, 1:],    # now for RELPOSNED this y-array no longer has gps_time
+            axis=0, kind='linear', fill_value='extrapolate'
         )
+        interpolated = np.array([fn(t) for t in image_dfs[0][skip_pointer:, 0]])
+        merged = np.hstack([
+            image_dfs[0][skip_pointer:, 0].reshape(-1, 1),
+            interpolated
+        ])
+        new_cols = ['image_timestamp'] + columns[key][1:]
+
+        # save & update
+        gps_dfs_list.append(merged)
+        gps_dfs_new = pd.DataFrame(merged, columns=new_cols)
+        columns[key] = new_cols
         
-        # interpolate gps data at first column of image array
-        interp_cols = np.array([gps_interp_fn(value) for value in image_dfs[0][skip_pointer:, 0]])
-        
-        # add interpolated gps data to image array
-        gps_df = np.concatenate([image_dfs[0][skip_pointer:, 0].reshape(-1, 1), interp_cols], axis=1)
-        gps_dfs_list.append(gps_df)
-        
-        # update gps csv file
-        gps_dfs_new = pd.DataFrame(gps_df, columns=columns[key])
+        # combine column 'image_timestamp' with 'stamp' (make sure no duplicates are present and sort rows by 'stamp')
+        gps_dfs_new['stamp'] = gps_dfs_new['image_timestamp']
+        gps_dfs_new = gps_dfs_new.drop(columns=['image_timestamp'])
+        gps_dfs_new = gps_dfs_new.drop_duplicates(subset=['stamp'])
+        gps_dfs_new = gps_dfs_new.sort_values(by=['stamp'])
+        gps_dfs_new.reset_index(drop=True, inplace=True)
+ 
+        old = (save_path / f"gps_{key}.csv")
         if key == 'pvt':
-            # check if existing gps data exists
-            gps_df_old = pd.read_csv(f"{save_path}/gps_{key}.csv") if (save_path / f"gps_{key}.csv").exists() else pd.DataFrame(columns=GPS_PVT)
-        elif key == 'relposned':
-            gps_df_old = pd.read_csv(f"{save_path}/gps_{key}.csv") if (save_path / f"gps_{key}.csv").exists() else pd.DataFrame(columns=GPS_REL)
-        gps_df_combined = pd.concat([gps_df_old, gps_dfs_new], ignore_index=True)
-        gps_df_combined.to_csv(f"{save_path}/gps_{key}.csv", index=False)
+            gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_PVT)
+        else:
+            gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_REL)
+
+        combined = pd.concat([gps_df_old.reset_index(drop=True),
+                              gps_dfs_new.reset_index(drop=True)],
+                             ignore_index=True)
+        combined.to_csv(old, index=False)
             
     return gps_dfs_list
         
@@ -145,7 +154,7 @@ def postprocessing(
     
     # convert timestamps into int64
     msgs_df[images_cols] = msgs_df[images_cols].astype('int64')
-    
+
     # add columns for file names
     images_cols_new = []
     for col in images_cols:
@@ -155,17 +164,17 @@ def postprocessing(
         else:
             msgs_df[new_col] = col + '-' + msgs_df[col].astype(str) + '.jpg'
         images_cols_new += [col, new_col]
-                
+
     # convert heading motion to direction
-    msgs_df['direction'] = msgs_df['heading_motion'].apply(heading_to_direction)
-    
-    # rename lat/lon columns
-    msgs_df.rename(columns={'longitude': 'lon', 'latitude': 'lat'}, inplace=True)
-    
-    # filter dataframe
-    cols_to_keep = images_cols_new + ['direction'] + ['lat'] + ['lon']
-    msgs_df = msgs_df[cols_to_keep]
-    
+    if 'heading_motion' in msgs_df.columns:
+        msgs_df['direction'] = msgs_df['heading_motion'].apply(heading_to_direction)
+
+    # rename lat/lon columns if they exist
+    if 'longitude' in msgs_df.columns:
+        msgs_df.rename(columns={'longitude': 'lon'}, inplace=True)
+    if 'latitude' in msgs_df.columns:
+        msgs_df.rename(columns={'latitude': 'lat'}, inplace=True)
+
     return msgs_df
 
 # Zhenghao Fei, PAIBL 2020
@@ -225,7 +234,7 @@ def extract_images(
     events_dict: Dict[str, List[EventLogPosition]],
     calibrations: Dict[str, dict],
     output_path: Path,
-    current_ts: int
+    current_ts: int,
 ) -> bool:
     """Extracts images as jpg and stores timestamps into a csv file where they are synced based
     on their sequence number.
@@ -295,13 +304,14 @@ def extract_images(
             if "disparity" in topic_name:
                 img = image_decoder.decode(sample.image_data)
                 
-                # check if calibrations exist for this camera
-                if not camera_name in calibrations: # ! this should not happen (place holder for now)
-                    continue
-                
-                points_xyz = process_disparity(img, calibrations[camera_name])
-                img_name: str = f"disparity-{updated_ts}.npy"
-                np.save(str(camera_path / img_name), points_xyz)
+                if calibrations is None or not camera_name in calibrations:
+                    # Just save the raw disparity image if no calibration is available
+                    img_name: str = f"disparity-{updated_ts}.npy"
+                    np.save(str(camera_path / img_name), img)
+                else:
+                    points_xyz = process_disparity(img, calibrations[camera_name])
+                    img_name: str = f"disparity-{updated_ts}.npy"
+                    np.save(str(camera_path / img_name), points_xyz)
             else:
                 img_name: str = f"rgb-{updated_ts}.jpg"
                 cv2.imwrite(str(camera_path / img_name), img)
@@ -309,25 +319,44 @@ def extract_images(
     # split dataframe based on columns
     dfs = []
     ts_cols_list = []
+    images_report = {}
     unique_camera_ids = {s.split('/')[1] for s in image_topics if s.startswith('/oak')}
     for i in unique_camera_ids:
         i = CAMERA_POSITIONS[i]
         ts_cols = [f'/{i}/rgb',f'/{i}/disparity']
-                                # f'/{i}/left', f'/{i}/right']
-        ts_df_split = ts_df[ts_cols]
-        ts_df_split = ts_df_split.dropna(subset=[f'/{i}/rgb', f'/{i}/disparity'])
         
-        # check if existing ts_df_split exists and concatenate
+        # check for missing topics
+        existing_cols = [col for col in ts_cols if col in ts_df.columns]
+        missing_cols = [col for col in ts_cols if col not in ts_df.columns]
+        
+        # report existing and missing columns
+        images_report[i] = {
+            'existing': existing_cols,
+            'missing': missing_cols
+        }
+        
+        if missing_cols:
+            print(f"Warning: Skipping missing columns for camera '{i}': {missing_cols}")
+
+        if not existing_cols:
+            print(f"Warning: No existing timestamp columns found for camera '{i}'. Skipping this camera.")
+            continue  # skip this camera completely
+
+        
+        ts_df_split = ts_df[existing_cols]
+        ts_df_split = ts_df_split.dropna(subset=existing_cols)
+        
+         # Check if existing timestamps CSV exists
         if (save_path / f"{i}_timestamps.csv").exists():
             ts_df_existing = pd.read_csv(f"{save_path}/{i}_timestamps.csv")
             ts_df_split = pd.concat([ts_df_existing, ts_df_split], ignore_index=True)
 
-        # output dataframe as csv
-        ts_df_split.to_csv(f"{save_path}/{i}_timestamps.csv", index=False) # *concantenate existing ts_df to this one
+        # Output dataframe as CSV
+        ts_df_split.to_csv(f"{save_path}/{i}_timestamps.csv", index=False)
         dfs.append(ts_df_split.to_numpy(dtype='float64'))
-        ts_cols_list += ts_cols
+        ts_cols_list += existing_cols
         
-    return dfs, ts_cols_list
+    return dfs, ts_cols_list, images_report
 
 def extract_gps(
     gps_topics: List[str],
@@ -338,16 +367,17 @@ def extract_gps(
     """Extracts camera extrinsics/intrinsics from calibration event.
 
     Args:
-
         gps_topics (list[str]): Topics that contain gps information.
         events_dict (dict[str, list[EventLogPosition]]): All events stored in the binary file containing log info.
         output_path (Path): Path to save images and timestamps.
+        current_ts (int): Base timestamp in microseconds.
     """ 
 
     print('--- gps extraction ---')
     
     df = {}
     gps_cols_list = {}
+    gps_metric_summary = {}
     
     # initialize save path
     save_path = output_path / 'Metadata'
@@ -357,10 +387,8 @@ def extract_gps(
     # loop through each topic
     for topic_name in gps_topics:
 
-        # create dataframe for this topic # *retrieve existing gps dataframe if it exists
         gps_name = topic_name.split('/')[2]
         if gps_name == 'pvt':
-            # check if existing gps data exists
             gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_PVT)
         elif gps_name == 'relposned':
             gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_REL)
@@ -368,14 +396,9 @@ def extract_gps(
             print('Unknown topic name.')
             return False
 
-        # initialize gps events and event log
         gps_events: list[EventLogPosition] = events_dict[topic_name]
-        event_log: EventLogPosition
 
-        # check event log to extract information
         for event_log in tqdm(gps_events):
-            
-            # read message
             if gps_name == 'pvt':
                 sample: gps_pb2.GpsFrame = event_log.read_message()
             elif gps_name == 'relposned':
@@ -384,11 +407,26 @@ def extract_gps(
                 print('Unknown protocol message.')
                 return False
             
-            # add information into dataframe
-            updated_ts = int(current_ts + (sample.stamp.stamp*1e6)) # update timestamp
+            # Updated timestamp based on current_ts and message timestamp delta
+            updated_ts = int(current_ts + (sample.stamp.stamp * 1e6))
+
+            # Create row for GPS data
             if gps_name == 'pvt':
+                # --- Convert utc_stamp to epoch time (in microseconds) ---
+                utc = sample.utc_stamp
+
+                # Handle potentially negative nano field
+                nanos = max(utc.nano, 0)
+                dt = datetime(
+                    utc.year, utc.month, utc.day,
+                    utc.hour, utc.min, utc.sec,
+                    nanos // 1000,  # convert nanoseconds to microseconds
+                    tzinfo=timezone.utc
+                )
+                gps_epoch_us = int(dt.timestamp() * 1e6)
+                
                 new_row = {
-                    'stamp': [updated_ts], 'gps_time': [sample.gps_time.stamp],
+                    'stamp': [updated_ts], 'gps_time': [gps_epoch_us],
                     'longitude': [sample.longitude], 'latitude': [sample.latitude],
                     'altitude': [sample.altitude], 'heading_motion': [sample.heading_motion], 
                     'heading_accuracy': [sample.heading_accuracy], 'speed_accuracy': [sample.speed_accuracy], 
@@ -397,7 +435,7 @@ def extract_gps(
                 }
             elif gps_name == 'relposned':
                 new_row = {
-                    'stamp': [updated_ts], 'gps_time': [sample.gps_time.stamp],
+                    'stamp': [updated_ts],
                     'relative_pose_north': [sample.relative_pose_north], 'relative_pose_east': [sample.relative_pose_east],
                     'relative_pose_down': [sample.relative_pose_down], 'relative_pose_heading': [sample.relative_pose_heading],
                     'relative_pose_length': [sample.relative_pose_length], 'rel_pos_valid': [sample.rel_pos_valid],
@@ -405,20 +443,36 @@ def extract_gps(
                     'accuracy_east': [sample.accuracy_east], 'accuracy_down': [sample.accuracy_down],
                     'accuracy_length': [sample.accuracy_length], 'accuracy_heading': [sample.accuracy_heading]
                 }
+
             new_df = pd.DataFrame(new_row)
             new_df.reset_index(inplace=True, drop=True)
             gps_df.reset_index(inplace=True, drop=True)
-            gps_df = pd.concat([gps_df, new_df], ignore_index=True) # *concatenate new dataframes to existing dataframe
+            gps_df = pd.concat([gps_df, new_df], ignore_index=True)
 
-        # output dataframe as csv (or rewrite existing one)
         gps_df.replace({'True': 1, 'False': 0}, inplace=True)
         gps_df = gps_df.apply(pd.to_numeric, errors='coerce')
         gps_df.to_csv(f"{save_path}/gps_{gps_name}.csv", index=False)
-        # df.append(gps_df.to_numpy(dtype='float64'))
         df[gps_name] = gps_df.to_numpy(dtype='float64')
         gps_cols_list[gps_name] = gps_df.columns.tolist()
+        
+        # record gps metric summary (average values)
+        if gps_name == 'pvt':
+            gps_metric_summary['pvt'] = {
+                'avg_heading_accuracy': gps_df['heading_accuracy'].mean(),
+                'avg_speed_accuracy': gps_df['speed_accuracy'].mean(),
+                'avg_horizontal_accuracy': gps_df['horizontal_accuracy'].mean(),
+                'avg_vertical_accuracy': gps_df['vertical_accuracy'].mean(),
+            }
+        elif gps_name == 'relposned':
+            gps_metric_summary['relposned'] = {
+                'avg_accuracy_north': gps_df['accuracy_north'].mean(),
+                'avg_accuracy_east': gps_df['accuracy_east'].mean(),
+                'avg_accuracy_down': gps_df['accuracy_down'].mean(),
+                'avg_accuracy_length': gps_df['accuracy_length'].mean(),
+                'avg_accuracy_heading': gps_df['accuracy_heading'].mean()
+            }
 
-    return df, gps_cols_list
+    return df, gps_cols_list, gps_metric_summary
 
 def extract_calibrations(
     calib_topics: List[str],
@@ -476,10 +530,7 @@ def extract_calibrations(
 
     return calibrations
 
-def extract_binary(
-    file_names: Path,
-    output_path: Path
-) -> None:
+def extract_binary(file_names, output_path) -> None:
     """Read an events file and extracts relevant information from it.
 
     Args:
@@ -488,6 +539,9 @@ def extract_binary(
         output_path (Path): The path to the folder where the converted data will be written.
         disparity_scale (int): Scale for amplifying disparity color mapping. Default: 1.
     """
+    # print out file names
+    print(f"Extracting {len(file_names)} files.")
+    
     # make output directory
     base = 'RGB'
     output_path = output_path / base
@@ -499,9 +553,20 @@ def extract_binary(
     skip_pointer = 0
     with open(f"{output_path}/progress.txt", "w") as f:
         f.write("0")
+        
+    # create a report file
+    report_path = output_path / 'report.txt'
+    with open(report_path, "w") as f:
+        f.write("Report of the conversion process:\n")
+        f.write(f"Number of files: {len(file_names)}\n")
+        f.write(f"Output path: {output_path}\n")
     
     # extract each bin file
     for file_name in tqdm(file_names):
+        
+        # write name of binary file to the report
+        with open(report_path, "a") as f:
+            f.write(f"\n--- File: {file_name} ---\n")
         
         # create the file reader
         reader = EventsFileReader(file_name)
@@ -510,7 +575,7 @@ def extract_binary(
             raise RuntimeError(f"Failed to open events file: {file_name}")
 
         # get the index of the events file
-        events_index: list[EventLogPosition] = reader.get_index()
+        events_index = reader.get_index()
 
         # structure the index as a dictionary of lists of events
         events_dict: dict[str, list[EventLogPosition]] = build_events_dict(events_index)
@@ -524,29 +589,67 @@ def extract_binary(
         # get datetime of recording 
         if len(os.path.basename(file_name).split('_')) < 7:
             raise RuntimeError(f"'File name is not compatible with this script.")
-        date_contents = os.path.basename(file_name).split('_')[:-1]
+        date_contents = os.path.basename(file_name).split('_')[:7]
         date_string = '_'.join(date_contents)
         date_format = '%Y_%m_%d_%H_%M_%S_%f'
-        date_object = datetime.strptime(date_string, date_format)
-        current_ts = int(date_object.timestamp() * 1e6) # in microseconds # *: this changes for each .bin file
+        date_object = datetime.strptime(date_string, date_format).replace(tzinfo=timezone.utc)
+        current_ts  = int(date_object.timestamp() * 1e6)
         
         # extract calibration topics
         calib_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in CALIBRATION)]
         calibrations: dict[str, dict] = extract_calibrations(calib_topics, events_dict, output_path)
         if len(calibrations) == 0:
-            raise RuntimeError(f"Failed to extract calibration event file")
+            print("Warning: No calibration files found. Skipping point cloud generation from disparity images.")
+            calibrations = None
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- Calibration ---\n")
+
+            # for each key in calibration, log into the report file
+            for key, value in calibrations.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      Camera: {key}\n")
 
         # extract gps topics
         gps_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in GPS_TYPES)]
-        gps_dfs, gps_cols = extract_gps(gps_topics, events_dict, output_path, current_ts)
+        gps_dfs, gps_cols, gps_metric_summary = extract_gps(gps_topics, events_dict, output_path, current_ts)
         if len(gps_dfs) == 0:
             raise RuntimeError(f"Failed to extract gps event file")
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- GPS ---\n")
+                
+            # for each key in gps, log into the report file
+            for key, value in gps_metric_summary.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      GPS: {key}\n")
+                    for metric, val in value.items():
+                        f.write(f"        {metric}: {val}\n")
+
+            # for each key in gps, log into the report file
+            for key, value in gps_dfs.items():
+                with open(report_path, "a") as f:
+                    f.write(f"      GPS: {key}\n")
 
         # extract image topics
         image_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in IMAGE_TYPES)]
-        image_dfs, images_cols = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
+        image_dfs, images_cols, images_report = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
         if len(image_dfs) == 0:
             raise RuntimeError(f"Failed to extract image event file")
+        else:
+            # write title to the report file with indent
+            with open(report_path, "a") as f:
+                f.write(f"\n    --- Images ---\n")
+                
+            # for each key in image, log into the report file
+            with open(report_path, "a") as f:
+                f.write(f"      Images: {image_topics}\n")
+                for key, value in images_report.items():
+                    f.write(f"        Camera: {key}\n")
+                    f.write(f"          Existing topics: {value['existing']}\n")
+                    f.write(f"          Missing topics: {value['missing']}\n")
         
         # *: Interpolate GPS data to query at camera timestamps
         gps_dfs = interpolate_gps(gps_dfs = gps_dfs, image_dfs = image_dfs, skip_pointer = skip_pointer, save_path = output_path, columns = gps_cols)
@@ -558,6 +661,7 @@ def extract_binary(
             f.write(str(counter))
     
     # sync messages # *: only do this once all the msgs synceds are read
+    print(f'image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs)}')
     msgs = image_dfs + gps_dfs
     msgs_synced: list[np.array] = sync_msgs(msgs)
     msgs_synced_conc = np.concatenate(msgs_synced, axis=1)
@@ -573,3 +677,26 @@ def extract_binary(
     if not save_path.exists():
         save_path.mkdir(parents=True, exist_ok=True)
     msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+    
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--file_names', type=str, nargs='+', required=True,
+                    help='List of paths to the event files.')
+    ap.add_argument('--output_path', type=str, required=True,
+                    help='Path to the folder where the converted data will be written.')
+
+    args = ap.parse_args()
+    file_names = [Path(f) for f in args.file_names]
+    output_path = Path(args.output_path)
+
+    # Check that all file paths exist
+    for f in file_names:
+        if not f.exists():
+            raise RuntimeError(f"File {f} does not exist.")
+    
+    # Make output directory
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    # Extract binary files
+    extract_binary(file_names, output_path)

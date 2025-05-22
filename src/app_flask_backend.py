@@ -9,11 +9,12 @@ import yaml
 import random
 import string
 import shutil
+import traceback
 import argparse
 import select
 import multiprocessing
 import requests
-from multiprocessing import active_children
+from multiprocessing import active_children, Process
 from pathlib import Path
 
 # Third-party library imports
@@ -48,6 +49,26 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 file_app = Flask(__name__)
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
+extraction_processes = {}
+extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
+
+def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
+    exif_data_list = []
+    
+    # Extract EXIF Data Extraction
+    for file_path in file_paths:
+        if data_type.lower() == 'image':
+            if file_path not in existing_paths:
+                msg = get_image_exif(file_path)
+                if msg and msg['image_path'] not in existing_paths:
+                    exif_data_list.append(msg)
+                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
+    
+    if data_type.lower() == 'image' and exif_data_list:
+        if existing_df is not None and not existing_df.empty:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+        else:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -523,32 +544,94 @@ def check_files():
 
     return jsonify(new_files), 200
 
+@file_app.route("/get_binary_report", methods=["POST"])
+def get_binary_report():
+    data = request.json
+    # Construct file path based on metadata
+    report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
+    
+    try:
+        with open(report_path, "r") as f:
+            content = f.read()
+        return content, 200
+    except Exception as e:
+        return f"Error loading report: {str(e)}", 500
+
+@file_app.route('/cancel_extraction', methods=['POST'])
+def cancel_extraction():
+    data = request.json
+    dir_path = data.get('dirPath')
+    p = extraction_processes.pop(dir_path, None)
+    if not p:
+        return jsonify({'status': 'no active extraction for this path'}), 404
+
+    p.terminate()  # force-kill the worker
+    p.join()
+    return jsonify({'status': 'cancelled'}), 200
+
+def _cleanup_files(file_paths):
+    global extraction_status
+    for p in file_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+def _extraction_worker(file_paths, output_path):
+    global extraction_status
+
+    try:
+        extraction_status = "in_progress"
+        extract_binary(file_paths, output_path)
+        
+        # cleanup files
+        _cleanup_files(file_paths)
+        extraction_status = "done"
+    except Exception as e:
+        print(f"[ERROR] Extraction failed: {e}")
+        # print full traceback
+        traceback.print_exc()
+        extraction_status = "failed"
+
+@file_app.route('/get_binary_status', methods=['GET'])
+def get_binary_status():
+    print(f"Extraction status: {extraction_status}")
+    return jsonify({'status': extraction_status}), 200
 
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
     data = request.json
-    # files = secure_filename(data['files'])
-    files = data['files']  # Assuming this is a list of filenames
-    files = [secure_filename(file) for file in files]  # Secure each filename individually
-    dir_path = data['dirPath']
+    files = [secure_filename(f) for f in data['files']]
+    dir_path = data['localDirPath']
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
+    output_path = Path(UPLOAD_BASE_DIR) / dir_path
     
-    # parameters
-    # file_names = os.path.join(UPLOAD_BASE_DIR, dir_path, file)
-    file_names = [Path(os.path.join(UPLOAD_BASE_DIR, dir_path, file)) for file in files]
-    output_path = Path(os.path.join(UPLOAD_BASE_DIR, dir_path))
-    
-    # run extraction
-    print("Extracting binary file...")
-    extract_binary(file_names, output_path)
-    
-    # delete the binary file
-    for file_name in file_names:
-        os.remove(file_name)
-    return jsonify({'status': 'success'}), 200
+    def extract_timestamp(filename):
+        match = re.match(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d+)", filename)
+        return match.group(1) if match else filename  # fallback to filename if no match
+
+    # Sort files by timestamp before constructing paths
+    files_sorted = sorted(files, key=extract_timestamp)
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files_sorted]
+
+    print(f"Extracting binary files: {file_paths}")
+
+    # Start new background process
+    global extraction_status
+    # if extraction_status == "in_progress":
+    #     print("Extraction already in progress")
+    #     return jsonify({'status': 'already running'}), 429
+
+    extraction_status = "in_progress"
+    p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)
+    p.start()
+    extraction_processes[dir_path] = p
+
+    return jsonify({'status': 'started'}), 200
 
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
-    dir_path = request.json['dirPath']
+    dir_path = request.json['localDirPath']
     dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     
     try:
@@ -559,7 +642,7 @@ def get_binary_progress():
                 # print(f'progress.txt found in {progress_file_path}')
                 with open(progress_file_path, 'r') as file:
                     progress = int(file.read().strip())
-                print(f'Binary extraction progress: {progress}%')
+                print(f'Binary extraction progress: {progress}')
                 return jsonify({'progress': progress}), 200
         
         # If no progress.txt is found
@@ -602,7 +685,7 @@ def upload_chunk():
 def check_uploaded_chunks():
     data = request.json
     file_identifier = data['fileIdentifier']
-    dir_path = data['dirPath']
+    dir_path = data['localDirPath']
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     
@@ -611,13 +694,43 @@ def check_uploaded_chunks():
 
     return jsonify({'uploadedChunksCount': uploaded_chunks_count}), 200
 
+@file_app.route('/clear_upload_dir', methods=['POST'])
+def clear_upload_dir():
+    # 1. Grab the user-supplied relative path
+    dir_path = request.json.get('dirPath', '').strip()
+    if not dir_path:
+        return jsonify({'message': 'No directory specified'}), 400
+    print(f"Clearing upload directory: {dir_path}")
+
+    # 2. Resolve base and target
+    base = Path(UPLOAD_BASE_DIR).resolve()
+    target = (base / dir_path).resolve()
+
+    # 3. Safety checks
+    #  - must be a subdirectory of base
+    #  - must not be equal to base itself
+    if not str(target).startswith(str(base) + os.sep):
+        return jsonify({'message': 'Invalid path'}), 400
+    if target == base:
+        return jsonify({'message': 'Refusing to delete root directory'}), 400
+
+    # 4. Delete
+    if target.exists():
+        try:
+            shutil.rmtree(target)
+            return jsonify({'message': f'{dir_path} cleared successfully'}), 200
+        except Exception as e:
+            print(f"Failed to delete {target}: {e}")
+            return jsonify({'message': f'Failed to clear dir: {e}'}), 500
+    else:
+        return jsonify({'message': 'Directory not found'}), 404
 
 @file_app.route('/clear_upload_cache', methods=['POST'])
 def clear_upload_cache():
     
     try:
         print('Clearing cache...')
-        dir_path = request.json['dirPath']
+        dir_path = request.json['localDirPath']
         cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
         
         # loop through each file in cache directory and remove it
@@ -627,7 +740,7 @@ def clear_upload_cache():
             
         # remove the cache directory
         os.rmdir(cache_dir_path)
-        time.sleep(60)  # Wait for 60 seconds
+        # time.sleep(60)  # Wait for 60 seconds
         return jsonify({'message': 'Cache cleared successfully'}), 200
     except Exception as e:
         print(f'Error clearing cache: {str(e)}')
