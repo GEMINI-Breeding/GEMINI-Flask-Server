@@ -56,7 +56,7 @@ if [ -z "$1" ]; then
 else
     data_root_dir=$1
 fi
-echo "data_root_dir: $data_root_dir"
+# echo "data_root_dir: $data_root_dir"
 
 # Read the port from the arguments
 flask_port="${2:-5000}"
