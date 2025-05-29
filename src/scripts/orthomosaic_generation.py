@@ -366,23 +366,63 @@ def run_odm(args):
                 #options += ' --radiometric-calibration camera'
                 pass
 
-            # It will mount pth to /datasets and image_pth to /datasets/code/images
-            volumes = f"-v {project_path}:/datasets -v {image_path}:/datasets/code/images -v /etc/timezone:/etc/timezone:ro -v /etc/localtime:/etc/localtime:ro"
-            
-            # Create a container name with the project name
-            container_name = f"GEMINI-Container-{args.location}-{args.population}-{args.date}-{args.sensor}"
-
-            if check_nvidia_smi():
-                docker_image = "--gpus all opendronemap/odm:gpu"
+            # Validate custom options to prevent command injection
+            if args.custom_options and isinstance(args.custom_options, list):
+                # Whitelist allowed ODM parameters
+                allowed_params = [
+                    '--dem-resolution', '--orthophoto-resolution', '--mesh-size',
+                    '--min-num-features', '--feature-quality', '--pc-quality',
+                    '--cog', '--build-overviews', '--tiles', '--use-3dmesh',
+                    '--fast-orthophoto', '--pc-classify', '--pc-filter',
+                    '--matcher-neighbors', '--feature-type'
+                ]
+                sanitized_options = []
+                for opt in args.custom_options:
+                    # Check if option starts with allowed parameter or is a value for previous parameter
+                    param = opt.split('=')[0] if '=' in opt else opt
+                    if param.startswith('--') and param not in allowed_params:
+                        print(f"Warning: Ignoring disallowed parameter: {param}")
+                    else:
+                        sanitized_options.append(opt)
+                
+                odm_options = f"{base_options} {' '.join(sanitized_options)}"
+            elif args.reconstruction_quality == 'Custom':
+                # If options not in list format, use default only
+                odm_options = base_options
+                print('Warning: Custom options not in expected format, using default options only')
             else:
-                docker_image = "opendronemap/odm"
+                odm_options = base_options
+        
+            # Create a container name with safe characters only
+            container_name = f"GEMINI-Container-{args.location.replace(' ', '-')}-{args.population.replace(' ', '-')}-{args.date}-{args.sensor.replace(' ', '-')}"
 
-            # Create the command
-            command = f"docker run --name {container_name} -i --rm {volumes} {docker_image} \
-                        --gcp /datasets/code/gcp_list.txt  \
-                        --project-path /datasets code {odm_options}" # 'code' is the default project name
+            # Create the command with security options and proper handling of paths with spaces
+            docker_command = [
+                'docker', 'run',
+                '--name', container_name,
+                '-i', '--rm',
+                '--security-opt=no-new-privileges',
+                '-v', f'{project_path}:/datasets:rw', 
+                '-v', f'{image_path}:/datasets/code/images:ro', # Limit volume mounts and 
+                '-v', '/etc/timezone:/etc/timezone:ro',         # make read-only where possible
+                '-v', '/etc/localtime:/etc/localtime:ro'
+            ]
             
-            # Save image_pth and  docker command to recipe yaml file
+            # Add GPU options if available
+            if check_nvidia_smi():
+                docker_command.extend(['--gpus', 'all'])
+                docker_command.append('opendronemap/odm:gpu')
+            else:
+                docker_command.append('opendronemap/odm')
+            
+            # Add the remaining arguments
+            docker_command.extend(['--project-path', '/datasets', 'code'])
+            
+            # Add ODM options
+            docker_command.extend(odm_options.split())
+
+
+            # Save metadata to recipe yaml file
             data = {
                 'year': args.year,
                 'experiment': args.experiment,
@@ -392,18 +432,19 @@ def run_odm(args):
                 'platform': args.platform,
                 'sensor': args.sensor,
                 'reconstruction_quality': args.reconstruction_quality,
-                'custom_options': args.custom_options,
+                'custom_options': args.custom_options if isinstance(args.custom_options, list) else [],
                 'image_pth': image_path,
-                'command': command,
+                'command': ' '.join(docker_command),  # Store as string for logging
+                'data_root_dir': args.data_root_dir,
+                'temp_dir': args.temp_dir
             }
+            
             recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
             with open(recipe_file, 'w') as file:
                 yaml.dump(data, file, sort_keys=False)
 
-            # Parse this with space to list
-            command = command.split()
-            # Run the command
-            process = subprocess.Popen(command,stdout=f, stderr=subprocess.STDOUT)
+            # Run the command with subprocess list format
+            process = subprocess.Popen(docker_command, stdout=f, stderr=subprocess.STDOUT)
             process.wait()
         
         process_outputs(args)
