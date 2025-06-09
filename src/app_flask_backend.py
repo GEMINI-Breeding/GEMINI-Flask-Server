@@ -8,6 +8,7 @@ import glob
 import yaml
 import random
 import string
+import csv
 import shutil
 import traceback
 import argparse
@@ -191,6 +192,118 @@ def list_files(dir_path):
         return jsonify(files), 200
     else:
         return jsonify({'message': 'Directory not found'}), 404
+
+@file_app.route('/view_synced_data', methods=['POST'])
+def view_synced_data():
+    data = request.get_json()
+    base_dir = data.get('base_dir')  # Relative path like: IITA_Test/Nigeria/AmigaSample/2025-04-29/rover/RGB
+
+    if not base_dir:
+        return jsonify({'error': 'Missing base_dir'}), 400
+
+    # Construct full path to msgs_synced.csv
+    full_path = os.path.join(data_root_dir, base_dir, 'Metadata', 'msgs_synced.csv')
+    print(f"Full path to msgs_synced.csv: {full_path}")
+
+    if not os.path.exists(full_path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        with open(full_path, newline='') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        return jsonify({'data': rows})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/restore_images', methods=['POST'])
+def restore_images():
+    global data_root_dir
+
+    data = request.get_json()
+    image_names = data.get('images')
+    removed_dir = data.get('removed_dir')  # e.g. Raw/.../Removed/top
+
+    if not image_names or not removed_dir:
+        return jsonify({'error': 'Missing images or removed_dir'}), 400
+
+    # Full path to source in Removed/
+    removed_path = os.path.join(data_root_dir, removed_dir)
+
+    # Replace 'Removed' with 'Images' to get destination
+    if 'Removed' not in removed_dir:
+        return jsonify({'error': "'Removed' folder not found in path"}), 400
+
+    restored_dir_rel = removed_dir.replace('/Removed/', '/Images/')
+    restored_dir_abs = os.path.join(data_root_dir, restored_dir_rel)
+    os.makedirs(restored_dir_abs, exist_ok=True)
+
+    moved = []
+    errors = []
+
+    for image_name in image_names:
+        src = os.path.join(removed_path, image_name)
+        dst = os.path.join(restored_dir_abs, image_name)
+
+        try:
+            if os.path.exists(src):
+                shutil.move(src, dst)
+                moved.append(image_name)
+            else:
+                errors.append(f"{image_name} not found in Removed.")
+        except Exception as e:
+            errors.append(f"{image_name} failed: {str(e)}")
+
+    return jsonify({
+        'restored': moved,
+        'restored_dir': restored_dir_rel,
+        'errors': errors
+    }), 200
+
+@file_app.route('/remove_images', methods=['POST'])
+def remove_images():
+    global data_root_dir
+
+    data = request.get_json()
+    image_names = data.get('images')
+    source_dir = data.get('source_dir')  # e.g. Raw/.../Images/top
+
+    if not image_names or not source_dir:
+        return jsonify({'error': 'Missing images or source_dir'}), 400
+
+    # Full path to source
+    source_path = os.path.join(data_root_dir, source_dir)
+
+    # Replace 'Images' with 'Removed' in the path
+    if 'Images' not in source_dir:
+        return jsonify({'error': "'Images' folder not found in path"}), 400
+
+    removed_dir_rel = source_dir.replace('/Images/', '/Removed/')
+    removed_dir_abs = os.path.join(data_root_dir, removed_dir_rel)
+    os.makedirs(removed_dir_abs, exist_ok=True)
+
+    moved = []
+    errors = []
+
+    for image_name in image_names:
+        src = os.path.join(source_path, image_name)
+        dst = os.path.join(removed_dir_abs, image_name)
+
+        try:
+            if os.path.exists(src):
+                shutil.move(src, dst)
+                moved.append(image_name)
+            else:
+                errors.append(f"{image_name} not found.")
+        except Exception as e:
+            errors.append(f"{image_name} failed: {str(e)}")
+
+    return jsonify({
+        'moved': moved,
+        'removed_dir': removed_dir_rel,
+        'errors': errors
+    }), 200
 
 @file_app.route('/update_data', methods=['POST'])
 def update_data():
