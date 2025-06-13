@@ -277,7 +277,7 @@ def crop_geojson(dataset, mask_ds, image_type='rgb', plots = None, debug = False
                 continue
         (minX, maxX, minY, maxY), (minLon, maxLon, minLat, maxLat) = get_feature_geometry(feature, transform)
 
-        cropped_img = crop_xywh(dataset, maxX, maxY, maxX - minX, maxY - minY, image_type=image_type)
+        cropped_img = crop_xywh(dataset, minX, maxY, maxX - minX, maxY - minY, image_type=image_type)
 
         # Check if bed key exists
         if 'Bed' in feature.items():
