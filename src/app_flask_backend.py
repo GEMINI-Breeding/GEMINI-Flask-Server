@@ -1583,9 +1583,10 @@ def monitor_log_updates(logs_path, progress_file):
             "Finished odm_postprocess stage", # Finished odm_postprocess stage
             "ODM app finished",             # ODM Processes are done, but some additional steps left
             "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
-            "Generated DEM-Pyramid.tif",
-            "Copied DEM.tif",
             "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed",
         ]   
         
         with open(progress_file, 'w') as file:

@@ -56,7 +56,7 @@ def append_to_log(project_path, message, verbose=False):
         msg = f"[{timestamp}] {message}\n"
         f.write(msg)
         if verbose:
-            print(msg)
+            print(msg, flush=True)
         
 def _create_directory_structure(args):
     
@@ -347,15 +347,16 @@ def run_odm(args):
             base_options = "--dsm"
 
             image_list = os.listdir(image_path)
-            if len(image_list) > 1000: # TODO: Update this rule
-                print("Running ODM with large dataset...")
-                base_options += " --feature-quality medium --pc-quality medium"
-            else:
-                base_options += " --dem-resolution 0.25 --orthophoto-resolution 0.25"
+            # if len(image_list) > 1000: # TODO: Update this rule
+            #     print("Running ODM with large dataset...")
+            #     base_options += " --feature-quality medium --pc-quality medium"
+            # else:
+            #     base_options += " --dem-resolution 0.25 --orthophoto-resolution 0.25"
 
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
                 print('Starting ODM with custom options...')
+                print(args.custom_options)
             elif args.reconstruction_quality == 'Default':
                 odm_options = f"{base_options}" 
                 print('Starting ODM with default options...')
@@ -367,25 +368,25 @@ def run_odm(args):
                 pass
 
             # Validate custom options to prevent command injection
-            if args.custom_options and isinstance(args.custom_options, list):
-                # Whitelist allowed ODM parameters
-                allowed_params = [
-                    '--dem-resolution', '--orthophoto-resolution', '--mesh-size',
-                    '--min-num-features', '--feature-quality', '--pc-quality',
-                    '--cog', '--build-overviews', '--tiles', '--use-3dmesh',
-                    '--fast-orthophoto', '--pc-classify', '--pc-filter',
-                    '--matcher-neighbors', '--feature-type'
-                ]
-                sanitized_options = []
-                for opt in args.custom_options:
-                    # Check if option starts with allowed parameter or is a value for previous parameter
-                    param = opt.split('=')[0] if '=' in opt else opt
-                    if param.startswith('--') and param not in allowed_params:
-                        print(f"Warning: Ignoring disallowed parameter: {param}")
-                    else:
-                        sanitized_options.append(opt)
+            if args.custom_options:
+                # # Whitelist allowed ODM parameters
+                # allowed_params = [
+                #     '--dem-resolution', '--orthophoto-resolution', '--mesh-size',
+                #     '--min-num-features', '--feature-quality', '--pc-quality',
+                #     '--cog', '--build-overviews', '--tiles', '--use-3dmesh',
+                #     '--fast-orthophoto', '--pc-classify', '--pc-filter',
+                #     '--matcher-neighbors', '--feature-type'
+                # ]
+                # sanitized_options = []
+                # for opt in args.custom_options:
+                #     # Check if option starts with allowed parameter or is a value for previous parameter
+                #     param = opt.split('=')[0] if '=' in opt else opt
+                #     if param.startswith('--') and param not in allowed_params:
+                #         print(f"Warning: Ignoring disallowed parameter: {param}")
+                #     else:
+                #         sanitized_options.append(opt)
                 
-                odm_options = f"{base_options} {' '.join(sanitized_options)}"
+                odm_options = f"{base_options} {args.custom_options}"
             elif args.reconstruction_quality == 'Custom':
                 # If options not in list format, use default only
                 odm_options = base_options
