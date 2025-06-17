@@ -32,7 +32,7 @@ warnings.filterwarnings("ignore")
 CAMERA_POSITIONS = {'oak0': 'top', 'oak1': 'left', 'oak2': 'right'}
 
 # image and gps topics
-IMAGE_TYPES = ['rgb','disparity']
+IMAGE_TYPES = ['rgb']
 GPS_TYPES = ['pvt','relposned']
 CALIBRATION = ['calibration']
 TYPES = IMAGE_TYPES + GPS_TYPES + CALIBRATION
@@ -588,7 +588,7 @@ def extract_binary(file_names, output_path) -> None:
         # *add loop going through each .bin file and update progress.txt
         # get datetime of recording 
         if len(os.path.basename(file_name).split('_')) < 7:
-            raise RuntimeError(f"'File name is not compatible with this script.")
+            raise RuntimeError("'File name is not compatible with this script.")
         date_contents = os.path.basename(file_name).split('_')[:7]
         date_string = '_'.join(date_contents)
         date_format = '%Y_%m_%d_%H_%M_%S_%f'
@@ -604,7 +604,7 @@ def extract_binary(file_names, output_path) -> None:
         else:
             # write title to the report file with indent
             with open(report_path, "a") as f:
-                f.write(f"\n    --- Calibration ---\n")
+                f.write("\n    --- Calibration ---\n")
 
             # for each key in calibration, log into the report file
             for key, value in calibrations.items():
@@ -615,11 +615,11 @@ def extract_binary(file_names, output_path) -> None:
         gps_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in GPS_TYPES)]
         gps_dfs, gps_cols, gps_metric_summary = extract_gps(gps_topics, events_dict, output_path, current_ts)
         if len(gps_dfs) == 0:
-            raise RuntimeError(f"Failed to extract gps event file")
+            raise RuntimeError("Failed to extract gps event file")
         else:
             # write title to the report file with indent
             with open(report_path, "a") as f:
-                f.write(f"\n    --- GPS ---\n")
+                f.write("\n    --- GPS ---\n")
                 
             # for each key in gps, log into the report file
             for key, value in gps_metric_summary.items():
@@ -636,12 +636,17 @@ def extract_binary(file_names, output_path) -> None:
         # extract image topics
         image_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in IMAGE_TYPES)]
         image_dfs, images_cols, images_report = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
+        # check each image_dfs if it is empty
+        for df_check in image_dfs:
+            if len(df_check) == 0:
+                print("Warning: No images found for one of the image dataframes.")
+                
         if len(image_dfs) == 0:
-            raise RuntimeError(f"Failed to extract image event file")
+            raise RuntimeError("Failed to extract image event file")
         else:
             # write title to the report file with indent
             with open(report_path, "a") as f:
-                f.write(f"\n    --- Images ---\n")
+                f.write("\n    --- Images ---\n")
                 
             # for each key in image, log into the report file
             with open(report_path, "a") as f:
