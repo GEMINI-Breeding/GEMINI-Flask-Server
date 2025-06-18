@@ -33,7 +33,7 @@ def get_image_exif(image_path):
         image = Image.open(image_path)
     except Exception as e:
         print(e)
-        return
+        return None
 
     exif_data = image._getexif()
     latitude = None
@@ -78,31 +78,53 @@ def natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
 
 def image_selection(data_root_dir, image_folder, files, df_msgs_synced,
-                    image_names_in_df,gcp_locations,radius_meters):
+                    image_names_in_df,gcp_locations,radius_meters, check_exif=True):
     
     selected_images = []
+    len_files = len(files)
+    print(f"Selecting images out of {len_files} files in {image_folder}...")
     for filename in tqdm(files):
         image_path = os.path.join(image_folder, filename)
-        try:
-            if image_path in image_names_in_df:
-                index = image_names_in_df.index(image_path)
-                # Use the DataFrame row at this index
-                msg = df_msgs_synced.iloc[index].to_dict()
-            else:
-                msg = get_image_exif(image_path)
-                # If we got valid EXIF data, add it to the DataFrame and CSV
-                if msg is not None:
-                    # Add to our in-memory DataFrame
-                    df_msgs_synced = pd.concat([df_msgs_synced, pd.DataFrame([msg])], ignore_index=True)
-                    # Add to image_names_in_df list for subsequent lookups
-                    image_names_in_df.append(filename)
-        except (ValueError, IndexError) as e:
-            print(f"Error finding index for {filename}: {e}")
+        normalized_filename = f'/top/{filename}'
+        
+        # try:
+        if image_path in image_names_in_df:
+            # print('Using image_path')
+            index = image_names_in_df.index(image_path)
+            # Use the DataFrame row at this index
+            msg = df_msgs_synced.iloc[index].to_dict()
+        elif normalized_filename in image_names_in_df:
+            # print('Using normalized filename')
+            index = image_names_in_df.index(normalized_filename)
+            msg = df_msgs_synced.iloc[index].to_dict()
+            
+            # get naturalWidth and naturalHeight from the file
+            with Image.open(image_path) as img:
+                msg['naturalWidth'] = img.width
+                msg['naturalHeight'] = img.height
+            
+        elif check_exif:
+            # print('Using get_image_exif')
             msg = get_image_exif(image_path)
-            # If we got valid EXIF data from the fallback, save it too
+            # If we got valid EXIF data, add it to the DataFrame and CSV
             if msg is not None:
+                # Add to our in-memory DataFrame
                 df_msgs_synced = pd.concat([df_msgs_synced, pd.DataFrame([msg])], ignore_index=True)
-                image_names_in_df.append(filename)
+                # Add to image_names_in_df list for subsequent lookups
+                image_names_in_df.append(filename)             
+        else:
+            print(f"Skipping {filename}: no EXIF data found")
+            continue
+        # except (ValueError, IndexError) as e:
+        #     print(f"Error finding index for {filename}: {e}")
+        #     msg = get_image_exif(image_path)
+        #     # If we got valid EXIF data from the fallback, save it too
+        #     if msg is not None:
+        #         df_msgs_synced = pd.concat([df_msgs_synced, pd.DataFrame([msg])], ignore_index=True)
+        #         image_names_in_df.append(filename)
+        #     else:
+        #         print(f"Skipping {filename}: no EXIF data found")
+        #         continue
 
         if msg is not None:
             if len(gcp_locations) > 0 and (msg['lat'] is not None) and (msg['lon'] is not None):
@@ -142,10 +164,11 @@ def image_selection(data_root_dir, image_folder, files, df_msgs_synced,
     return selected_images, df_msgs_synced, image_names_in_df
 
 def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
+    
 
     # Select the image folder
     if not os.path.isdir(image_folder):
-        raise Exception("Invalid selections: no image folder.")
+        raise Exception(f"Invalid selections: no image folder {image_folder}.")
 
     # Process each image in the folder
     files = os.listdir(image_folder)
@@ -160,7 +183,7 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
     files = file_filtered
 
     if len(files) == 0:
-        raise Exception("Invalid selections: no files found in folder.")
+        raise Exception(f"Invalid selections: no files found in folder {image_folder}.")
 
 
     print("Loading gcp_locations.csv...")
@@ -170,7 +193,7 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
     # Load predefined locations from CSV
     gcp_locations = []
     if not os.path.isfile(gcp_locations_csv):
-        print("ERROR: Invalid selections: no gcp_locations.csv file found.")
+        print("WARNING: Invalid selections: no gcp_locations.csv file found.")
     else:
         df_gcplocations = pd.read_csv(gcp_locations_csv)
         labels = df_gcplocations['Label'].tolist()
@@ -187,21 +210,45 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
                 'altitude': altitudes[i]
             })
 
-    msgs_synced_path = os.path.join(os.path.dirname(image_folder), "msgs_synced.csv")
+    possible_msgs_synced_paths = [
+        os.path.join(os.path.dirname(image_folder), "msgs_synced.csv"),
+        os.path.join(os.path.dirname(
+            os.path.dirname(image_folder)
+        ), "Metadata", "msgs_synced.csv"),
+    ]
+    for msgs_synced_path in possible_msgs_synced_paths:
+        if os.path.isfile(msgs_synced_path):
+            print(f"Found msgs_synced.csv at {msgs_synced_path}")
+            msgs_synced_path = os.path.join(
+                os.path.dirname(
+                    os.path.dirname(image_folder)
+                ), "Metadata", "msgs_synced.csv"
+            )
+            break
+        else:
+            print(f"msgs_synced.csv not found at {msgs_synced_path}.")
+            msgs_synced_path = None
     
     # Load msgs_synced.csv
     if os.path.isfile(msgs_synced_path):
-        print("Loading msgs_synced.csv...")
         df_msgs_synced = pd.read_csv(msgs_synced_path)
-        image_names_in_df = df_msgs_synced['image_path'].tolist()
+        # print(df_msgs_synced.columns)
+        if 'image_path' in df_msgs_synced.columns:
+            print('checking image_path')
+            image_names_in_df = df_msgs_synced['image_path'].tolist()
+        else:
+            print('checking /top/rgb_file')
+            check_exif = False
+            image_names_in_df = df_msgs_synced['/top/rgb_file'].tolist()
     else:
-        df_msgs_synced = pd.DataFrame()
+        print(f"msgs_synced.csv not found at {msgs_synced_path}")
         image_names_in_df = []
+    print(f'Length of image_names_in_df: {len(image_names_in_df)}')
 
     selected_images, df_msgs_synced, image_names_in_df = image_selection(data_root_dir,image_folder,
                                                                          files, df_msgs_synced,
                                                                          image_names_in_df,gcp_locations,
-                                                                         radius_meters)
+                                                                         radius_meters, check_exif=check_exif)
     if 0:
         # Sort the selected_images by gcp_label
         selected_images.sort(key=lambda x: natural_sort_key(x['gcp_label']))
@@ -216,7 +263,7 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
 
     # Select the image folder
     if not os.path.isdir(image_folder):
-        raise Exception("Invalid selections: no image folder.")
+        raise Exception(f"Invalid selections: no image folder {image_folder}.")
 
     # Process each image in the folder
     files = os.listdir(image_folder)
@@ -231,7 +278,7 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
     files = file_filtered
 
     if len(files) == 0:
-        raise Exception("Invalid selections: no files found in folder.")
+        raise Exception(f"Invalid selections: no files found in folder {image_folder}.")
 
 
     print("Loading gcp_locations.csv...")
@@ -241,7 +288,7 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
     # Load predefined locations from CSV
     gcp_locations = []
     if not os.path.isfile(gcp_locations_csv):
-        print("ERROR: Invalid selections: no gcp_locations.csv file found.")
+        print("WARNING: Invalid selections: no gcp_locations.csv file found.")
     else:
         df_gcplocations = pd.read_csv(gcp_locations_csv)
         labels = df_gcplocations['Label'].tolist()
@@ -258,15 +305,40 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
                 'altitude': altitudes[i]
             })
 
-    msgs_synced_path = os.path.join(os.path.dirname(image_folder), "msgs_synced.csv")
+    possible_msgs_synced_paths = [
+        os.path.join(os.path.dirname(image_folder), "msgs_synced.csv"),
+        os.path.join(os.path.dirname(
+            os.path.dirname(image_folder)
+        ), "Metadata", "msgs_synced.csv"),
+    ]
+    for msgs_synced_path in possible_msgs_synced_paths:
+        if os.path.isfile(msgs_synced_path):
+            print(f"Found msgs_synced.csv at {msgs_synced_path}")
+            msgs_synced_path = os.path.join(
+                os.path.dirname(
+                    os.path.dirname(image_folder)
+                ), "Metadata", "msgs_synced.csv"
+            )
+            break
+        else:
+            print(f"msgs_synced.csv not found at {msgs_synced_path}.")
+            msgs_synced_path = None
     
     # Load msgs_synced.csv
     if os.path.isfile(msgs_synced_path):
-        print("Loading msgs_synced.csv...")
         df_msgs_synced = pd.read_csv(msgs_synced_path)
-        image_names_in_df = df_msgs_synced['image_path'].tolist()
+        if 'image_path' in df_msgs_synced.columns:
+            print('checking image_path')
+            image_names_in_df = df_msgs_synced['image_path'].tolist()
+        else:
+            print('checking /top/rgb_file')
+            check_exif = False
+            image_names_in_df = df_msgs_synced['/top/rgb_file'].tolist()
     else:
+        print(f"msgs_synced.csv not found at {msgs_synced_path}")
         image_names_in_df = []
+    print(f'Length of image_names_in_df: {len(image_names_in_df)}')
+    image_names_in_df.sort()
 
     # Read gcp_list
     gcp_list_path = os.path.join(os.path.dirname(image_folder.replace('Raw','Intermediate')),"gcp_list.txt")
@@ -288,7 +360,7 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
     selected_images, df_msgs_synced, image_names_in_df = image_selection(data_root_dir,image_folder,
                                                                          files, df_msgs_synced,
                                                                          image_names_in_df,gcp_locations,
-                                                                         radius_meters)
+                                                                         radius_meters, check_exif=check_exif)
     # Apply projection matrix correction to GPS coordinates
     print("Updating GPS coordinates based on GCP points...")
     df_msgs_synced = update_gps_with_projection_matrix(df_msgs_synced, gcp_list_image_names, df_lat, df_lon)
@@ -297,7 +369,7 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
     new_selected_images, df_msgs_synced, image_names_in_df = image_selection(data_root_dir,image_folder,
                                                                         files, df_msgs_synced,
                                                                         image_names_in_df,gcp_locations,
-                                                                        radius_meters)
+                                                                        radius_meters, check_exif=check_exif)
     # Compare and merge selected_images with new_selected_images
     # Create a dictionary of image paths from the original selected_images for quick lookup
     original_image_paths = {img['image_path']: True for img in selected_images}

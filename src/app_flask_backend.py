@@ -883,6 +883,11 @@ def get_gcp_selcted_images():
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
+        
+        # if folder 'top' is in image_folder, add it to the path
+        if os.path.isdir(os.path.join(image_folder, 'top')):
+            print("Found 'top' folder in image_folder, adding it to the path")
+            image_folder = os.path.join(image_folder, 'top')
         selected_images = collect_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
@@ -908,6 +913,10 @@ def refresh_gcp_selcted_images():
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
+        # if folder 'top' is in image_folder, add it to the path
+        if os.path.isdir(os.path.join(image_folder, 'top')):
+            print("Found 'top' folder in image_folder, adding it to the path")
+            image_folder = os.path.join(image_folder, 'top')
         selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
