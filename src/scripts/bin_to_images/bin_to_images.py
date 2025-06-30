@@ -177,42 +177,50 @@ def postprocessing(
 
     return msgs_df
 
-# Zhenghao Fei, PAIBL 2020
+# Zhenghao Fei, PAIBL 2020 (edited by Earl Ranario, PAIBL 2025)
 def sync_msgs(
     msgs: List[np.array], 
-    dt_threshold=None
+    dt_threshold=None,
+    apply_dt_threshold=False
 ) -> List[np.array]:
-    """Written by Zhenghao Fei, PAIBL 2020
-    Syncs multiple messages based on their time stamps
-    `msgs` should be a numpy array of size (N, data), timestamps should be the first dimension of the msgs
-    Synchronization will be based on the first msg in the list
+    """
+    Syncs multiple messages based on their time stamps.
+    `msgs` should be a list of numpy arrays, each with timestamps in the first column.
+    Synchronization is based on the first message in the list.
 
     Args:
-        msgs (list[np.array]): Messages to sync with timestamp in the first columns
-        dt_threshold (_type_, optional): Defaults to None.
+        msgs (list[np.array]): Messages to sync, timestamps in first column.
+        dt_threshold (float, optional): Max allowed time difference to accept a match.
+        apply_dt_threshold (bool, optional): If False, disables threshold check. Defaults to True.
 
     Returns:
-        list[np.array]: final messages synced
-    """    
-    if dt_threshold is None:
-        # if dt is not set, dt will be the average period of the first msg
-        msg_t = msgs[0][:, 0]
-        dt_threshold = (msg_t[-1] - msg_t[1])/ len(msg_t)
+        list[np.array]: Synced messages.
+    """
+    # Ensure reference timestamps are sorted
+    ref_msg = msgs[0]
+    sort_idx = np.argsort(ref_msg[:, 0])
+    msgs[0] = ref_msg[sort_idx]
     msg1_t = msgs[0][:, 0]
 
-    # timestamp kd of the rest msgs
+    # If needed, estimate dt_threshold based on mean period
+    if apply_dt_threshold:
+        if dt_threshold is None:
+            dt_threshold = np.mean(np.diff(msg1_t))
+
+    # Build KDTree for each other message
     timestamps_kd_list = []
     for msg in msgs[1:]:
         timestamps_kd = KDTree(np.asarray(msg[:, 0]).reshape(-1, 1))
         timestamps_kd_list.append(timestamps_kd)
 
+    # Find index matches within threshold (if enabled)
     msgs_idx_synced = []
-    for msg1_idx in range(len(msg1_t)):
+    for msg1_idx, t in enumerate(msg1_t):
         msg_idx_list = [msg1_idx]
         dt_valid = True
         for timestamps_kd in timestamps_kd_list:
-            dt, msg_idx = timestamps_kd.query([msg1_t[msg1_idx]])
-            if abs(dt) > dt_threshold:
+            dt, msg_idx = timestamps_kd.query([t])
+            if apply_dt_threshold and abs(dt) > dt_threshold:
                 dt_valid = False
                 break
             msg_idx_list.append(msg_idx)
@@ -220,13 +228,13 @@ def sync_msgs(
         if dt_valid:
             msgs_idx_synced.append(msg_idx_list)
 
+    # Format output
     msgs_idx_synced = np.asarray(msgs_idx_synced).T
-    
     msgs_synced = []
     for i, msg in enumerate(msgs):
         msg_synced = msg[msgs_idx_synced[i]]
         msgs_synced.append(msg_synced)
-        
+
     return msgs_synced
 
 def extract_images(
@@ -313,6 +321,36 @@ def extract_images(
                     img_name: str = f"disparity-{updated_ts}.npy"
                     np.save(str(camera_path / img_name), points_xyz)
             else:
+                
+                if camera_name == 'top' and calibrations and camera_name in calibrations:
+                    calibration = calibrations[camera_name]
+                    intrinsic = calibration["cameraData"][2]["intrinsicMatrix"]
+                    D = np.array(calibration["cameraData"][2]["distortionCoeff"])
+
+                    # adjust K if your image is downscaled!
+                    h, w = img.shape[:2]
+                    orig_w = calibration["cameraData"][2]["width"]
+                    orig_h = calibration["cameraData"][2]["height"]
+
+                    scale_x = w / orig_w
+                    scale_y = h / orig_h
+
+                    K = np.array([
+                        [intrinsic[0] * scale_x, 0, intrinsic[2] * scale_x],
+                        [0, intrinsic[4] * scale_y, intrinsic[5] * scale_y],
+                        [0, 0, 1]
+                    ])
+
+                    # undistort using remap
+                    R = np.eye(3)
+                    new_K, roi = cv2.getOptimalNewCameraMatrix(K, D, (w, h), 1, (w, h))
+                    map1, map2 = cv2.initUndistortRectifyMap(K, D, R, new_K, (w, h), cv2.CV_16SC2)
+                    img = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR)
+
+                    # CROP to remove black border
+                    x, y, w_roi, h_roi = roi
+                    img = img[y : y + h_roi, x : x + w_roi]
+                
                 img_name: str = f"rgb-{updated_ts}.jpg"
                 cv2.imwrite(str(camera_path / img_name), img)
 
