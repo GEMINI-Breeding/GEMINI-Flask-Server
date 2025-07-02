@@ -71,3 +71,4 @@ pydantic
 fastapi
 utm
 requests
+piexif
