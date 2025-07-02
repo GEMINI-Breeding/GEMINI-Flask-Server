@@ -80,11 +80,11 @@ def _create_directory_structure(args):
 
     # Copy the gcp_list.txt to the temporary directory
     gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
+    geo_txt_path = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'geo.txt')
     # print(f"GCP Path: {gcp_pth}")
     # Check if gcp_pth exists
     if not os.path.exists(gcp_pth):
         print(f"GCP file {gcp_pth} does not exist.")
-        return False
     else:
         # Check if the file exists but has more than 1 lines
         filtered_gcp_list = []
@@ -97,6 +97,13 @@ def _create_directory_structure(args):
                     shutil.copy(gcp_pth, os.path.join(project_path, 'code', 'gcp_list.txt'))
                 except PermissionError:
                     os.system(f'cp "{gcp_pth}" "{os.path.join(project_path, "code", "gcp_list.txt")}"')
+    if not os.path.exists(geo_txt_path):
+        print(f"geo.txt file {geo_txt_path} does not exist.")
+    else:
+        try:
+            shutil.copy(geo_txt_path, os.path.join(project_path, 'code', 'geo.txt'))
+        except PermissionError:
+            os.system(f'cp "{geo_txt_path}" "{os.path.join(project_path, "code", "geo.txt")}"')
 
 def process_outputs(args, debug=False):
 
@@ -347,12 +354,6 @@ def run_odm(args):
             base_options = "--dsm"
 
             image_list = os.listdir(image_path)
-            # if len(image_list) > 1000: # TODO: Update this rule
-            #     print("Running ODM with large dataset...")
-            #     base_options += " --feature-quality medium --pc-quality medium"
-            # else:
-            #     base_options += " --dem-resolution 0.25 --orthophoto-resolution 0.25"
-
             if args.reconstruction_quality == 'Custom':
                 odm_options = f"{base_options} {args.custom_options} "
                 print('Starting ODM with custom options...')
@@ -363,36 +364,50 @@ def run_odm(args):
             else:
                 raise ValueError('Invalid reconstruction quality: {}. Must be one of: default, custom'.format(args.reconstruction_quality))
             
+
+            if len(image_list) < 500: # TODO: Update this rule
+                # Increase output resolution
+                if "--dem-resolution" not in odm_options:
+                    odm_options += " --dem-resolution 0.25"
+
+                if "--orthophoto-resolution" not in odm_options:
+                    odm_options += " --orthophoto-resolution 0.25"
+                pass
+            else:
+                print("Running ODM with large dataset...")
+                # odm_options += " --feature-quality medium --pc-quality medium"
+                pass
+        
             if args.sensor.lower() == 'thermal':
                 #options += ' --radiometric-calibration camera'
                 pass
 
-            # Validate custom options to prevent command injection
-            if args.custom_options:
-                # # Whitelist allowed ODM parameters
-                # allowed_params = [
-                #     '--dem-resolution', '--orthophoto-resolution', '--mesh-size',
-                #     '--min-num-features', '--feature-quality', '--pc-quality',
-                #     '--cog', '--build-overviews', '--tiles', '--use-3dmesh',
-                #     '--fast-orthophoto', '--pc-classify', '--pc-filter',
-                #     '--matcher-neighbors', '--feature-type'
-                # ]
-                # sanitized_options = []
-                # for opt in args.custom_options:
-                #     # Check if option starts with allowed parameter or is a value for previous parameter
-                #     param = opt.split('=')[0] if '=' in opt else opt
-                #     if param.startswith('--') and param not in allowed_params:
-                #         print(f"Warning: Ignoring disallowed parameter: {param}")
-                #     else:
-                #         sanitized_options.append(opt)
+            # # Validate custom options to prevent command injection
+            # if args.custom_options:
+            #     # # Whitelist allowed ODM parameters
+            #     # allowed_params = [
+            #     #     '--dem-resolution', '--orthophoto-resolution', '--mesh-size',
+            #     #     '--min-num-features', '--feature-quality', '--pc-quality',
+            #     #     '--cog', '--build-overviews', '--tiles', '--use-3dmesh',
+            #     #     '--fast-orthophoto', '--pc-classify', '--pc-filter',
+            #     #     '--matcher-neighbors', '--feature-type'
+            #     # ]
+            #     # sanitized_options = []
+            #     # for opt in args.custom_options:
+            #     #     # Check if option starts with allowed parameter or is a value for previous parameter
+            #     #     param = opt.split('=')[0] if '=' in opt else opt
+            #     #     if param.startswith('--') and param not in allowed_params:
+            #     #         print(f"Warning: Ignoring disallowed parameter: {param}")
+            #     #     else:
+            #     #         sanitized_options.append(opt)
                 
-                odm_options = f"{base_options} {args.custom_options}"
-            elif args.reconstruction_quality == 'Custom':
-                # If options not in list format, use default only
-                odm_options = base_options
-                print('Warning: Custom options not in expected format, using default options only')
-            else:
-                odm_options = base_options
+            #     odm_options = f"{base_options} {args.custom_options}"
+            # elif args.reconstruction_quality == 'Custom':
+            #     # If options not in list format, use default only
+            #     odm_options = base_options
+            #     print('Warning: Custom options not in expected format, using default options only')
+            # else:
+            #     odm_options = base_options
         
             # Create a container name with safe characters only
             container_name = f"GEMINI-Container-{args.location.replace(' ', '-')}-{args.population.replace(' ', '-')}-{args.date}-{args.sensor.replace(' ', '-')}"
