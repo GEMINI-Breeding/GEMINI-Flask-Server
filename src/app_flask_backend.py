@@ -11,6 +11,8 @@ import string
 import csv
 import shutil
 import traceback
+import tempfile
+import torch
 import argparse
 import select
 import multiprocessing
@@ -41,6 +43,13 @@ from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
 
+# stitch pipeline
+import sys
+AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
+print(AGROWSTITCH_PATH)
+sys.path.append(AGROWSTITCH_PATH)
+from panorama_maker.AgRowStitch import run
+
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
 LOCATE_PLANTS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/locate.py'))
@@ -52,6 +61,7 @@ latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'dro
 training_stopped_event = threading.Event()
 extraction_processes = {}
 extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
+odm_method = None
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -71,23 +81,23 @@ def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df
         else:
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
-def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
-    exif_data_list = []
+# def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
+#     exif_data_list = []
     
-    # Extract EXIF Data Extraction
-    for file_path in file_paths:
-        if data_type.lower() == 'image':
-            if file_path not in existing_paths:
-                msg = get_image_exif(file_path)
-                if msg and msg['image_path'] not in existing_paths:
-                    exif_data_list.append(msg)
-                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
+#     # Extract EXIF Data Extraction
+#     for file_path in file_paths:
+#         if data_type.lower() == 'image':
+#             if file_path not in existing_paths:
+#                 msg = get_image_exif(file_path)
+#                 if msg and msg['image_path'] not in existing_paths:
+#                     exif_data_list.append(msg)
+#                     existing_paths.add(msg['image_path'])  # Prevent duplicated process
     
-    if data_type.lower() == 'image' and exif_data_list:
-        if existing_df is not None and not existing_df.empty:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-        else:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+#     if data_type.lower() == 'image' and exif_data_list:
+#         if existing_df is not None and not existing_df.empty:
+#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+#         else:
+#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -700,6 +710,9 @@ def _extraction_worker(file_paths, output_path):
         # cleanup files
         _cleanup_files(file_paths)
         extraction_status = "done"
+    except EOFError as e:
+        print(f"EOFError during binary extraction: {e}")
+        extraction_status = "failed"
     except Exception as e:
         print(f"[ERROR] Extraction failed: {e}")
         # print full traceback
@@ -784,11 +797,12 @@ def upload_chunk():
     print(f"Chunk {chunk_index} of {total_chunks} received")
     if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
         # Reassemble file
+        print("Reassembling file...")
         with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
             for i in range(int(total_chunks)):
                 with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
                     full_file.write(part_file.read())
-
+        print("Finished reassembling file...")
         time.sleep(60)  # Wait for 60 seconds
         return "File reassembled and saved successfully", 200
     else:
@@ -1324,18 +1338,211 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
     
-@file_app.route('/get_odm_logs', methods=['GET'])
+@file_app.route('/get_odm_logs', methods=['POST'])
 def get_odm_logs():
-    logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+    
+    # get data
+    data = request.json
+    method = data.get('method')
+    ortho_data = data.get('orthoData')
+    
+    print("Method for logs:", method)  # Debug statement
+    
+    if method == 'STITCH':
+        logs_path = os.path.join(
+            data_root_dir, "Raw", ortho_data['year'],
+            ortho_data['experiment'], ortho_data['location'], ortho_data['population'],
+            ortho_data['date'], ortho_data['platform'], ortho_data['sensor'], 
+            "Images", "final_mosaics", "top.log"
+        )
+    else:
+        logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
     print("Logs Path:", logs_path)  # Debug statement
     if os.path.exists(logs_path):
         with open(logs_path, 'r') as log_file:
             lines = log_file.readlines()
-            latest_logs = lines[-20:]  # Get the last 20 lines
-        return jsonify({"log_content": ''.join(latest_logs)}), 200
+            # latest_logs = lines[-20:]  # Get the last 20 lines
+        return jsonify({"log_content": ''.join(lines)}), 200
     else:
         print("Logs not found at path:", logs_path)  # Debug statement
         return jsonify({"error": "Logs not found"}), 404
+
+@file_app.route('/run_stitch', methods=['POST'])
+def run_stitch_endpoint():
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    year = data.get('year')
+    experiment = data.get('experiment')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    # temp_dir = data.get('temp_dir')
+    # reconstruction_quality = data.get('reconstruction_quality')
+    custom_options = data.get('custom_options')
+    
+    global odm_method
+    odm_method = 'stitch'
+    
+    try:
+        image_path = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Images", "top"
+        )
+        save_path = os.path.join(
+            data_root_dir, "Processed", year,
+            experiment, location, population,
+            date, platform, sensor
+        )
+        config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
+        stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
+        
+        # Load original config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        # Update fields
+        config['image_directory'] = image_path
+        config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {config['device']}")
+
+        # Apply any user-specified custom options
+        if isinstance(custom_options, str):
+            print(f"Custom options provided as string: {custom_options}")
+            custom_options = yaml.safe_load(custom_options)
+
+        if custom_options and isinstance(custom_options, dict):
+            print(f"Custom options provided: {custom_options}")
+            config.update(custom_options)
+
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=".yaml") as tmpfile:
+            yaml.safe_dump(config, tmpfile)
+            temp_config_path = tmpfile.name
+
+        cpu_count = os.cpu_count()
+        
+        # start thread to get ortho progress
+        progress_file = os.path.join(stitched_path, 'top.log')
+        thread_prog = threading.Thread(target=monitor_stitch_updates, args=(progress_file,), daemon=True)
+        thread_prog.start()
+        
+        # run stitching process
+        run(config_path=temp_config_path, cpu_count=cpu_count)
+        
+        # move stitched panorama to save_path
+        # Find next version number
+        base_name = "AgRowStitch"
+        version = 1
+        existing_files = os.listdir(save_path)
+        version_pattern = re.compile(re.escape(base_name) + r"_v(\d+)\.png")
+
+        for fname in existing_files:
+            match = version_pattern.match(fname)
+            if match:
+                existing_version = int(match.group(1))
+                version = max(version, existing_version + 1)
+
+        new_filename = f"{base_name}_v{version}.tif"
+
+        # Move stitched result to versioned file name
+        src_file = os.path.join(stitched_path, 'full_res_mosaic_top.png')
+        dst_file = os.path.join(save_path, new_filename)
+        
+        if not os.path.exists(src_file):
+            return jsonify({"status": "error", "message": "Stitched panorama not found"}), 404
+
+        shutil.move(src_file, dst_file)
+        
+        # remove stitched_path
+        if os.path.exists(stitched_path):
+            shutil.rmtree(stitched_path)
+            print(f"Removed temporary stitched path: {stitched_path}")
+
+        print(f"Saved stitched mosaic as {dst_file}")
+
+        return jsonify({"status": "started"}), 202
+
+    except Exception as e:
+        print(f"Error running AgRowStitch: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+def monitor_stitch_updates(progress_file):
+
+    global latest_data
+
+    try:
+        num_matches = 0
+        total_expected_matches = None  # will be set dynamically
+
+        final_steps = [
+            "Retrieving batches",
+            "Straightening batches",
+            "Extracting batch features",
+            "Matching batch features",
+            "Stitching batches",
+            "Straightening final mosaic",
+            "Saving mosaic at full resolution",
+            "Saving mosaic at resized resolution",
+            "Deleting intermediate images",
+            "Done"
+        ]
+
+        final_step_map = {step: idx for idx, step in enumerate(final_steps)}
+        
+        # Wait for the log file to be created
+        while not os.path.exists(progress_file):
+            print("Waiting for log file to be created...")
+            time.sleep(5)  # Check every 5 seconds
+        
+        print("Log file found. Monitoring for updates.")
+
+        with open(progress_file, 'r') as file:
+            file.seek(0, os.SEEK_END)  # Start at end, tail new lines
+
+            while True:
+                line = file.readline()
+                if not line:
+                    time.sleep(1)
+                    continue
+
+                line = line.strip()
+
+                # extract total images once
+                if total_expected_matches is None:
+                    match = re.search(r'Found (\d+) images', line)
+                    if match:
+                        total_images = int(match.group(1))
+                        # Rough guess: images matched every 8th → total pairs
+                        total_expected_matches = max(1, total_images // 8)
+                        # print(f"[Monitor] Found {total_images} images → Expecting ~{total_expected_matches} matches")
+                        continue
+
+                # count matched pairs
+                if "Succesfully matched image" in line and total_expected_matches:
+                    num_matches += 1
+                    percent = min(int((num_matches / total_expected_matches) * 90), 90)
+                    latest_data['ortho'] = percent
+                    # print(f"[Progress] Match {num_matches}/{total_expected_matches} → {percent}%")
+
+                # final phases fill last 10%
+                elif any(step in line for step in final_steps):
+                    for step in final_steps:
+                        if step in line:
+                            step_index = final_step_map[step]
+                            percent = 90 + int((step_index + 1) / len(final_steps) * 10)
+                            percent = min(percent, 100)
+                            latest_data['ortho'] = percent
+                            # print(f"[Progress] Final step '{step}' → {percent}%")
+                            break
+                        
+    except Exception as e:
+        # Handle exception: log it, set a flag, etc.
+        print(f"Error in thread: {e}")
+
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():

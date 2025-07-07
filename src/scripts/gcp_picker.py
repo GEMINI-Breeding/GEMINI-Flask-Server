@@ -216,17 +216,18 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
             os.path.dirname(image_folder)
         ), "Metadata", "msgs_synced.csv"),
     ]
-    for msgs_synced_path in possible_msgs_synced_paths:
-        if os.path.isfile(msgs_synced_path):
-            print(f"Found msgs_synced.csv at {msgs_synced_path}")
-            msgs_synced_path = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(image_folder)
-                ), "Metadata", "msgs_synced.csv"
-            )
+    for possible_msgs_synced_path in possible_msgs_synced_paths:
+        if os.path.isfile(possible_msgs_synced_path):
+            print(f"Found msgs_synced.csv at {possible_msgs_synced_path}")
+            msgs_synced_path = possible_msgs_synced_path
+            # msgs_synced_path = os.path.join(
+            #     os.path.dirname(
+            #         os.path.dirname(image_folder)
+            #     ), "Metadata", "msgs_synced.csv"
+            # )
             break
         else:
-            print(f"msgs_synced.csv not found at {msgs_synced_path}.")
+            print(f"msgs_synced.csv not found at {possible_msgs_synced_path}.")
             msgs_synced_path = None
     
     # Load msgs_synced.csv
@@ -235,6 +236,7 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
         # print(df_msgs_synced.columns)
         if 'image_path' in df_msgs_synced.columns:
             print('checking image_path')
+            check_exif = True
             image_names_in_df = df_msgs_synced['image_path'].tolist()
         else:
             print('checking /top/rgb_file')
@@ -314,11 +316,11 @@ def refresh_gcp_candidate(data_root_dir, image_folder, radius_meters):
     for msgs_synced_path in possible_msgs_synced_paths:
         if os.path.isfile(msgs_synced_path):
             print(f"Found msgs_synced.csv at {msgs_synced_path}")
-            msgs_synced_path = os.path.join(
-                os.path.dirname(
-                    os.path.dirname(image_folder)
-                ), "Metadata", "msgs_synced.csv"
-            )
+            # msgs_synced_path = os.path.join(
+            #     os.path.dirname(
+            #         os.path.dirname(image_folder)
+            #     ), "Metadata", "msgs_synced.csv"
+            # )
             break
         else:
             print(f"msgs_synced.csv not found at {msgs_synced_path}.")
