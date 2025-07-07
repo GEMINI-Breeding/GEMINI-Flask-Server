@@ -286,7 +286,11 @@ def write_geo_txt(df_msgs_synced, geo_txt_path, srs="EPSG:4326"):
         for _, row in df_msgs_synced.iterrows():
             # Only write if both lat and lon are present and not NaN
             if pd.notna(row.get('lat')) and pd.notna(row.get('lon')):
-                image_name = os.path.basename(row['image_path'])
+                # if 'image_path' is not in row, use '/top/rgb_file'
+                if 'image_path' in row:
+                    image_name = os.path.basename(row['image_path'])
+                else:
+                    image_name = os.path.basename(row['/top/rgb_file'])
                 lon = row['lon']
                 lat = row['lat']
                 alt = row['alt'] if pd.notna(row.get('alt')) else 0
