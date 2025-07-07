@@ -48,7 +48,7 @@ import sys
 AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
 print(AGROWSTITCH_PATH)
 sys.path.append(AGROWSTITCH_PATH)
-from panorama_maker.AgRowStitch import run
+from panorama_maker.AgRowStitch import run as run_agrowstitch
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -62,6 +62,8 @@ training_stopped_event = threading.Event()
 extraction_processes = {}
 extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
 odm_method = None
+stitch_thread=None
+stitch_stop_event = threading.Event()
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -1366,6 +1368,40 @@ def get_odm_logs():
     else:
         print("Logs not found at path:", logs_path)  # Debug statement
         return jsonify({"error": "Logs not found"}), 404
+    
+def run_stitch_process(config_path, cpu_count, stitched_path, save_path):
+    print(f"Stitching started on thread {threading.current_thread().name}")
+
+    for step in run_agrowstitch(config_path, cpu_count):
+        if stitch_stop_event.is_set():
+            print("Stitching canceled by user.")
+            return
+
+    # Now stitching is done — do your move & cleanup here
+    base_name = "AgRowStitch"
+    version = 1
+    existing_files = os.listdir(save_path)
+    version_pattern = re.compile(re.escape(base_name) + r"_v(\d+)\.png")
+
+    for fname in existing_files:
+        match = version_pattern.match(fname)
+        if match:
+            existing_version = int(match.group(1))
+            version = max(version, existing_version + 1)
+
+    new_filename = f"{base_name}_v{version}.tif"
+
+    src_file = os.path.join(stitched_path, 'full_res_mosaic_top.png')
+    dst_file = os.path.join(save_path, new_filename)
+
+    if not os.path.exists(src_file):
+        print("Stitched panorama not found in thread")
+        return
+
+    shutil.move(src_file, dst_file)
+    shutil.rmtree(stitched_path)
+
+    print(f"Saved stitched mosaic as {dst_file}")
 
 @file_app.route('/run_stitch', methods=['POST'])
 def run_stitch_endpoint():
@@ -1381,8 +1417,10 @@ def run_stitch_endpoint():
     # reconstruction_quality = data.get('reconstruction_quality')
     custom_options = data.get('custom_options')
     
-    global odm_method
+    global stitch_thread, stitch_stop_event, odm_method
+    global stitched_path, temp_output
     odm_method = 'stitch'
+    stitch_stop_event.clear()
     
     try:
         image_path = os.path.join(
@@ -1397,6 +1435,16 @@ def run_stitch_endpoint():
         )
         config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
+        temp_output = os.path.join(os.path.dirname(image_path), "top_output")
+        
+        # remove stitched_path and temp_output if it exists
+        if os.path.exists(stitched_path):
+            shutil.rmtree(stitched_path)
+            print(f"Removed existing stitched path: {stitched_path}")
+        if os.path.exists(temp_output):
+            shutil.rmtree(temp_output)
+            print(f"Removed existing temp output path: {temp_output}")
+        
         if not os.path.exists(save_path):
             os.makedirs(save_path, exist_ok=True)
         
@@ -1430,39 +1478,12 @@ def run_stitch_endpoint():
         thread_prog = threading.Thread(target=monitor_stitch_updates, args=(progress_file,), daemon=True)
         thread_prog.start()
         
-        # run stitching process
-        run(config_path=temp_config_path, cpu_count=cpu_count)
-        
-        # move stitched panorama to save_path
-        # Find next version number
-        base_name = "AgRowStitch"
-        version = 1
-        existing_files = os.listdir(save_path)
-        version_pattern = re.compile(re.escape(base_name) + r"_v(\d+)\.png")
-
-        for fname in existing_files:
-            match = version_pattern.match(fname)
-            if match:
-                existing_version = int(match.group(1))
-                version = max(version, existing_version + 1)
-
-        new_filename = f"{base_name}_v{version}.tif"
-
-        # Move stitched result to versioned file name
-        src_file = os.path.join(stitched_path, 'full_res_mosaic_top.png')
-        dst_file = os.path.join(save_path, new_filename)
-        
-        if not os.path.exists(src_file):
-            return jsonify({"status": "error", "message": "Stitched panorama not found"}), 404
-
-        shutil.move(src_file, dst_file)
-        
-        # remove stitched_path
-        if os.path.exists(stitched_path):
-            shutil.rmtree(stitched_path)
-            print(f"Removed temporary stitched path: {stitched_path}")
-
-        print(f"Saved stitched mosaic as {dst_file}")
+        stitch_thread = threading.Thread(
+            target=run_stitch_process, 
+            args=(temp_config_path, cpu_count, stitched_path, save_path),
+            daemon=True
+        )
+        stitch_thread.start()
 
         return jsonify({"status": "started"}), 202
 
@@ -1471,12 +1492,10 @@ def run_stitch_endpoint():
         return jsonify({"status": "error", "message": str(e)}), 500
     
 def monitor_stitch_updates(progress_file):
-
     global latest_data
 
     try:
-        num_matches = 0
-        total_expected_matches = None  # will be set dynamically
+        total_images = None  # we still extract total images once!
 
         final_steps = [
             "Retrieving batches",
@@ -1497,7 +1516,7 @@ def monitor_stitch_updates(progress_file):
         while not os.path.exists(progress_file):
             print("Waiting for log file to be created...")
             time.sleep(5)  # Check every 5 seconds
-        
+
         print("Log file found. Monitoring for updates.")
 
         with open(progress_file, 'r') as file:
@@ -1512,21 +1531,20 @@ def monitor_stitch_updates(progress_file):
                 line = line.strip()
 
                 # extract total images once
-                if total_expected_matches is None:
+                if total_images is None:
                     match = re.search(r'Found (\d+) images', line)
                     if match:
                         total_images = int(match.group(1))
-                        # Rough guess: images matched every 8th → total pairs
-                        total_expected_matches = max(1, total_images // 8)
-                        # print(f"[Monitor] Found {total_images} images → Expecting ~{total_expected_matches} matches")
+                        print(f"Total images detected: {total_images}")
                         continue
 
-                # count matched pairs
-                if "Succesfully matched image" in line and total_expected_matches:
-                    num_matches += 1
-                    percent = min(int((num_matches / total_expected_matches) * 90), 90)
-                    latest_data['ortho'] = percent
-                    # print(f"[Progress] Match {num_matches}/{total_expected_matches} → {percent}%")
+                # use actual match info to estimate progress up to 90%
+                if "Succesfully matched image" in line and total_images:
+                    match = re.search(r'Succesfully matched image (\d+) and (\d+)', line)
+                    if match:
+                        img2 = int(match.group(2))
+                        percent = min(int((img2 / total_images) * 90), 90)
+                        latest_data['ortho'] = percent
 
                 # final phases fill last 10%
                 elif any(step in line for step in final_steps):
@@ -1536,13 +1554,10 @@ def monitor_stitch_updates(progress_file):
                             percent = 90 + int((step_index + 1) / len(final_steps) * 10)
                             percent = min(percent, 100)
                             latest_data['ortho'] = percent
-                            # print(f"[Progress] Final step '{step}' → {percent}%")
                             break
-                        
-    except Exception as e:
-        # Handle exception: log it, set a flag, etc.
-        print(f"Error in thread: {e}")
 
+    except Exception as e:
+        print(f"Error in thread: {e}")
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
@@ -1633,36 +1648,49 @@ def run_odm_endpoint():
         return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 404)
 
 
-        
 @file_app.route('/stop_odm', methods=['POST'])
 def stop_odm():
-    global data_root_dir
+    global data_root_dir, stitch_thread, stitch_stop_event, odm_method, stitched_path, temp_output
     try:
-        print('ODM processed stopped by user.')
-        print('Removing temp folder...')
-        folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
-        cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
-        cleanup_command = cleanup_command.split()
-        cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
-        cleanup_process.wait()
-        
-        print('Stopping ODM process...')
-        stop_event = threading.Event()
-        stop_event.set()
-        command = f"docker stop GEMINI-Container"
-        command = command.split()
-        # Run the command
-        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-        process.wait()
-        
-        print('Removing ODM container...')
-        command = f"docker rm GEMINI-Container"
-        command = command.split()
-        # Run the command
-        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-        process.wait()
-        # reset_odm(data_root_dir)
-        shutil.rmtree(os.path.join(data_root_dir, 'temp'))
+        if odm_method == 'stitch' and stitch_thread is not None:
+            print("Stopping stitching thread...")
+            stitch_stop_event.set()
+            stitch_thread.join(timeout=10)  # Wait up to 10s for clean exit
+            print("Stitching stopped.")
+            
+            # remove stitched_path and temp_output if it exists
+            if os.path.exists(stitched_path):
+                shutil.rmtree(stitched_path)
+                print(f"Removed existing stitched path: {stitched_path}")
+            if os.path.exists(temp_output):
+                shutil.rmtree(temp_output)
+                print(f"Removed existing temp output path: {temp_output}")
+        else:
+            print('ODM processed stopped by user.')
+            print('Removing temp folder...')
+            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
+            cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+            cleanup_command = cleanup_command.split()
+            cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
+            cleanup_process.wait()
+            
+            print('Stopping ODM process...')
+            stop_event = threading.Event()
+            stop_event.set()
+            command = f"docker stop GEMINI-Container"
+            command = command.split()
+            # Run the command
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+            
+            print('Removing ODM container...')
+            command = f"docker rm GEMINI-Container"
+            command = command.split()
+            # Run the command
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+            # reset_odm(data_root_dir)
+            shutil.rmtree(os.path.join(data_root_dir, 'temp'))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
