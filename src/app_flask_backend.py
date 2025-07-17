@@ -2391,7 +2391,95 @@ def stop_extract():
         return jsonify({"message": "Python process successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
-    
+
+def update_plot_index(directory, image_name, plot_index, position, camera):
+    # The directory from frontend is .../RGB/Images/<camera>
+    # The CSV is in .../RGB/Metadata
+    metadata_dir = os.path.abspath(os.path.join(directory, '..', '..', 'Metadata'))
+    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+
+    if not os.path.exists(csv_path):
+        return jsonify({"error": f"msgs_synced.csv not found at {csv_path}"}), 404
+
+    df = pd.read_csv(csv_path)
+
+    if 'plot_index' not in df.columns:
+        df['plot_index'] = -1
+
+    image_column = f'/{camera}/rgb_file'
+    if image_column not in df.columns:
+        return jsonify({"error": f"Image column '{image_column}' not found in {csv_path}"}), 404
+
+    try:
+        row_index = df.index[df[image_column] == image_name].tolist()[0]
+    except IndexError:
+        return jsonify({"error": f"Image '{image_name}' not found in column '{image_column}'"}), 404
+
+    current_plot_index = int(plot_index)
+
+    if position == 'start':
+        df.loc[row_index, 'plot_index'] = current_plot_index
+    elif position == 'end':
+        # Mark all rows from start to end
+        start_indices = df.index[df['plot_index'] == current_plot_index].tolist()
+        if not start_indices:
+            # If start not found, just mark the end row.
+            df.loc[row_index, 'plot_index'] = current_plot_index
+        else:
+            start_index = start_indices[0]
+            # Ensure end is after start
+            if row_index >= start_index:
+                df.loc[start_index:row_index, 'plot_index'] = current_plot_index
+            else:
+                # If end is before start, just mark the end row
+                 df.loc[row_index, 'plot_index'] = current_plot_index
+
+
+    df.to_csv(csv_path, index=False)
+    return jsonify({"status": "success"})
+
+@file_app.route('/mark_plot_start', methods=['POST'])
+def mark_plot_start():
+    data = request.json
+    return update_plot_index(data['directory'], data['image_name'], data['plot_index'], 'start', data['camera'])
+
+@file_app.route('/mark_plot_end', methods=['POST'])
+def mark_plot_end():
+    data = request.json
+    return update_plot_index(data['directory'], data['image_name'], data['plot_index'], 'end', data['camera'])
+
+@file_app.route('/get_plot_data', methods=['POST'])
+def get_plot_data():
+    data = request.json
+    directory = data['directory']
+    image_name = data['image_name']
+    camera = data['camera']
+
+    csv_path = os.path.join(directory, 'msgs_synced.csv')
+    if not os.path.exists(csv_path):
+        return jsonify({'error': 'msgs_synced.csv not found'}), 404
+
+    df = pd.read_csv(csv_path)
+
+    # Construct the image column name based on the camera
+    image_column = f'/{camera}/rgb_file'
+
+    if image_column not in df.columns:
+        return jsonify({'error': f'Column {image_column} not found in {csv_path}'}), 400
+
+    try:
+        # Find the row that matches the image name
+        row = df[df[image_column] == image_name]
+        if row.empty:
+            return jsonify({'error': f'Image {image_name} not found in {image_column}'}), 404
+        
+        # Extract the plot index
+        plot_index = row['plot_index'].values[0]
+
+        return jsonify({'plot_index': plot_index})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
     global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract, extract_process
