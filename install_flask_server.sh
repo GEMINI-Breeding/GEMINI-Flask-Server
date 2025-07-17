@@ -102,13 +102,14 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate ./.conda
 
+# Install farm-ng packages
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # Clone the farm-ng-core repo
     git clone https://github.com/farm-ng/farm-ng-core.git
 
     # Checkout the correct release and update submodules
     cd farm-ng-core/
-    git checkout v2.3.0
+    # git checkout v2.3.0
     git submodule update --init --recursive
     cd ../
 
@@ -128,3 +129,21 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 else
     pip3 install farm-ng-amiga
 fi
+
+# Install AgRowStitch packages
+echo "Installing AgRowStitch packages"
+
+# AgRowStitch
+git clone https://github.com/GEMINI-Breeding/AgRowStitch.git
+(
+  cd AgRowStitch
+  git checkout opencv
+  pip install .
+)
+
+# LightGlue
+git clone https://github.com/cvg/LightGlue.git
+(
+  cd LightGlue
+  python -m pip install -e .
+)
