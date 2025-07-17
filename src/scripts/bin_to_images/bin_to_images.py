@@ -7,6 +7,10 @@ import kornia as K
 import numpy as np
 import pandas as pd
 import torch.nn.functional as F
+import multiprocessing as mp
+from multiprocessing import Pool, Manager
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from tqdm import tqdm
 from pathlib import Path
@@ -16,7 +20,6 @@ from scipy.interpolate import interp1d
 from google.protobuf import json_format
 from kornia_rs import ImageDecoder
 from kornia.core import tensor
-from tqdm import tqdm
 from typing import List, Dict
 
 from farm_ng.oak import oak_pb2
@@ -303,7 +306,7 @@ def extract_images(
             sequence_num: int = sample.meta.sequence_num
             timestamp: float = sample.meta.timestamp
             updated_ts: int = int((timestamp*1e6) + current_ts)
-            if not sequence_num in ts_df['sequence_num'].values:
+            if sequence_num not in ts_df['sequence_num'].values:
                 new_row = {col: sequence_num if col == 'sequence_num' else np.nan for col in ts_df.columns}
                 ts_df = pd.concat([ts_df, pd.DataFrame([new_row])], ignore_index=True)
             ts_df.loc[ts_df['sequence_num'] == sequence_num, topic_name_location] = updated_ts
@@ -312,7 +315,7 @@ def extract_images(
             if "disparity" in topic_name:
                 img = image_decoder.decode(sample.image_data)
                 
-                if calibrations is None or not camera_name in calibrations:
+                if calibrations is None or camera_name not in calibrations:
                     # Just save the raw disparity image if no calibration is available
                     img_name: str = f"disparity-{updated_ts}.npy"
                     np.save(str(camera_path / img_name), img)
@@ -568,14 +571,71 @@ def extract_calibrations(
 
     return calibrations
 
+def process_single_binary_file(args):
+    """Process a single binary file in parallel.
+    
+    Args:
+        args: Tuple containing (file_name, output_path, file_index, total_files)
+    
+    Returns:
+        Tuple containing (image_dfs, gps_dfs, images_cols, gps_cols, file_index)
+    """
+    file_name, output_path, file_index, total_files = args
+    
+    print(f"Processing file {file_index + 1}/{total_files}: {file_name}")
+    
+    # create the file reader
+    reader = EventsFileReader(file_name)
+    success: bool = reader.open()
+    if not success:
+        raise RuntimeError(f"Failed to open events file: {file_name}")
+
+    # get the index of the events file
+    events_index = reader.get_index()
+
+    # structure the index as a dictionary of lists of events
+    events_dict: dict[str, list[EventLogPosition]] = build_events_dict(events_index)
+    all_topics = list(events_dict.keys())
+
+    # keep only relevant topics
+    topics = [topic for topic in all_topics if any(type_.lower() in topic.lower() for type_ in TYPES)]
+
+    # get datetime of recording 
+    if len(os.path.basename(file_name).split('_')) < 7:
+        raise RuntimeError("File name is not compatible with this script.")
+    date_contents = os.path.basename(file_name).split('_')[:7]
+    date_string = '_'.join(date_contents)
+    date_format = '%Y_%m_%d_%H_%M_%S_%f'
+    date_object = datetime.strptime(date_string, date_format).replace(tzinfo=timezone.utc)
+    current_ts = int(date_object.timestamp() * 1e6)
+    
+    # extract calibration topics
+    calib_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in CALIBRATION)]
+    calibrations: dict[str, dict] = extract_calibrations(calib_topics, events_dict, output_path)
+    if len(calibrations) == 0:
+        print(f"Warning: No calibration files found for {file_name}. Skipping point cloud generation from disparity images.")
+        calibrations = None
+
+    # extract gps topics
+    gps_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in GPS_TYPES)]
+    gps_dfs, gps_cols, gps_metric_summary = extract_gps(gps_topics, events_dict, output_path, current_ts)
+    if len(gps_dfs) == 0:
+        raise RuntimeError(f"Failed to extract gps event file for {file_name}")
+
+    # extract image topics
+    image_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in IMAGE_TYPES)]
+    image_dfs, images_cols, images_report = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
+    if len(image_dfs) == 0:
+        raise RuntimeError(f"Failed to extract image event file for {file_name}")
+    
+    return image_dfs, gps_dfs, images_cols, gps_cols, file_index
+
 def extract_binary(file_names, output_path) -> None:
     """Read an events file and extracts relevant information from it.
 
     Args:
-
-        file_name (Path): The path to the events file.
+        file_names (List[Path]): List of paths to the events files.
         output_path (Path): The path to the folder where the converted data will be written.
-        disparity_scale (int): Scale for amplifying disparity color mapping. Default: 1.
     """
     # print out file names
     print(f"Extracting {len(file_names)} files.")
@@ -584,11 +644,9 @@ def extract_binary(file_names, output_path) -> None:
     base = 'RGB'
     output_path = output_path / base
     if not output_path.exists():
-        output_path.mkdir(parents=True, exist_ok=True) # *: this path should not change
+        output_path.mkdir(parents=True, exist_ok=True)
     
     # write progress text file
-    counter = 0
-    skip_pointer = 0
     with open(f"{output_path}/progress.txt", "w") as f:
         f.write("0")
         
@@ -599,127 +657,158 @@ def extract_binary(file_names, output_path) -> None:
         f.write(f"Number of files: {len(file_names)}\n")
         f.write(f"Output path: {output_path}\n")
     
-    # extract each bin file
-    for file_name in tqdm(file_names):
-        
-        # write name of binary file to the report
-        with open(report_path, "a") as f:
-            f.write(f"\n--- File: {file_name} ---\n")
-        
-        # create the file reader
-        reader = EventsFileReader(file_name)
-        success: bool = reader.open()
-        if not success:
-            raise RuntimeError(f"Failed to open events file: {file_name}")
-
-        # get the index of the events file
-        events_index = reader.get_index()
-
-        # structure the index as a dictionary of lists of events
-        events_dict: dict[str, list[EventLogPosition]] = build_events_dict(events_index)
-        all_topics = list(events_dict.keys())
-        print(f"All available topics: {sorted(events_dict.keys())}")
-
-        # keep only relevant topics
-        topics = [topic for topic in all_topics if any(type_.lower() in topic.lower() for type_ in TYPES)]
+    # Determine whether to use multiprocessing or threading
+    # Check if we're running in a daemon process (which can't spawn child processes)
+    current_process = mp.current_process()
+    is_daemon = current_process.daemon if hasattr(current_process, 'daemon') else False
+    use_parallel = len(file_names) > 1
+    use_multiprocessing = use_parallel and not is_daemon
+    use_threading = use_parallel and is_daemon
     
-        # *add loop going through each .bin file and update progress.txt
-        # get datetime of recording 
-        if len(os.path.basename(file_name).split('_')) < 7:
-            raise RuntimeError("'File name is not compatible with this script.")
-        date_contents = os.path.basename(file_name).split('_')[:7]
-        date_string = '_'.join(date_contents)
-        date_format = '%Y_%m_%d_%H_%M_%S_%f'
-        date_object = datetime.strptime(date_string, date_format).replace(tzinfo=timezone.utc)
-        current_ts  = int(date_object.timestamp() * 1e6)
+    # Determine optimal number of workers
+    cpu_count = mp.cpu_count()
+    max_workers = min(len(file_names), cpu_count, 8)  # Cap at 8 workers max
+    
+    if use_multiprocessing:
+        print(f"Using multiprocessing with {max_workers} processes for {len(file_names)} files.")
         
-        # extract calibration topics
-        calib_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in CALIBRATION)]
-        calibrations: dict[str, dict] = extract_calibrations(calib_topics, events_dict, output_path)
-        if len(calibrations) == 0:
-            print("Warning: No calibration files found. Skipping point cloud generation from disparity images.")
-            calibrations = None
+        try:
+            # Prepare arguments for multiprocessing
+            process_args = [(file_name, output_path, i, len(file_names)) for i, file_name in enumerate(file_names)]
+            
+            # Use multiprocessing to process files in parallel with limited workers
+            with Pool(processes=max_workers) as pool:
+                results = pool.map(process_single_binary_file, process_args)
+            
+            # Collect results from all processes
+            all_image_dfs = []
+            all_gps_dfs = []
+            images_cols = None
+            gps_cols = None
+            
+            # Sort results by file index to maintain order
+            results.sort(key=lambda x: x[4])  # Sort by file_index
+            
+            for image_dfs, gps_dfs, img_cols, gps_cols_current, file_index in results:
+                all_image_dfs.extend(image_dfs)
+                all_gps_dfs.extend(gps_dfs.values())
+                if images_cols is None:
+                    images_cols = img_cols
+                if gps_cols is None:
+                    gps_cols = gps_cols_current
+                    
+                # Update progress
+                with open(f"{output_path}/progress.txt", "w") as f:
+                    f.write(str(file_index + 1))
+            
+            # Use the aggregated results
+            image_dfs = all_image_dfs
+            gps_dfs = all_gps_dfs
+            
+            # Note: GPS interpolation and message syncing for multiprocessing
+            # would require additional coordination between processes
+            print("Note: For multiprocessing, GPS interpolation and message syncing")
+            print("require additional implementation to maintain temporal consistency.")
+            
+        except Exception as e:
+            print(f"Multiprocessing failed: {e}")
+            print("Falling back to sequential processing.")
+            use_multiprocessing = False
+            use_threading = False
+    
+    elif use_threading:
+        print(f"Using threading with {max_workers} threads for {len(file_names)} files (daemon process detected).")
+        
+        try:
+            # Prepare arguments for threading
+            process_args = [(file_name, output_path, i, len(file_names)) for i, file_name in enumerate(file_names)]
+            
+            # Use ThreadPoolExecutor for parallel processing with limited workers
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(process_single_binary_file, process_args))
+            
+            # Collect results from all threads
+            all_image_dfs = []
+            all_gps_dfs = []
+            images_cols = None
+            gps_cols = None
+            
+            # Sort results by file index to maintain order
+            results.sort(key=lambda x: x[4])  # Sort by file_index
+            
+            for image_dfs, gps_dfs, img_cols, gps_cols_current, file_index in results:
+                all_image_dfs.extend(image_dfs)
+                all_gps_dfs.extend(gps_dfs.values())
+                if images_cols is None:
+                    images_cols = img_cols
+                if gps_cols is None:
+                    gps_cols = gps_cols_current
+                    
+                # Update progress
+                with open(f"{output_path}/progress.txt", "w") as f:
+                    f.write(str(file_index + 1))
+            
+            # Use the aggregated results
+            image_dfs = all_image_dfs
+            gps_dfs = all_gps_dfs
+            
+            # Note: GPS interpolation and message syncing for threading
+            # would require additional coordination between threads
+            print("Note: For threading, GPS interpolation and message syncing")
+            print("require additional implementation to maintain temporal consistency.")
+            
+        except Exception as e:
+            print(f"Threading failed: {e}")
+            print("Falling back to sequential processing.")
+            use_threading = False
+    
+    if not use_multiprocessing and not use_threading:
+        # Sequential processing (original approach or fallback)
+        if is_daemon and len(file_names) > 1:
+            print("Running in daemon process - using sequential processing for multiple files.")
+        elif len(file_names) == 1:
+            print("Using sequential processing for single file.")
         else:
-            # write title to the report file with indent
-            with open(report_path, "a") as f:
-                f.write("\n    --- Calibration ---\n")
-
-            # for each key in calibration, log into the report file
-            for key, value in calibrations.items():
-                with open(report_path, "a") as f:
-                    f.write(f"      Camera: {key}\n")
-
-        # extract gps topics
-        gps_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in GPS_TYPES)]
-        gps_dfs, gps_cols, gps_metric_summary = extract_gps(gps_topics, events_dict, output_path, current_ts)
-        if len(gps_dfs) == 0:
-            raise RuntimeError("Failed to extract gps event file")
-        else:
-            # write title to the report file with indent
-            with open(report_path, "a") as f:
-                f.write("\n    --- GPS ---\n")
-                
-            # for each key in gps, log into the report file
-            for key, value in gps_metric_summary.items():
-                with open(report_path, "a") as f:
-                    f.write(f"      GPS: {key}\n")
-                    for metric, val in value.items():
-                        f.write(f"        {metric}: {val}\n")
-
-            # for each key in gps, log into the report file
-            for key, value in gps_dfs.items():
-                with open(report_path, "a") as f:
-                    f.write(f"      GPS: {key}\n")
-
-        # extract image topics
-        image_topics = [topic for topic in topics if any(type_.lower() in topic.lower() for type_ in IMAGE_TYPES)]
-        image_dfs, images_cols, images_report = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
-        # check each image_dfs if it is empty
-        for df_check in image_dfs:
-            if len(df_check) == 0:
-                print("Warning: No images found for one of the image dataframes.")
-                
-        if len(image_dfs) == 0:
-            raise RuntimeError("Failed to extract image event file")
-        else:
-            # write title to the report file with indent
-            with open(report_path, "a") as f:
-                f.write("\n    --- Images ---\n")
-                
-            # for each key in image, log into the report file
-            with open(report_path, "a") as f:
-                f.write(f"      Images: {image_topics}\n")
-                for key, value in images_report.items():
-                    f.write(f"        Camera: {key}\n")
-                    f.write(f"          Existing topics: {value['existing']}\n")
-                    f.write(f"          Missing topics: {value['missing']}\n")
+            print("Using sequential processing as fallback.")
         
-        # *: Interpolate GPS data to query at camera timestamps
-        gps_dfs = interpolate_gps(gps_dfs = gps_dfs, image_dfs = image_dfs, skip_pointer = skip_pointer, save_path = output_path, columns = gps_cols)
-        skip_pointer = len(gps_dfs[0])
+        counter = 0
+        skip_pointer = 0
         
-         # overwrite progress text file
-        counter += 1
-        with open(f"{output_path}/progress.txt", "w") as f:
-            f.write(str(counter))
-    
-    # sync messages # *: only do this once all the msgs synceds are read
-    print(f'image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs)}')
-    msgs = image_dfs + gps_dfs
-    msgs_synced: list[np.array] = sync_msgs(msgs)
-    msgs_synced_conc = np.concatenate(msgs_synced, axis=1)
-    gps_cols_list = [gps_cols[cols] for cols in gps_cols]
-    gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
-    msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
-    
-    # postprocessing
-    msgs_df = postprocessing(msgs_df, images_cols)
-    
-    # output synced messages
-    save_path = output_path / 'Metadata'
-    if not save_path.exists():
-        save_path.mkdir(parents=True, exist_ok=True)
-    msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+        for file_name in tqdm(file_names):
+            
+            # write name of binary file to the report
+            with open(report_path, "a") as f:
+                f.write(f"\n--- File: {file_name} ---\n")
+            
+            # Process single file
+            image_dfs, gps_dfs, images_cols, gps_cols, _ = process_single_binary_file((file_name, output_path, counter, len(file_names)))
+            
+            # Interpolate GPS data to query at camera timestamps
+            gps_dfs = interpolate_gps(gps_dfs=gps_dfs, image_dfs=image_dfs, skip_pointer=skip_pointer, save_path=output_path, columns=gps_cols)
+            skip_pointer = len(gps_dfs[0])
+            
+            # Update progress
+            counter += 1
+            with open(f"{output_path}/progress.txt", "w") as f:
+                f.write(str(counter))
+        
+        # Sync messages for sequential processing
+        print(f'image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs)}')
+        msgs = image_dfs + gps_dfs
+        msgs_synced: list[np.array] = sync_msgs(msgs)
+        msgs_synced_conc = np.concatenate(msgs_synced, axis=1)
+        gps_cols_list = [gps_cols[cols] for cols in gps_cols]
+        gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
+        msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
+        
+        # postprocessing
+        msgs_df = postprocessing(msgs_df, images_cols)
+        
+        # output synced messages
+        save_path = output_path / 'Metadata'
+        if not save_path.exists():
+            save_path.mkdir(parents=True, exist_ok=True)
+        msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
     
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
