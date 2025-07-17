@@ -1083,16 +1083,26 @@ def save_array(debug=False):
             if debug:
                 print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
-            existing_data[image_name] = {
-                'gcp_lon': item['gcp_lon'],
-                'gcp_lat': item['gcp_lat'],
-                'pointX': item['pointX'],
-                'pointY': item['pointY'],
-                'image_path': os.path.join(processed_path, image_name),
-                'gcp_label': item['gcp_label'],
-                'naturalWidth': item['naturalWidth'],
-                'naturalHeight': item['naturalHeight']
-            }
+            
+            # Check if pointX and pointY are not null
+            if item['pointX'] is not None and item['pointY'] is not None:
+                # Add or update the point
+                existing_data[image_name] = {
+                    'gcp_lon': item['gcp_lon'],
+                    'gcp_lat': item['gcp_lat'],
+                    'pointX': item['pointX'],
+                    'pointY': item['pointY'],
+                    'image_path': os.path.join(processed_path, image_name),
+                    'gcp_label': item['gcp_label'],
+                    'naturalWidth': item['naturalWidth'],
+                    'naturalHeight': item['naturalHeight']
+                }
+            else:
+                # Remove the point if pointX or pointY is null
+                if image_name in existing_data:
+                    del existing_data[image_name]
+                    if debug:
+                        print(f"Removed point for image: {image_name}")
 
     # Write merged data to file
     with open(filename, "w") as f:
