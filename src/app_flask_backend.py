@@ -783,30 +783,41 @@ def get_binary_progress():
 @file_app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     chunk = request.files['fileChunk']
-    chunk_index = request.form['chunkIndex']
-    total_chunks = request.form['totalChunks']
+    chunk_index = int(request.form['chunkIndex'])
+    total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
-    
+
     chunk_save_path = os.path.join(cache_dir_path, f"{file_name}.part{chunk_index}")
     chunk.save(chunk_save_path)
-    
-    # Check if all parts are uploaded
+
     print(f"Chunk {chunk_index} of {total_chunks} received")
-    if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
-        # Reassemble file
+
+    # Only reassemble if this is the last chunk
+    # (client uploads in any order, so check all parts)
+    all_parts = [os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(total_chunks)]
+    if all(all_parts):
         print("Reassembling file...")
-        with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
-            for i in range(int(total_chunks)):
-                with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
-                    full_file.write(part_file.read())
-        print("Finished reassembling file...")
-        time.sleep(60)  # Wait for 60 seconds
-        return "File reassembled and saved successfully", 200
+        assembled_path = os.path.join(full_dir_path, file_name)
+        try:
+            with open(assembled_path + ".tmp", 'wb') as full_file:
+                for i in range(total_chunks):
+                    part_path = os.path.join(cache_dir_path, f"{file_name}.part{i}")
+                    with open(part_path, 'rb') as part_file:
+                        shutil.copyfileobj(part_file, full_file)
+            os.replace(assembled_path + ".tmp", assembled_path)  # atomic move
+            print("Finished reassembling file...")
+            # Optionally, cleanup parts here
+            for i in range(total_chunks):
+                os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))
+            return "File reassembled and saved successfully", 200
+        except Exception as e:
+            print(f"Error during reassembly: {e}")
+            return f"Error during reassembly: {e}", 500
     else:
         return f"Chunk {chunk_index} of {total_chunks} received", 202
     
