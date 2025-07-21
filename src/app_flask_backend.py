@@ -17,6 +17,7 @@ import argparse
 import select
 import multiprocessing
 import requests
+import zipfile
 from multiprocessing import active_children, Process
 from pathlib import Path
 
@@ -2781,37 +2782,51 @@ def get_image_plot_index():
         return jsonify({'error': str(e)}), 500
 
 
+@file_app.route('/delete_plot', methods=['POST'])
+def delete_plot():
+    data = request.get_json()
+    directory = data.get('directory')
+    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
+    dir_path = os.path.join(data_root_dir_path, directory)
+    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
+    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+    plot_index = data.get('plot_index')
+    df = pd.read_csv(csv_path)
+    if 'plot_index' not in df.columns:
+        return jsonify({"error": "'plot_index' column not found in csv"}), 500
+    df.loc[df['plot_index'] == plot_index, 'plot_index'] = -1
+    df.to_csv(csv_path, index=False)
+
+    return jsonify({"status": "success", "message": f"Plot {plot_index} deleted successfully."})
+
+
 @file_app.route('/get_plot_data', methods=['POST'])
 def get_plot_data():
-    data = request.json
-    directory = data['directory']
-    image_name = data['image_name']
-    camera = data['camera']
-
-    csv_path = os.path.join(directory, 'msgs_synced.csv')
-    if not os.path.exists(csv_path):
-        return jsonify({'error': 'msgs_synced.csv not found'}), 404
-
-    df = pd.read_csv(csv_path)
-
-    # Construct the image column name based on the camera
-    image_column = f'/{camera}/rgb_file'
-
-    if image_column not in df.columns:
-        return jsonify({'error': f'Column {image_column} not found in {csv_path}'}), 400
-
+    data = request.get_json()
+    directory = data.get('directory')
+    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
+    dir_path = os.path.join(data_root_dir_path, directory)
+    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
+    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
     try:
-        # Find the row that matches the image name
-        row = df[df[image_column] == image_name]
-        if row.empty:
-            return jsonify({'error': f'Image {image_name} not found in {image_column}'}), 404
-        
-        # Extract the plot index
-        plot_index = row['plot_index'].values[0]
+        df = pd.read_csv(csv_path)
+        if 'plot_index' not in df.columns:
+            return jsonify([])
+        # Filter for plots that have been marked
+        marked_plots_df = df[df['plot_index'] > -1].copy()
+        if marked_plots_df.empty:
+            return jsonify([])
+        image_col = '/top/rgb_file'
+        start_plots_df = marked_plots_df.groupby('plot_index').first().reset_index()
+        # Rename column to match what frontend expects
+        start_plots_df = start_plots_df.rename(columns={image_col: 'image_name'})
 
-        return jsonify({'plot_index': plot_index})
+        start_plots = start_plots_df[['plot_index', 'image_name']].to_dict('records')
+        
+        return jsonify(start_plots)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
@@ -2845,3 +2860,97 @@ def done_extract():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
+
+
+@file_app.route('/download_amiga_images', methods=['POST'])
+def download_amiga_images():
+    """
+    Downloads images extracted from an Amiga binary.
+    
+    If a 'plot_index' column with marked plots (> -1) exists in the metadata, 
+    only those marked images are zipped. Otherwise, all images from the directory are zipped.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON payload"}), 400
+
+        # --- 1. Get request data and construct paths using pathlib ---
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        camera = data.get('camera')
+        print(f"DEBUG: Received data: {data}")
+        # Using pathlib for cleaner and more robust path manipulation
+        base_path = Path(file_app.config['DATA_ROOT_DIR']) / 'Raw' / year / experiment / location / population / date / 'rover'
+        images_path = base_path / 'RGB' / 'Images' / camera
+        csv_path = base_path / 'RGB' / 'Metadata' / 'msgs_synced.csv'
+
+        if not images_path.is_dir():
+            return jsonify({"error": f"Images directory not found at: {images_path}"}), 404
+        if not csv_path.is_file():
+            return jsonify({"error": f"Metadata CSV not found at: {csv_path}"}), 404
+
+        # --- 2. Image Selection Logic ---
+        df = pd.read_csv(csv_path)
+        marked_images_filenames = set()
+        download_all = True
+
+        # Check if plots have been marked and the corresponding column exists
+        plot_index_col = 'plot_index'
+        image_file_col = f'/{camera}/rgb_file'
+
+        if plot_index_col in df.columns and image_file_col in df.columns:
+            # Filter for rows where a plot has been marked
+            marked_plots_df = df[df[plot_index_col] > -1]
+            if not marked_plots_df.empty:
+                print("Marked plots found. Preparing to download specific images.")
+                download_all = False
+                # Get the basename of each marked image file (e.g., 'image_001.png')
+                marked_images_filenames = set(
+                    Path(f).name for f in marked_plots_df[image_file_col].dropna()
+                )
+        
+        if download_all:
+            print("No marked plots found. Preparing to download all images.")
+
+        # --- 3. Zipping and Sending the File ---
+        zip_filename = f"{year}_{experiment}_{location}_{population}_{date}_Amiga_RGB.zip"
+        # Place the zip file in a temporary or cache directory if possible
+        zip_path = images_path.parent / zip_filename
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Walk through the images directory
+            for file in os.listdir(images_path):
+                file_path = images_path / file
+                if file_path.is_file():
+                    # If downloading all, or if the file is in our marked set, add it to the zip
+                    if download_all or file in marked_images_filenames:
+                        if not download_all and file in marked_images_filenames:
+                            # Find the row in the DataFrame matching this file by comparing just the file name
+                            df_row = marked_plots_df[marked_plots_df[image_file_col].apply(lambda x: Path(x).name) == {file}]
+                            if not df_row.empty:
+                                plot_index = df_row['plot_index'].iloc[0]
+                                new_filename = f"plot{plot_index}-{file}"
+                            else:
+                                new_filename = file
+                            zipf.write(file_path, arcname=new_filename)
+                        else:
+                            # Use 'arcname' to keep the zip file flat (no parent directories)
+                            zipf.write(file_path, arcname=file)
+        
+        # Send the created zip file to the user for download
+        return send_file(zip_path, as_attachment=True)
+
+    except FileNotFoundError:
+        return jsonify({"error": "A specified file or directory was not found."}), 404
+    except pd.errors.EmptyDataError:
+        return jsonify({"error": "Metadata CSV file is empty."}), 400
+    except KeyError as e:
+        return jsonify({"error": f"Missing expected key in data: {e}"}), 400
+    except Exception as e:
+        # Generic error handler for unexpected issues
+        print(f"An unexpected error occurred: {e}")
+        return jsonify({"error": "An internal server error occurred."}), 500
