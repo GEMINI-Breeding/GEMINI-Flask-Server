@@ -2676,70 +2676,42 @@ def stop_extract():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
-def update_plot_index(directory, image_name, plot_index, position, camera, stitch_direction=None):
+def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None):
     data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
     image_dir_path = os.path.join(data_root_dir_path, directory)
     metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
     csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    image_name = "/top/" + image_name  # Ensure the image name starts with 'top/'
+    start_image_name = "/top/" + start_image_name  # Ensure the image name starts with 'top/'
+    end_image_name = "/top/" + end_image_name
     print(f"DEBUG: CSV path is {csv_path}")
     if not os.path.exists(csv_path):
         print(f"DEBUG: msgs_synced.csv not found at {csv_path}")
         return jsonify({"error": f"msgs_synced.csv not found at {csv_path}"}), 404
-
     df = pd.read_csv(csv_path)
-
     if 'plot_index' not in df.columns:
         df['plot_index'] = -1
-
     image_column = f'/{camera}/rgb_file'
     if image_column not in df.columns:
         print(f"DEBUG: Image column '{image_column}' not found in {csv_path}")
         return jsonify({"error": f"Image column '{image_column}' not found in {csv_path}"}), 404
-
     try:
-        row_index = df.index[df[image_column] == image_name].tolist()[0]
+        start_row_index = df.index[df[image_column] == start_image_name].tolist()[0]
+        end_row_index = df.index[df[image_column] == end_image_name].tolist()[0]
     except IndexError:
-        print(f"DEBUG: Image '{image_name}' not found in column '{image_column}'")
-        return jsonify({"error": f"Image '{image_name}' not found in column '{image_column}'"}), 404
-
+        print(f"DEBUG: Image '{start_image_name}' or '{end_image_name}' not found in column '{image_column}'")
+        return jsonify({"error": f"Image '{start_image_name}' or '{end_image_name}' not found in column '{image_column}'"}), 404
     current_plot_index = int(plot_index)
-
-    if position == 'start':
-        df.loc[row_index, 'plot_index'] = current_plot_index
-    elif position == 'end':
-        # Make sure stitch_direction column exists
-        if 'stitch_direction' not in df.columns:
-            df['stitch_direction'] = None  # Initialize
-        # Mark all rows from start to end
-        start_indices = df.index[df['plot_index'] == current_plot_index].tolist()
-        if not start_indices:
-            # If start not found, just mark the end row.
-            df.loc[row_index, 'plot_index'] = current_plot_index
-        else:
-            start_index = start_indices[0]
-            # Ensure end is after start
-            if row_index >= start_index:
-                df.loc[start_index:row_index, 'plot_index'] = current_plot_index
-                df.loc[start_index:row_index, 'stitch_direction'] = stitch_direction
-            else:
-                # If end is before start, just mark the end row
-                df.loc[row_index, 'plot_index'] = current_plot_index
-                df.loc[row_index, 'stitch_direction'] = stitch_direction
+    df.loc[start_row_index:end_row_index, 'plot_index'] = current_plot_index
+    df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
     df.to_csv(csv_path, index=False)
-
     return jsonify({"message": "Plot index updated successfully"}), 200
 
-@file_app.route('/mark_plot_start', methods=['POST'])
-def mark_plot_start():
+@file_app.route('/mark_plot', methods=['POST'])
+def mark_plot():
     data = request.json
-    return update_plot_index(data['directory'], data['image_name'], data['plot_index'], 'start', data['camera'])
-
-
-@file_app.route('/mark_plot_end', methods=['POST'])
-def mark_plot_end():
-    data = request.json
-    return update_plot_index(data['directory'], data['image_name'], data['plot_index'], 'end', data['camera'], data['stitch_direction'])
+    if 'stitch_direction' not in data:
+        data['stitch_direction'] = None
+    return update_plot_index(data['directory'], data['start_image_name'], data['end_image_name'], data['plot_index'], data['camera'], data.get('stitch_direction'))
 
 @file_app.route('/get_max_plot_index', methods=['POST'])
 def get_max_plot_index():
