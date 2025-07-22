@@ -41,61 +41,111 @@ CALIBRATION = ['calibration']
 TYPES = IMAGE_TYPES + GPS_TYPES + CALIBRATION
 
 # gps data to analyze
-GPS_PVT = ['stamp','gps_time','longitude','latitude','altitude','heading_motion',
-            'heading_accuracy','speed_accuracy','horizontal_accuracy','vertical_accuracy',
-            'p_dop','height']
-GPS_REL = ['stamp','relative_pose_north','relative_pose_east','relative_pose_down',
-            'relative_pose_heading','relative_pose_length','rel_pos_valid','rel_heading_valid',
-            'accuracy_north','accuracy_east','accuracy_down','accuracy_length','accuracy_heading']
+# GPS_PVT = ['stamp','gps_time','longitude','latitude','altitude','heading_motion',
+#             'heading_accuracy','speed_accuracy','horizontal_accuracy','vertical_accuracy',
+#             'p_dop','height']
+# GPS_REL = ['stamp','relative_pose_north','relative_pose_east','relative_pose_down',
+#             'relative_pose_heading','relative_pose_length','rel_pos_valid','rel_heading_valid',
+#             'accuracy_north','accuracy_east','accuracy_down','accuracy_length','accuracy_heading']
 
-def interpolate_gps(
-    gps_dfs: List[np.ndarray],
-    image_dfs: List[np.ndarray],
-    skip_pointer: int,
-    save_path: Path,
-    columns
-) -> list:
-    
-    gps_dfs_list = []
+GPS_SCHEMAS = {
+    "pvt":  ['stamp','gps_time','longitude','latitude','altitude','heading_motion',
+             'heading_accuracy','speed_accuracy','horizontal_accuracy','vertical_accuracy',
+             'p_dop','height'],
+    "relposned": ['stamp','relative_pose_north','relative_pose_east','relative_pose_down',
+                  'relative_pose_heading','relative_pose_length','rel_pos_valid','rel_heading_valid',
+                  'accuracy_north','accuracy_east','accuracy_down','accuracy_length','accuracy_heading'],
+}
+GPS_ORDER = ["pvt", "relposned"]
+
+def enforce_schema(df: pd.DataFrame, kind: str) -> pd.DataFrame:
+    schema = GPS_SCHEMAS[kind]
+    return df.reindex(columns=schema)
+
+def interpolate_gps(gps_dfs, image_dfs, skip_pointer, save_path, columns):
+    out_arrays = {}
     save_path = save_path / 'Metadata'
-    
-    for key, gps in gps_dfs.items():
+
+    for key in GPS_ORDER:                      # <- fixed iteration order
+        gps = gps_dfs[key]
         fn = interp1d(
             x=gps[skip_pointer:, 0],
-            y=gps[skip_pointer:, 1:],    # now for RELPOSNED this y-array no longer has gps_time
+            y=gps[skip_pointer:, 1:],
             axis=0, kind='linear', fill_value='extrapolate'
         )
-        interpolated = np.array([fn(t) for t in image_dfs[0][skip_pointer:, 0]])
-        merged = np.hstack([
-            image_dfs[0][skip_pointer:, 0].reshape(-1, 1),
-            interpolated
-        ])
-        new_cols = ['image_timestamp'] + columns[key][1:]
+        timestamps = image_dfs[0][skip_pointer:, 0]
+        interpolated = fn(timestamps)
+        merged = np.hstack([timestamps.reshape(-1,1), interpolated])
 
-        # save & update
-        gps_dfs_list.append(merged)
-        gps_dfs_new = pd.DataFrame(merged, columns=new_cols)
-        columns[key] = new_cols
-        
-        # combine column 'image_timestamp' with 'stamp' (make sure no duplicates are present and sort rows by 'stamp')
-        gps_dfs_new['stamp'] = gps_dfs_new['image_timestamp']
-        gps_dfs_new = gps_dfs_new.drop(columns=['image_timestamp'])
-        gps_dfs_new = gps_dfs_new.drop_duplicates(subset=['stamp'])
-        gps_dfs_new = gps_dfs_new.sort_values(by=['stamp'])
-        gps_dfs_new.reset_index(drop=True, inplace=True)
- 
-        old = (save_path / f"gps_{key}.csv")
-        if key == 'pvt':
-            gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_PVT)
-        else:
-            gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_REL)
+        # Build columns from schema, NOT from mutable `columns[key]`
+        schema = GPS_SCHEMAS[key]
+        gps_dfs_new = pd.DataFrame(merged, columns=['stamp'] + schema[1:])  # use 'stamp' right away
+        gps_dfs_new = enforce_schema(gps_dfs_new, key)
+        gps_dfs_new = gps_dfs_new.drop_duplicates('stamp').sort_values('stamp').reset_index(drop=True)
 
-        combined = pd.concat([gps_df_old.reset_index(drop=True),
-                              gps_dfs_new.reset_index(drop=True)],
-                             ignore_index=True)
+        old = save_path / f"gps_{key}.csv"
+        gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=schema)
+        gps_df_old = enforce_schema(gps_df_old, key)
+
+        combined = pd.concat([gps_df_old, gps_dfs_new], ignore_index=True)
+        combined = enforce_schema(combined, key)
         combined.to_csv(old, index=False)
+
+        out_arrays[key] = merged  # keep dict so you can order later
+
+    # Return in deterministic order
+    return [out_arrays[k] for k in GPS_ORDER]
+
+# def interpolate_gps(
+#     gps_dfs: List[np.ndarray],
+#     image_dfs: List[np.ndarray],
+#     skip_pointer: int,
+#     save_path: Path,
+#     columns
+# ) -> list:
+    
+#     gps_dfs_list = []
+#     save_path = save_path / 'Metadata'
+    
+#     for key, gps in gps_dfs.items():
+#         fn = interp1d(
+#             x=gps[skip_pointer:, 0],
+#             y=gps[skip_pointer:, 1:],    # now for RELPOSNED this y-array no longer has gps_time
+#             axis=0, kind='linear', fill_value='extrapolate'
+#         )
+#         interpolated = np.array([fn(t) for t in image_dfs[0][skip_pointer:, 0]])
+#         merged = np.hstack([
+#             image_dfs[0][skip_pointer:, 0].reshape(-1, 1),
+#             interpolated
+#         ])
+#         new_cols = ['image_timestamp'] + columns[key][1:]
+
+#         # save & update
+#         gps_dfs_list.append(merged)
+#         gps_dfs_new = pd.DataFrame(merged, columns=new_cols)
+#         columns[key] = new_cols
+        
+#         # combine column 'image_timestamp' with 'stamp' (make sure no duplicates are present and sort rows by 'stamp')
+#         gps_dfs_new['stamp'] = gps_dfs_new['image_timestamp']
+#         gps_dfs_new = gps_dfs_new.drop(columns=['image_timestamp'])
+#         gps_dfs_new = gps_dfs_new.drop_duplicates(subset=['stamp'])
+#         gps_dfs_new = gps_dfs_new.sort_values(by=['stamp'])
+#         gps_dfs_new.reset_index(drop=True, inplace=True)
+ 
+#         old = (save_path / f"gps_{key}.csv")
+#         gps_df_old = (pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_SCHEMAS[key]))
+#         gps_df_old = enforce_schema(gps_df_old, key)
+#         # if key == 'pvt':
+#         #     gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_PVT)
+#         # else:
+#         #     gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=GPS_REL)
+
+#         combined = pd.concat([gps_df_old.reset_index(drop=True),
+#                               gps_dfs_new.reset_index(drop=True)],
+#                              ignore_index=True)
+#         combined.to_csv(old, index=False)
             
-    return gps_dfs_list
+#     return gps_dfs_list
         
 def process_disparity(
     img: torch.Tensor,
@@ -139,13 +189,16 @@ def process_disparity(
 
 def heading_to_direction(heading):
     if heading is not None:
-        if (heading > 315 or heading <= 45):
+        # Convert radians to degrees
+        heading_deg = np.degrees(heading) % 360  # Ensure 0-360 range
+        
+        if (heading_deg > 315 or heading_deg <= 45):
             return 'North'
-        elif (heading > 45 and heading <= 135):
+        elif (heading_deg > 45 and heading_deg <= 135):
             return 'East'
-        elif (heading > 135 and heading <= 225):
+        elif (heading_deg > 135 and heading_deg <= 225):
             return 'South'
-        elif (heading > 225 and heading <= 315):
+        elif (heading_deg > 225 and heading_deg <= 315):
             return 'West'
     else:
         return None
@@ -428,14 +481,28 @@ def extract_gps(
     # loop through each topic
     for topic_name in gps_topics:
 
+        # gps_name = topic_name.split('/')[2]
+        # if gps_name == 'pvt':
+        #     gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_PVT)
+        # elif gps_name == 'relposned':
+        #     gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_REL)
+        # else:
+        #     print('Unknown topic name.')
+        #     return False
+        
         gps_name = topic_name.split('/')[2]
-        if gps_name == 'pvt':
-            gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_PVT)
-        elif gps_name == 'relposned':
-            gps_df = pd.read_csv(f"{save_path}/gps_{gps_name}.csv") if (save_path / f"gps_{gps_name}.csv").exists() else pd.DataFrame(columns=GPS_REL)
-        else:
-            print('Unknown topic name.')
+
+        if gps_name not in GPS_SCHEMAS:
+            print(f"Unknown gps topic: {gps_name}")
             return False
+
+        csv_path = save_path / f"gps_{gps_name}.csv"
+        if csv_path.exists():
+            gps_df = pd.read_csv(csv_path)
+        else:
+            gps_df = pd.DataFrame(columns=GPS_SCHEMAS[gps_name])
+
+        gps_df = enforce_schema(gps_df, gps_name)          # keep column order
 
         gps_events: list[EventLogPosition] = events_dict[topic_name]
 
@@ -471,7 +538,7 @@ def extract_gps(
                     'longitude': [sample.longitude], 'latitude': [sample.latitude],
                     'altitude': [sample.altitude], 'heading_motion': [sample.heading_motion], 
                     'heading_accuracy': [sample.heading_accuracy], 'speed_accuracy': [sample.speed_accuracy], 
-                    'horizontal_accuracy': [sample.horizontal_accuracy], 'vetical_accuracy': [sample.vertical_accuracy], 
+                    'horizontal_accuracy': [sample.horizontal_accuracy], 'vertical_accuracy': [sample.vertical_accuracy], 
                     'p_dop': [sample.p_dop], 'height': [sample.height]
                 }
             elif gps_name == 'relposned':
@@ -492,7 +559,9 @@ def extract_gps(
 
         gps_df.replace({'True': 1, 'False': 0}, inplace=True)
         gps_df = gps_df.apply(pd.to_numeric, errors='coerce')
-        gps_df.to_csv(f"{save_path}/gps_{gps_name}.csv", index=False)
+        gps_df = enforce_schema(gps_df, gps_name)
+        gps_df.to_csv(save_path / f"gps_{gps_name}.csv", index=False)
+        # gps_df.to_csv(f"{save_path}/gps_{gps_name}.csv", index=False)
         df[gps_name] = gps_df.to_numpy(dtype='float64')
         gps_cols_list[gps_name] = gps_df.columns.tolist()
         
@@ -628,7 +697,35 @@ def process_single_binary_file(args):
     if len(image_dfs) == 0:
         raise RuntimeError(f"Failed to extract image event file for {file_name}")
     
-    return image_dfs, gps_dfs, images_cols, gps_cols, file_index
+    # Perform GPS interpolation for this individual file (same as sequential processing)
+    skip_pointer = 0  # For individual files, start from beginning
+    gps_dfs_interpolated = interpolate_gps(
+        gps_dfs=gps_dfs, 
+        image_dfs=image_dfs, 
+        skip_pointer=skip_pointer, 
+        save_path=output_path, 
+        columns=gps_cols
+    )
+    
+    # Sync messages after GPS interpolation for this file
+    print(f'Syncing messages for file {file_index + 1}: image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs_interpolated)}')
+    # msgs = image_dfs + gps_dfs_interpolated
+    gps_arrays = [gps_dfs_interpolated[GPS_ORDER.index(name)] for name in GPS_ORDER]
+    msgs = image_dfs + gps_arrays
+    msgs_synced: list[np.array] = sync_msgs(msgs)
+    
+    return msgs_synced, images_cols, gps_cols, file_index
+
+def cleanup_output_files(output_path):
+    """Clean up any partially created files and directories."""
+    import shutil
+    try:
+        if output_path.exists():
+            # Remove entire output directory and all its contents
+            shutil.rmtree(output_path)
+            print(f"Cleaned up output directory: {output_path}")
+    except Exception as e:
+        print(f"Warning: Could not clean up output directory: {e}")
 
 def extract_binary(file_names, output_path) -> None:
     """Read an events file and extracts relevant information from it.
@@ -681,17 +778,12 @@ def extract_binary(file_names, output_path) -> None:
                 results = pool.map(process_single_binary_file, process_args)
             
             # Collect results from all processes
-            all_image_dfs = []
-            all_gps_dfs = []
+            all_msgs_synced = []
             images_cols = None
             gps_cols = None
             
-            # Sort results by file index to maintain order
-            results.sort(key=lambda x: x[4])  # Sort by file_index
-            
-            for image_dfs, gps_dfs, img_cols, gps_cols_current, file_index in results:
-                all_image_dfs.extend(image_dfs)
-                all_gps_dfs.extend(gps_dfs.values())
+            for msgs_synced, img_cols, gps_cols_current, file_index in results:
+                all_msgs_synced.append(msgs_synced)
                 if images_cols is None:
                     images_cols = img_cols
                 if gps_cols is None:
@@ -701,20 +793,45 @@ def extract_binary(file_names, output_path) -> None:
                 with open(f"{output_path}/progress.txt", "w") as f:
                     f.write(str(file_index + 1))
             
-            # Use the aggregated results
-            image_dfs = all_image_dfs
-            gps_dfs = all_gps_dfs
-            
-            # Note: GPS interpolation and message syncing for multiprocessing
-            # would require additional coordination between processes
-            print("Note: For multiprocessing, GPS interpolation and message syncing")
-            print("require additional implementation to maintain temporal consistency.")
+            # Concatenate all synced messages from different files
+            # all_msgs_synced is a list of lists, where each inner list contains synced arrays for a file
+            if all_msgs_synced:
+                # Stack arrays vertically across all files
+                num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
+                final_msgs = []
+                for msg_idx in range(num_msg_types):
+                    # Stack arrays for this message type across all files
+                    msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
+                    stacked_msg = np.vstack(msg_arrays)
+                    final_msgs.append(stacked_msg)
+                
+                # Create final DataFrame from concatenated synced messages
+                print("Creating final msgs_synced.csv from multiprocessed results...")
+                msgs_synced_conc = np.concatenate(final_msgs, axis=1)
+                # gps_cols_list = [gps_cols[cols] for cols in gps_cols]
+                # gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
+                # msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
+                gps_cols_list = [col for name in GPS_ORDER for col in GPS_SCHEMAS[name]]
+                final_cols = images_cols + gps_cols_list
+                msgs_df = pd.DataFrame(msgs_synced_conc, columns=final_cols)
+                
+                # postprocessing
+                msgs_df = postprocessing(msgs_df, images_cols)
+                
+                # output synced messages
+                save_path = output_path / 'Metadata'
+                if not save_path.exists():
+                    save_path.mkdir(parents=True, exist_ok=True)
+                msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+                print("Successfully created msgs_synced.csv from multiprocessed data")
+            else:
+                print("Warning: No valid synced messages found for final output")
             
         except Exception as e:
             print(f"Multiprocessing failed: {e}")
-            print("Falling back to sequential processing.")
-            use_multiprocessing = False
-            use_threading = False
+            print("Cleaning up partially created files and terminating...")
+            cleanup_output_files(output_path)
+            raise RuntimeError(f"Binary extraction failed in multiprocessing mode: {e}")
     
     elif use_threading:
         print(f"Using threading with {max_workers} threads for {len(file_names)} files (daemon process detected).")
@@ -728,17 +845,12 @@ def extract_binary(file_names, output_path) -> None:
                 results = list(executor.map(process_single_binary_file, process_args))
             
             # Collect results from all threads
-            all_image_dfs = []
-            all_gps_dfs = []
+            all_msgs_synced = []
             images_cols = None
             gps_cols = None
             
-            # Sort results by file index to maintain order
-            results.sort(key=lambda x: x[4])  # Sort by file_index
-            
-            for image_dfs, gps_dfs, img_cols, gps_cols_current, file_index in results:
-                all_image_dfs.extend(image_dfs)
-                all_gps_dfs.extend(gps_dfs.values())
+            for msgs_synced, img_cols, gps_cols_current, file_index in results:
+                all_msgs_synced.append(msgs_synced)
                 if images_cols is None:
                     images_cols = img_cols
                 if gps_cols is None:
@@ -748,31 +860,56 @@ def extract_binary(file_names, output_path) -> None:
                 with open(f"{output_path}/progress.txt", "w") as f:
                     f.write(str(file_index + 1))
             
-            # Use the aggregated results
-            image_dfs = all_image_dfs
-            gps_dfs = all_gps_dfs
-            
-            # Note: GPS interpolation and message syncing for threading
-            # would require additional coordination between threads
-            print("Note: For threading, GPS interpolation and message syncing")
-            print("require additional implementation to maintain temporal consistency.")
+            # Concatenate all synced messages from different files
+            # all_msgs_synced is a list of lists, where each inner list contains synced arrays for a file
+            if all_msgs_synced:
+                # Stack arrays vertically across all files
+                num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
+                final_msgs = []
+                for msg_idx in range(num_msg_types):
+                    # Stack arrays for this message type across all files
+                    msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
+                    stacked_msg = np.vstack(msg_arrays)
+                    final_msgs.append(stacked_msg)
+                
+                # Create final DataFrame from concatenated synced messages
+                print("Creating final msgs_synced.csv from threaded results...")
+                msgs_synced_conc = np.concatenate(final_msgs, axis=1)
+                gps_cols_list = [gps_cols[cols] for cols in gps_cols]
+                gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
+                msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
+                
+                # postprocessing
+                msgs_df = postprocessing(msgs_df, images_cols)
+                
+                # output synced messages
+                save_path = output_path / 'Metadata'
+                if not save_path.exists():
+                    save_path.mkdir(parents=True, exist_ok=True)
+                msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+                print("Successfully created msgs_synced.csv from threaded data")
+            else:
+                print("Warning: No valid synced messages found for final output")
             
         except Exception as e:
             print(f"Threading failed: {e}")
-            print("Falling back to sequential processing.")
-            use_threading = False
+            print("Cleaning up partially created files and terminating...")
+            cleanup_output_files(output_path)
+            raise RuntimeError(f"Binary extraction failed in threading mode: {e}")
     
-    if not use_multiprocessing and not use_threading:
-        # Sequential processing (original approach or fallback)
+    else:
+        # Sequential processing
         if is_daemon and len(file_names) > 1:
             print("Running in daemon process - using sequential processing for multiple files.")
         elif len(file_names) == 1:
             print("Using sequential processing for single file.")
         else:
-            print("Using sequential processing as fallback.")
+            print("Using sequential processing.")
         
         counter = 0
-        skip_pointer = 0
+        all_msgs_synced = []
+        images_cols = None
+        gps_cols = None
         
         for file_name in tqdm(file_names):
             
@@ -780,35 +917,48 @@ def extract_binary(file_names, output_path) -> None:
             with open(report_path, "a") as f:
                 f.write(f"\n--- File: {file_name} ---\n")
             
-            # Process single file
-            image_dfs, gps_dfs, images_cols, gps_cols, _ = process_single_binary_file((file_name, output_path, counter, len(file_names)))
+            # Process single file (GPS interpolation and message sync is done inside process_single_binary_file)
+            msgs_synced, img_cols, gps_cols_current, _ = process_single_binary_file((file_name, output_path, counter, len(file_names)))
             
-            # Interpolate GPS data to query at camera timestamps
-            gps_dfs = interpolate_gps(gps_dfs=gps_dfs, image_dfs=image_dfs, skip_pointer=skip_pointer, save_path=output_path, columns=gps_cols)
-            skip_pointer = len(gps_dfs[0])
+            # Collect results
+            all_msgs_synced.append(msgs_synced)
+            if images_cols is None:
+                images_cols = img_cols
+            if gps_cols is None:
+                gps_cols = gps_cols_current
             
             # Update progress
             counter += 1
             with open(f"{output_path}/progress.txt", "w") as f:
                 f.write(str(counter))
         
-        # Sync messages for sequential processing
-        print(f'image_dfs: {len(image_dfs)}, gps_dfs: {len(gps_dfs)}')
-        msgs = image_dfs + gps_dfs
-        msgs_synced: list[np.array] = sync_msgs(msgs)
-        msgs_synced_conc = np.concatenate(msgs_synced, axis=1)
-        gps_cols_list = [gps_cols[cols] for cols in gps_cols]
-        gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
-        msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
-        
-        # postprocessing
-        msgs_df = postprocessing(msgs_df, images_cols)
-        
-        # output synced messages
-        save_path = output_path / 'Metadata'
-        if not save_path.exists():
-            save_path.mkdir(parents=True, exist_ok=True)
-        msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+        # Concatenate all synced messages from different files
+        if all_msgs_synced:
+            # Stack arrays vertically across all files
+            num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
+            final_msgs = []
+            for msg_idx in range(num_msg_types):
+                # Stack arrays for this message type across all files
+                msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
+                stacked_msg = np.vstack(msg_arrays)
+                final_msgs.append(stacked_msg)
+            
+            # Create final DataFrame from concatenated synced messages
+            print("Creating final msgs_synced.csv from sequential processing...")
+            msgs_synced_conc = np.concatenate(final_msgs, axis=1)
+            gps_cols_list = [gps_cols[cols] for cols in gps_cols]
+            gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
+            msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
+            
+            # postprocessing
+            msgs_df = postprocessing(msgs_df, images_cols)
+            
+            # output synced messages
+            save_path = output_path / 'Metadata'
+            if not save_path.exists():
+                save_path.mkdir(parents=True, exist_ok=True)
+            msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
+            print("Successfully created msgs_synced.csv from sequential processing")
     
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
