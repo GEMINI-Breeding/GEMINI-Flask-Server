@@ -11,10 +11,13 @@ import string
 import csv
 import shutil
 import traceback
+import tempfile
+import torch
 import argparse
 import select
 import multiprocessing
 import requests
+import zipfile
 from multiprocessing import active_children, Process
 from pathlib import Path
 
@@ -40,6 +43,31 @@ from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, co
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
+from scripts.plot_marking.plot_marking import plot_marking_bp
+
+# stitch pipeline
+import sys
+AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
+print(AGROWSTITCH_PATH)
+sys.path.append(AGROWSTITCH_PATH)
+from scripts.stitch_utils import (
+    georeference_plot,
+    run_stitch_all_plots,
+    run_stitch_process_for_plot,
+    monitor_stitch_updates_multi_plot,
+    monitor_stitch_updates,
+    is_plot_completed
+)
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
+from PIL import ImageFile
+
+# stitch pipeline
+import sys
+AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
+print(AGROWSTITCH_PATH)
+sys.path.append(AGROWSTITCH_PATH)
+from panorama_maker.AgRowStitch import run as run_agrowstitch
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -48,10 +76,16 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
+file_app.register_blueprint(plot_marking_bp)
+
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 extraction_processes = {}
 extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
+extraction_error_message = None  # Stores detailed error message if extraction fails
+odm_method = None
+stitch_thread=None
+stitch_stop_event = threading.Event()
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -70,6 +104,24 @@ def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
         else:
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+
+# def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
+#     exif_data_list = []
+    
+#     # Extract EXIF Data Extraction
+#     for file_path in file_paths:
+#         if data_type.lower() == 'image':
+#             if file_path not in existing_paths:
+#                 msg = get_image_exif(file_path)
+#                 if msg and msg['image_path'] not in existing_paths:
+#                     exif_data_list.append(msg)
+#                     existing_paths.add(msg['image_path'])  # Prevent duplicated process
+    
+#     if data_type.lower() == 'image' and exif_data_list:
+#         if existing_df is not None and not existing_df.empty:
+#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+#         else:
+#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -101,7 +153,7 @@ def get_tif_to_png():
 # endpoint to serve files
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
-    global data_root_dir
+    # global data_root_dir
     return send_from_directory(data_root_dir, filename)
 
 # endpoint to serve image in memory
@@ -109,16 +161,16 @@ def serve_files(filename):
 def serve_image(filename):
     global image_dict
     return image_dict[filename]
-    
-@file_app.route('/fetch_data_root_dir')
+
+@file_app.route('/fetch_data_root_dir', methods=['GET'])
 def fetch_data_root_dir():
-    global data_root_dir
+    # global data_root_dir
     return data_root_dir
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
-    global data_root_dir
+    # global data_root_dir
     dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
     if os.path.exists(dir_path):
         dirs = (entry.name for entry in os.scandir(dir_path) if entry.is_dir())
@@ -164,7 +216,7 @@ async def list_dirs_nested_processed():
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
-    global data_root_dir
+    # global data_root_dir
     dir_path = os.path.join(data_root_dir, dir_path)
     if os.path.exists(dir_path):
         files = os.listdir(dir_path)
@@ -201,7 +253,7 @@ def view_synced_data():
 
 @file_app.route('/restore_images', methods=['POST'])
 def restore_images():
-    global data_root_dir
+    # global data_root_dir
 
     data = request.get_json()
     image_names = data.get('images')
@@ -245,7 +297,7 @@ def restore_images():
 
 @file_app.route('/remove_images', methods=['POST'])
 def remove_images():
-    global data_root_dir
+    # global data_root_dir
 
     data = request.get_json()
     image_names = data.get('images')
@@ -497,7 +549,7 @@ def get_best_model_file():
 
 @file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
 def check_runs(dir_path):
-    global data_root_dir
+    # global data_root_dir
     dir_path = os.path.join(data_root_dir, dir_path)
     response_data = {}  # Initialize an empty dictionary for the response
     
@@ -673,25 +725,36 @@ def _cleanup_files(file_paths):
             pass
 
 def _extraction_worker(file_paths, output_path):
-    global extraction_status
+    global extraction_status, extraction_error_message
 
     try:
         extraction_status = "in_progress"
+        extraction_error_message = None
         extract_binary(file_paths, output_path)
         
         # cleanup files
         _cleanup_files(file_paths)
         extraction_status = "done"
+    except EOFError as e:
+        error_msg = f"EOFError during binary extraction: {e}"
+        print(error_msg)
+        extraction_status = "failed"
+        extraction_error_message = error_msg
     except Exception as e:
-        print(f"[ERROR] Extraction failed: {e}")
+        error_msg = f"Extraction failed: {e}"
+        print(f"[ERROR] {error_msg}")
         # print full traceback
         traceback.print_exc()
         extraction_status = "failed"
+        extraction_error_message = error_msg
 
 @file_app.route('/get_binary_status', methods=['GET'])
 def get_binary_status():
     print(f"Extraction status: {extraction_status}")
-    return jsonify({'status': extraction_status}), 200
+    response = {'status': extraction_status}
+    if extraction_status == "failed" and extraction_error_message:
+        response['error_message'] = extraction_error_message
+    return jsonify(response), 200
 
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
@@ -750,29 +813,41 @@ def get_binary_progress():
 @file_app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     chunk = request.files['fileChunk']
-    chunk_index = request.form['chunkIndex']
-    total_chunks = request.form['totalChunks']
+    chunk_index = int(request.form['chunkIndex'])
+    total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
-    
+
     chunk_save_path = os.path.join(cache_dir_path, f"{file_name}.part{chunk_index}")
     chunk.save(chunk_save_path)
-    
-    # Check if all parts are uploaded
-    print(f"Chunk {chunk_index} of {total_chunks} received")
-    if all(os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(int(total_chunks))):
-        # Reassemble file
-        with open(os.path.join(full_dir_path, file_name), 'wb') as full_file:
-            for i in range(int(total_chunks)):
-                with open(os.path.join(cache_dir_path, f"{file_name}.part{i}"), 'rb') as part_file:
-                    full_file.write(part_file.read())
 
-        time.sleep(60)  # Wait for 60 seconds
-        return "File reassembled and saved successfully", 200
+    print(f"Chunk {chunk_index} of {total_chunks} received")
+
+    # Only reassemble if this is the last chunk
+    # (client uploads in any order, so check all parts)
+    all_parts = [os.path.exists(os.path.join(cache_dir_path, f"{file_name}.part{i}")) for i in range(total_chunks)]
+    if all(all_parts):
+        print("Reassembling file...")
+        assembled_path = os.path.join(full_dir_path, file_name)
+        try:
+            with open(assembled_path + ".tmp", 'wb') as full_file:
+                for i in range(total_chunks):
+                    part_path = os.path.join(cache_dir_path, f"{file_name}.part{i}")
+                    with open(part_path, 'rb') as part_file:
+                        shutil.copyfileobj(part_file, full_file)
+            os.replace(assembled_path + ".tmp", assembled_path)  # atomic move
+            print("Finished reassembling file...")
+            # Optionally, cleanup parts here
+            for i in range(total_chunks):
+                os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))
+            return "File reassembled and saved successfully", 200
+        except Exception as e:
+            print(f"Error during reassembly: {e}")
+            return f"Error during reassembly: {e}", 500
     else:
         return f"Chunk {chunk_index} of {total_chunks} received", 202
     
@@ -859,12 +934,17 @@ def run_script():
 
 @file_app.route('/get_gcp_selcted_images', methods=['POST'])
 def get_gcp_selcted_images():
-    global data_root_dir
+    # global data_root_dir
     try:
         image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
+        
+        # if folder 'top' is in image_folder, add it to the path
+        if os.path.isdir(os.path.join(image_folder, 'top')):
+            print("Found 'top' folder in image_folder, adding it to the path")
+            image_folder = os.path.join(image_folder, 'top')
         selected_images = collect_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
@@ -884,12 +964,16 @@ def get_gcp_selcted_images():
 
 @file_app.route('/refresh_gcp_selcted_images', methods=['POST'])
 def refresh_gcp_selcted_images():
-    global data_root_dir
+    # global data_root_dir
     try:
         image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
+        # if folder 'top' is in image_folder, add it to the path
+        if os.path.isdir(os.path.join(image_folder, 'top')):
+            print("Found 'top' folder in image_folder, adding it to the path")
+            image_folder = os.path.join(image_folder, 'top')
         selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
@@ -938,8 +1022,8 @@ def stop_drone_extract():
     
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff():
-    global now_drone_processing, processed_image_folder
-    
+    global processed_image_folder
+    # global now_drone_processing
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
@@ -1029,16 +1113,26 @@ def save_array(debug=False):
             if debug:
                 print(item, flush=True)
             image_name = item['image_path'].split("/")[-1]
-            existing_data[image_name] = {
-                'gcp_lon': item['gcp_lon'],
-                'gcp_lat': item['gcp_lat'],
-                'pointX': item['pointX'],
-                'pointY': item['pointY'],
-                'image_path': os.path.join(processed_path, image_name),
-                'gcp_label': item['gcp_label'],
-                'naturalWidth': item['naturalWidth'],
-                'naturalHeight': item['naturalHeight']
-            }
+            
+            # Check if pointX and pointY are not null
+            if item['pointX'] is not None and item['pointY'] is not None:
+                # Add or update the point
+                existing_data[image_name] = {
+                    'gcp_lon': item['gcp_lon'],
+                    'gcp_lat': item['gcp_lat'],
+                    'pointX': item['pointX'],
+                    'pointY': item['pointY'],
+                    'image_path': os.path.join(processed_path, image_name),
+                    'gcp_label': item['gcp_label'],
+                    'naturalWidth': item['naturalWidth'],
+                    'naturalHeight': item['naturalHeight']
+                }
+            else:
+                # Remove the point if pointX or pointY is null
+                if image_name in existing_data:
+                    del existing_data[image_name]
+                    if debug:
+                        print(f"Removed point for image: {image_name}")
 
     # Write merged data to file
     with open(filename, "w") as f:
@@ -1118,7 +1212,7 @@ def select_middle(df):
 
 def filter_images(geojson_features, year, experiment, location, population, date, platform, sensor, middle_image=False):
 
-    global data_root_dir
+    # global data_root_dir
 
     # Construct the CSV path from the state variables
     csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
@@ -1297,18 +1391,158 @@ def load_geojson():
     else:
         return jsonify({"status": "error", "message": "File not found"})
     
-@file_app.route('/get_odm_logs', methods=['GET'])
+@file_app.route('/get_odm_logs', methods=['POST'])
 def get_odm_logs():
-    logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
-    print("Logs Path:", logs_path)  # Debug statement
-    if os.path.exists(logs_path):
-        with open(logs_path, 'r') as log_file:
-            lines = log_file.readlines()
-            latest_logs = lines[-20:]  # Get the last 20 lines
-        return jsonify({"log_content": ''.join(latest_logs)}), 200
+    
+    # get data
+    data = request.json
+    method = data.get('method')
+    ortho_data = data.get('orthoData')
+    
+    print("Method for logs:", method)  # Debug statement
+    
+    if method == 'STITCH':
+        final_mosaics_path = os.path.join(
+            data_root_dir, "Raw", ortho_data['year'],
+            ortho_data['experiment'], ortho_data['location'], ortho_data['population'],
+            ortho_data['date'], ortho_data['platform'], ortho_data['sensor'], 
+            "Images", "final_mosaics"
+        )
+        
+        if not os.path.exists(final_mosaics_path):
+            return jsonify({"error": "Final mosaics directory not found"}), 404
+        
+        # Find all plot log files
+        log_files = []
+        for file in os.listdir(final_mosaics_path):
+            if file.startswith("temp_plot_") and file.endswith(".log"):
+                log_files.append(os.path.join(final_mosaics_path, file))
+        
+        if not log_files:
+            return jsonify({"error": "No plot log files found"}), 404
+        
+        # Sort log files by plot ID for consistent order
+        log_files.sort()
+        
+        # Combine logs from all plots
+        combined_logs = []
+        for log_file in log_files:
+            plot_name = os.path.basename(log_file).replace(".log", "")
+            combined_logs.append(f"\n=== {plot_name.upper()} LOG ===\n")
+            
+            try:
+                with open(log_file, 'r') as f:
+                    content = f.read()
+                    combined_logs.append(content)
+                    if not content.endswith('\n'):
+                        combined_logs.append('\n')
+            except Exception as e:
+                combined_logs.append(f"Error reading {log_file}: {str(e)}\n")
+        
+        return jsonify({"log_content": ''.join(combined_logs)}), 200
     else:
-        print("Logs not found at path:", logs_path)  # Debug statement
-        return jsonify({"error": "Logs not found"}), 404
+        # Original ODM logs logic
+        logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+        print("Logs Path:", logs_path)  # Debug statement
+        if os.path.exists(logs_path):
+            with open(logs_path, 'r') as log_file:
+                lines = log_file.readlines()
+                # latest_logs = lines[-20:]  # Get the last 20 lines
+            return jsonify({"log_content": ''.join(lines)}), 200
+        else:
+            print("Logs not found at path:", logs_path)  # Debug statement
+            return jsonify({"error": "Logs not found"}), 404
+
+@file_app.route('/run_stitch', methods=['POST'])
+def run_stitch_endpoint():
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    year = data.get('year')
+    experiment = data.get('experiment')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    # temp_dir = data.get('temp_dir')
+    # reconstruction_quality = data.get('reconstruction_quality')
+    custom_options = data.get('custom_options')
+    
+    global stitch_thread, stitch_stop_event, odm_method
+    global stitched_path, temp_output
+    odm_method = 'stitch'
+    stitch_stop_event.clear()
+    
+    try:
+        image_path = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Images", "top"
+        )
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
+        save_path = os.path.join(
+            data_root_dir, "Processed", year,
+            experiment, location, population,
+            date, platform, sensor
+        )
+        image_calibration = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Metadata", "top_calibration.json"
+        )
+        config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
+        stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
+        temp_output = os.path.join(os.path.dirname(image_path), "top_output")
+        
+        # remove stitched_path and temp_output if it exists
+        if os.path.exists(stitched_path):
+            shutil.rmtree(stitched_path)
+            print(f"Removed existing stitched path: {stitched_path}")
+        if os.path.exists(temp_output):
+            shutil.rmtree(temp_output)
+            print(f"Removed existing temp output path: {temp_output}")
+        
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
+        
+        # Check if msgs_synced.csv exists
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({"status": "error", "message": f"msgs_synced.csv not found at {msgs_synced_path}"}), 404
+        
+        # Get processed plots for monitoring
+        import pandas as pd
+        msgs_df = pd.read_csv(msgs_synced_path)
+        unique_plots = [pid for pid in msgs_df['plot_id'].unique() if pid != 0]  # Exclude plot 0
+        
+        # Start multi-plot log monitoring thread
+        final_mosaics_dir = os.path.join(os.path.dirname(image_path), "final_mosaics")
+        
+        def progress_callback(progress):
+            latest_data['ortho'] = progress
+        
+        thread_prog = threading.Thread(
+            target=monitor_stitch_updates_multi_plot, 
+            args=(final_mosaics_dir, unique_plots, progress_callback), 
+            daemon=True
+        )
+        thread_prog.start()
+        
+        # Start the stitching process for all plots in background
+        stitch_thread = threading.Thread(
+            target=run_stitch_all_plots, 
+            args=(msgs_synced_path, image_path, config_path, custom_options, save_path, image_calibration, stitch_stop_event, progress_callback),
+            daemon=True
+        )
+        stitch_thread.start()
+
+        return jsonify({"status": "started", "message": "Stitching process started for all plots"}), 202
+
+    except Exception as e:
+        print(f"Error running AgRowStitch: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
@@ -1399,36 +1633,49 @@ def run_odm_endpoint():
         return make_response(jsonify({"status": "error", "message": f"ODM processing failed to start {str(e)}"}), 404)
 
 
-        
 @file_app.route('/stop_odm', methods=['POST'])
 def stop_odm():
-    global data_root_dir
+    # global data_root_dir, stitch_thread, stitch_stop_event, odm_method, stitched_path, temp_output
     try:
-        print('ODM processed stopped by user.')
-        print('Removing temp folder...')
-        folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
-        cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
-        cleanup_command = cleanup_command.split()
-        cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
-        cleanup_process.wait()
-        
-        print('Stopping ODM process...')
-        stop_event = threading.Event()
-        stop_event.set()
-        command = f"docker stop GEMINI-Container"
-        command = command.split()
-        # Run the command
-        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-        process.wait()
-        
-        print('Removing ODM container...')
-        command = f"docker rm GEMINI-Container"
-        command = command.split()
-        # Run the command
-        process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-        process.wait()
-        # reset_odm(data_root_dir)
-        shutil.rmtree(os.path.join(data_root_dir, 'temp'))
+        if odm_method == 'stitch' and stitch_thread is not None:
+            print("Stopping stitching thread...")
+            stitch_stop_event.set()
+            stitch_thread.join(timeout=10)  # Wait up to 10s for clean exit
+            print("Stitching stopped.")
+            
+            # remove stitched_path and temp_output if it exists
+            if os.path.exists(stitched_path):
+                shutil.rmtree(stitched_path)
+                print(f"Removed existing stitched path: {stitched_path}")
+            if os.path.exists(temp_output):
+                shutil.rmtree(temp_output)
+                print(f"Removed existing temp output path: {temp_output}")
+        else:
+            print('ODM processed stopped by user.')
+            print('Removing temp folder...')
+            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
+            cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+            cleanup_command = cleanup_command.split()
+            cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
+            cleanup_process.wait()
+            
+            print('Stopping ODM process...')
+            stop_event = threading.Event()
+            stop_event.set()
+            command = f"docker stop GEMINI-Container"
+            command = command.split()
+            # Run the command
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+            
+            print('Removing ODM container...')
+            command = f"docker rm GEMINI-Container"
+            command = command.split()
+            # Run the command
+            process = subprocess.Popen(command, stderr=subprocess.STDOUT)
+            process.wait()
+            # reset_odm(data_root_dir)
+            shutil.rmtree(os.path.join(data_root_dir, 'temp'))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -1439,7 +1686,7 @@ def get_ortho_progress():
 
 @file_app.route('/get_ortho_metadata', methods=['GET'])
 def get_ortho_metadata():
-    global data_root_dir
+    # global data_root_dir
     date = request.args.get('date')
     platform = request.args.get('platform')
     sensor = request.args.get('sensor')
@@ -1490,6 +1737,7 @@ def download_ortho():
                 tif_path = file_path.replace('.png', '.tif')
                 
                 # convert tif to png
+
                 if os.path.exists(tif_path):
                     convert_tif_to_png(tif_path)
                     
@@ -1516,7 +1764,7 @@ def download_ortho():
 
 @file_app.route('/delete_ortho', methods=['POST'])
 def delete_ortho():
-    global data_root_dir
+    # global data_root_dir
     data = request.json
     year = data.get('year')
     experiment = data.get('experiment')
@@ -1565,9 +1813,10 @@ def monitor_log_updates(logs_path, progress_file):
             "Finished odm_postprocess stage", # Finished odm_postprocess stage
             "ODM app finished",             # ODM Processes are done, but some additional steps left
             "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
-            "Generated DEM-Pyramid.tif",
-            "Copied DEM.tif",
             "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed",
         ]   
         
         with open(progress_file, 'w') as file:
@@ -1613,7 +1862,7 @@ def monitor_log_updates(logs_path, progress_file):
 ### CVAT #### 
 @file_app.route('/start_cvat', methods=['POST'])
 def start_cvat():
-    global data_root_dir
+    # global data_root_dir
     clone_dir = os.path.join(data_root_dir, 'cvat')
     
     # Create the directory if it doesn't exist
@@ -1723,7 +1972,7 @@ def start_cvat():
 ### ROVER LABELS PREPARATION ###
 @file_app.route('/check_labels/<path:dir_path>', methods=['GET'])
 def check_labels(dir_path):
-    global data_root_dir
+    # global data_root_dir
     data = []
     
     # get labels path
@@ -1741,7 +1990,7 @@ def check_labels(dir_path):
 
 @file_app.route('/check_existing_labels', methods=['POST'])
 def check_existing_labels():
-    global data_root_dir
+    # global data_root_dir
     
     data = request.json
     fileList = data['fileList']
@@ -1758,7 +2007,7 @@ def check_existing_labels():
 
 @file_app.route('/upload_trait_labels', methods=['POST'])
 def upload_trait_labels():
-    global data_root_dir
+    # global data_root_dir
     
     dir_path = request.form.get('dirPath')
     full_dir_path = os.path.join(data_root_dir, dir_path)
@@ -1799,7 +2048,7 @@ def remove_files_from_folder(folder):
 def prepare_labels(annotations, images_path):
     
     try:
-        global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
+        # global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
         
         # path to labels
         labels_train_folder = annotations.parent/'labels'/'train'
@@ -1946,7 +2195,7 @@ def get_training_progress():
 
 @file_app.route('/train_model', methods=['POST'])
 def train_model():
-    global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels, training_process
+    # global data_root_dir, latest_data, training_stopped_event, new_folder, train_labels, training_process
     
     try:
         # receive the parameters
@@ -2163,7 +2412,7 @@ def generate_hash(trait, length=6):
 
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
-    global data_root_dir, save_locate, locate_process
+    # global data_root_dir, save_locate, locate_process
     
     # recieve parameters
     batch_size = int(request.json['batchSize'])
@@ -2273,7 +2522,7 @@ def get_extract_progress():
     
 @file_app.route('/extract_traits', methods=['POST'])
 def extract_traits():
-    global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract, extract_process
+    # global data_root_dir, save_extract, temp_extract, model_id, summary_date, locate_id, trait_extract, extract_process
     
     try:
         # recieve parameters
@@ -2391,7 +2640,7 @@ def stop_extract():
         return jsonify({"message": "Python process successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
-    
+
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
     global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract, extract_process
@@ -2425,10 +2674,8 @@ def done_extract():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
-# FastAPI app
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -2437,11 +2684,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add Flask app to FastAPI
 app.mount("/flask_app", WSGIMiddleware(file_app))
-
-# Add Titiler to FastAPI
-# app.mount("/cog", app=titiler_app, name='titiler')
 
 if __name__ == "__main__":
     
@@ -2463,6 +2706,7 @@ if __name__ == "__main__":
         data_root_dir = os.path.expanduser(data_root_dir)
     print(f"data_root_dir: {data_root_dir}")
 
+    global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global now_drone_processing
