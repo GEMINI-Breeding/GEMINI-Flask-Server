@@ -72,3 +72,4 @@ fastapi
 utm
 requests
 piexif
+zipfile36
