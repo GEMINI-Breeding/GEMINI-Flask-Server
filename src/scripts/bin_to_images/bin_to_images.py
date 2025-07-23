@@ -54,39 +54,26 @@ def enforce_schema(df: pd.DataFrame, kind: str) -> pd.DataFrame:
     schema = GPS_SCHEMAS[kind]
     return df.reindex(columns=schema)
 
-def interpolate_gps(gps_dfs, image_dfs, skip_pointer, save_path, columns):
-    out_arrays = {}
-    save_path = save_path / 'Metadata'
+def interpolate_gps(gps_dfs, image_dfs, skip_pointer):
+    out_np = {}
+    out_df = {}
+    timestamps = image_dfs[0][skip_pointer:, 0]
 
-    for key in GPS_ORDER:                 
+    for key in GPS_ORDER:
         gps = gps_dfs[key]
-        fn = interp1d(
-            x=gps[skip_pointer:, 0],
-            y=gps[skip_pointer:, 1:],
-            axis=0, kind='linear', fill_value='extrapolate'
-        )
-        timestamps = image_dfs[0][skip_pointer:, 0]
+        fn = interp1d(gps[skip_pointer:, 0], gps[skip_pointer:, 1:], axis=0,
+                      kind='linear', fill_value='extrapolate')
         interpolated = fn(timestamps)
         merged = np.hstack([timestamps.reshape(-1,1), interpolated])
-
-        # Build columns from schema, NOT from mutable `columns[key]`
         schema = GPS_SCHEMAS[key]
-        gps_dfs_new = pd.DataFrame(merged, columns=['stamp'] + schema[1:])  # use 'stamp' right away
-        gps_dfs_new = enforce_schema(gps_dfs_new, key)
-        gps_dfs_new = gps_dfs_new.drop_duplicates('stamp').sort_values('stamp').reset_index(drop=True)
+        df = pd.DataFrame(merged, columns=schema)   # first col is stamp already
+        df = df.drop_duplicates('stamp').sort_values('stamp').reset_index(drop=True)
 
-        old = save_path / f"gps_{key}.csv"
-        gps_df_old = pd.read_csv(old) if old.exists() else pd.DataFrame(columns=schema)
-        gps_df_old = enforce_schema(gps_df_old, key)
+        out_np[key] = merged
+        out_df[key] = df
 
-        combined = pd.concat([gps_df_old, gps_dfs_new], ignore_index=True)
-        combined = enforce_schema(combined, key)
-        combined.to_csv(old, index=False)
-
-        out_arrays[key] = merged  # keep dict so you can order later
-
-    # Return in deterministic order
-    return [out_arrays[k] for k in GPS_ORDER]
+    # keep deterministic order
+    return [out_np[k] for k in GPS_ORDER], out_df
 
 def process_disparity(
     img: torch.Tensor,
@@ -411,7 +398,7 @@ def extract_gps(
     print('--- gps extraction ---')
     
     df = {}
-    gps_cols_list = {}
+    gps_df_dict = {}
     gps_metric_summary = {}
     
     # initialize save path
@@ -492,11 +479,11 @@ def extract_gps(
         gps_df.replace({'True': 1, 'False': 0}, inplace=True)
         gps_df = gps_df.apply(pd.to_numeric, errors='coerce')
         gps_df = enforce_schema(gps_df, gps_name)
-        gps_df.to_csv(save_path / f"gps_{gps_name}.csv", index=False)
+        # gps_df.to_csv(save_path / f"gps_{gps_name}.csv", index=False)
         # gps_df.to_csv(f"{save_path}/gps_{gps_name}.csv", index=False)
         df[gps_name] = gps_df.to_numpy(dtype='float64')
-        gps_cols_list[gps_name] = gps_df.columns.tolist()
-        
+        gps_df_dict[gps_name] = gps_df
+
         # record gps metric summary (average values)
         if gps_name == 'pvt':
             gps_metric_summary['pvt'] = {
@@ -514,7 +501,7 @@ def extract_gps(
                 'avg_accuracy_heading': gps_df['accuracy_heading'].mean()
             }
 
-    return df, gps_cols_list, gps_metric_summary
+    return df, gps_df_dict, gps_metric_summary
 
 def extract_calibrations(
     calib_topics: List[str],
@@ -616,30 +603,36 @@ def process_single_binary_file(args):
 
     # interpolate GPS
     skip_pointer = 0
-    gps_dfs_interpolated = interpolate_gps(
-        gps_dfs=gps_dfs,
-        image_dfs=image_dfs,
-        skip_pointer=skip_pointer,
-        save_path=output_path,
-        columns=gps_cols
-    )
+    gps_np_list, gps_df_dict = interpolate_gps(gps_dfs, image_dfs, skip_pointer)
 
     # sync
-    gps_arrays = [gps_dfs_interpolated[GPS_ORDER.index(name)] for name in GPS_ORDER]
+    gps_arrays = []
+    gps_cols_flat = []
+
+    for i, name in enumerate(GPS_ORDER):
+        arr = gps_np_list[i]
+        schema = GPS_SCHEMAS[name]
+
+        if i == 0:
+            # keep the first GPS block completely (includes stamp)
+            gps_arrays.append(arr)
+            gps_cols_flat += schema
+        else:
+            # drop just the first column (stamp) for subsequent GPS blocks
+            gps_arrays.append(arr[:, 1:])
+            gps_cols_flat += schema[1:]
+
     msgs = image_dfs + gps_arrays
     msgs_synced = sync_msgs(msgs)
 
-    # build THIS file's DataFrame
-    gps_cols_flat = [c for name in GPS_ORDER for c in GPS_SCHEMAS[name]]
-    final_cols = images_cols + gps_cols_flat
-
     file_mat = np.concatenate(msgs_synced, axis=1)
+    final_cols = images_cols + gps_cols_flat
     assert file_mat.shape[1] == len(final_cols), f"col mismatch {file_mat.shape[1]} vs {len(final_cols)}"
 
-    file_df = pd.DataFrame(file_mat, columns=final_cols)
+    file_df = pd.DataFrame(file_mat, columns=final_cols).reset_index(drop=True)
     file_df = postprocessing(file_df, images_cols)
 
-    return file_df, images_cols, file_index
+    return file_df, gps_df_dict, images_cols, file_index
 
 def cleanup_output_files(output_path):
     """Clean up any partially created files and directories."""
@@ -689,24 +682,19 @@ def extract_binary(file_names, output_path) -> None:
     
     # Determine optimal number of workers
     cpu_count = mp.cpu_count()
-    max_workers = min(len(file_names), cpu_count, 4)  # Cap at 4 workers max
-    
+    max_workers = min(len(file_names), cpu_count, 2)  # Cap at 2 workers max
+
     if use_multiprocessing:
         print(f"Using multiprocessing with {max_workers} processes for {len(file_names)} files.")
-
         try:
             total = len(file_names)
             progress_path = output_path / "progress.txt"
-            progress_path.write_text(f"0/{total}")
 
             counter = mp.Value('i', 0)
             lock = mp.Lock()
-
-            # store AsyncResult objects so we can collect actual returns later
             async_results = []
 
             def _on_done(_res):
-                # runs in parent proc
                 with lock:
                     counter.value += 1
                     progress_path.write_text(f"{counter.value}")
@@ -720,50 +708,39 @@ def extract_binary(file_names, output_path) -> None:
                 pool.close()
                 pool.join()
 
-            # collect results
-            all_msgs_synced = []
+            # -------- collect & merge --------
+            all_file_dfs = []
+            all_gps_parts = {k: [] for k in GPS_ORDER}
             images_cols = None
-            gps_cols = None
 
             for ar in async_results:
-                msgs_synced, img_cols, gps_cols_current, file_index = ar.get()
-                all_msgs_synced.append(msgs_synced)
+                file_df, gps_df_dict, img_cols, file_index = ar.get()
+                all_file_dfs.append(file_df)
+                for k in GPS_ORDER:
+                    all_gps_parts[k].append(gps_df_dict[k])
                 if images_cols is None:
                     images_cols = img_cols
-                if gps_cols is None:
-                    gps_cols = gps_cols_current
-                    
-            # Concatenate all synced messages from different files
-            # all_msgs_synced is a list of lists, where each inner list contains synced arrays for a file
-            if all_msgs_synced:
-                # Stack arrays vertically across all files
-                num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
-                final_msgs = []
-                for msg_idx in range(num_msg_types):
-                    # Stack arrays for this message type across all files
-                    msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
-                    stacked_msg = np.vstack(msg_arrays)
-                    final_msgs.append(stacked_msg)
-                
-                # Create final DataFrame from concatenated synced messages
-                print("Creating final msgs_synced.csv from multiprocessed results...")
-                msgs_synced_conc = np.concatenate(final_msgs, axis=1)
-                gps_cols_list = [col for name in GPS_ORDER for col in GPS_SCHEMAS[name]]
-                final_cols = images_cols + gps_cols_list
-                msgs_df = pd.DataFrame(msgs_synced_conc, columns=final_cols)
-                
-                # postprocessing
-                msgs_df = postprocessing(msgs_df, images_cols)
-                
-                # output synced messages
+
+            if all_file_dfs:
                 save_path = output_path / 'Metadata'
-                if not save_path.exists():
-                    save_path.mkdir(parents=True, exist_ok=True)
-                msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
-                print("Successfully created msgs_synced.csv from multiprocessed data")
+                save_path.mkdir(parents=True, exist_ok=True)
+
+                # msgs_synced.csv
+                msgs_df = pd.concat(all_file_dfs, ignore_index=True)
+                msgs_df.to_csv(save_path / "msgs_synced.csv", index=False)
+
+                # gps_*.csv (optional but safe now)
+                for k in GPS_ORDER:
+                    gps_full = (pd.concat(all_gps_parts[k], ignore_index=True)
+                                .drop_duplicates('stamp')
+                                .sort_values('stamp'))
+                    gps_full = enforce_schema(gps_full, k)
+                    gps_full.to_csv(save_path / f"gps_{k}.csv", index=False)
+
+                print("Successfully created msgs_synced.csv (and gps_*.csv) from multiprocessed data")
             else:
                 print("Warning: No valid synced messages found for final output")
-            
+
         except Exception as e:
             print(f"Multiprocessing failed: {e}")
             print("Cleaning up partially created files and terminating...")
@@ -772,8 +749,7 @@ def extract_binary(file_names, output_path) -> None:
     
     elif use_threading:
         print(f"Using threading with {max_workers} threads for {len(file_names)} files (daemon process detected).")
-        
-        
+
         try:
             process_args = [(f, output_path, i, len(file_names)) for i, f in enumerate(file_names)]
 
@@ -782,57 +758,44 @@ def extract_binary(file_names, output_path) -> None:
             progress_lock = threading.Lock()
             progress_done = 0
 
-            all_msgs_synced = []
+            all_file_dfs = []
+            all_gps_parts = {k: [] for k in GPS_ORDER}
             images_cols = None
-            gps_cols = None
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(process_single_binary_file, a) for a in process_args]
 
                 for fut in as_completed(futures):
-                    msgs_synced, img_cols, gps_cols_current, file_index = fut.result()
-                    all_msgs_synced.append(msgs_synced)
+                    file_df, gps_df_dict, img_cols, file_index = fut.result()
+                    all_file_dfs.append(file_df)
+                    for k in GPS_ORDER:
+                        all_gps_parts[k].append(gps_df_dict[k])
                     if images_cols is None:
                         images_cols = img_cols
-                    if gps_cols is None:
-                        gps_cols = gps_cols_current
 
-                    # progress update
                     with progress_lock:
                         progress_done += 1
                         progress_path.write_text(f"{progress_done}")
 
-            # Concatenate all synced messages from different files
-            # all_msgs_synced is a list of lists, where each inner list contains synced arrays for a file
-            if all_msgs_synced:
-                # Stack arrays vertically across all files
-                num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
-                final_msgs = []
-                for msg_idx in range(num_msg_types):
-                    # Stack arrays for this message type across all files
-                    msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
-                    stacked_msg = np.vstack(msg_arrays)
-                    final_msgs.append(stacked_msg)
-                
-                # Create final DataFrame from concatenated synced messages
-                print("Creating final msgs_synced.csv from threaded results...")
-                msgs_synced_conc = np.concatenate(final_msgs, axis=1)
-                gps_cols_list = [gps_cols[cols] for cols in gps_cols]
-                gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
-                msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
-                
-                # postprocessing
-                msgs_df = postprocessing(msgs_df, images_cols)
-                
-                # output synced messages
+            if all_file_dfs:
                 save_path = output_path / 'Metadata'
-                if not save_path.exists():
-                    save_path.mkdir(parents=True, exist_ok=True)
-                msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
-                print("Successfully created msgs_synced.csv from threaded data")
+                save_path.mkdir(parents=True, exist_ok=True)
+
+                msgs_df = pd.concat(all_file_dfs, ignore_index=True)
+                msgs_df.to_csv(save_path / "msgs_synced.csv", index=False)
+
+                # optional GPS csvs
+                for k in GPS_ORDER:
+                    gps_full = (pd.concat(all_gps_parts[k], ignore_index=True)
+                                .drop_duplicates('stamp')
+                                .sort_values('stamp'))
+                    gps_full = enforce_schema(gps_full, k)
+                    gps_full.to_csv(save_path / f"gps_{k}.csv", index=False)
+
+                print("Successfully created msgs_synced.csv (and gps_*.csv) from threaded data")
             else:
                 print("Warning: No valid synced messages found for final output")
-            
+
         except Exception as e:
             print(f"Threading failed: {e}")
             print("Cleaning up partially created files and terminating...")
@@ -847,61 +810,48 @@ def extract_binary(file_names, output_path) -> None:
             print("Using sequential processing for single file.")
         else:
             print("Using sequential processing.")
-        
-        counter = 0
-        all_msgs_synced = []
+
+        all_file_dfs = []
+        all_gps_parts = {k: [] for k in GPS_ORDER}
         images_cols = None
-        gps_cols = None
-        
+
+        progress_path = output_path / "progress.txt"
+        counter = 0
+
         for file_name in tqdm(file_names):
-            
-            # write name of binary file to the report
             with open(report_path, "a") as f:
                 f.write(f"\n--- File: {file_name} ---\n")
-            
-            # Process single file (GPS interpolation and message sync is done inside process_single_binary_file)
-            msgs_synced, img_cols, gps_cols_current, _ = process_single_binary_file((file_name, output_path, counter, len(file_names)))
-            
-            # Collect results
-            all_msgs_synced.append(msgs_synced)
+
+            file_df, gps_df_dict, img_cols, _ = process_single_binary_file(
+                (file_name, output_path, counter, len(file_names))
+            )
+            all_file_dfs.append(file_df)
+            for k in GPS_ORDER:
+                all_gps_parts[k].append(gps_df_dict[k])
             if images_cols is None:
                 images_cols = img_cols
-            if gps_cols is None:
-                gps_cols = gps_cols_current
-            
-            # Update progress
+
             counter += 1
-            with open(f"{output_path}/progress.txt", "w") as f:
-                f.write(str(counter))
-        
-        # Concatenate all synced messages from different files
-        if all_msgs_synced:
-            # Stack arrays vertically across all files
-            num_msg_types = len(all_msgs_synced[0]) if all_msgs_synced else 0
-            final_msgs = []
-            for msg_idx in range(num_msg_types):
-                # Stack arrays for this message type across all files
-                msg_arrays = [file_msgs[msg_idx] for file_msgs in all_msgs_synced]
-                stacked_msg = np.vstack(msg_arrays)
-                final_msgs.append(stacked_msg)
-            
-            # Create final DataFrame from concatenated synced messages
-            print("Creating final msgs_synced.csv from sequential processing...")
-            msgs_synced_conc = np.concatenate(final_msgs, axis=1)
-            gps_cols_list = [gps_cols[cols] for cols in gps_cols]
-            gps_cols_list = [item for sublist in gps_cols_list for item in sublist]
-            msgs_df: pd.DataFrame = pd.DataFrame(msgs_synced_conc, columns=images_cols + gps_cols_list)
-            
-            # postprocessing
-            msgs_df = postprocessing(msgs_df, images_cols)
-            
-            # output synced messages
+            progress_path.write_text(f"{counter}")
+
+        if all_file_dfs:
             save_path = output_path / 'Metadata'
-            if not save_path.exists():
-                save_path.mkdir(parents=True, exist_ok=True)
-            msgs_df.to_csv(f"{save_path}/msgs_synced.csv", index=False)
-            print("Successfully created msgs_synced.csv from sequential processing")
-    
+            save_path.mkdir(parents=True, exist_ok=True)
+
+            msgs_df = pd.concat(all_file_dfs, ignore_index=True)
+            msgs_df.to_csv(save_path / "msgs_synced.csv", index=False)
+
+            for k in GPS_ORDER:
+                gps_full = (pd.concat(all_gps_parts[k], ignore_index=True)
+                            .drop_duplicates('stamp')
+                            .sort_values('stamp'))
+                gps_full = enforce_schema(gps_full, k)
+                gps_full.to_csv(save_path / f"gps_{k}.csv", index=False)
+
+            print("Successfully created msgs_synced.csv (and gps_*.csv) from sequential processing")
+        else:
+            print("Warning: No valid synced messages found for final output")
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--file_names', type=str, nargs='+', required=True,
