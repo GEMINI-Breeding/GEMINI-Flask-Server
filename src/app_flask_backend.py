@@ -62,6 +62,13 @@ from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
 
+# stitch pipeline
+import sys
+AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
+print(AGROWSTITCH_PATH)
+sys.path.append(AGROWSTITCH_PATH)
+from panorama_maker.AgRowStitch import run as run_agrowstitch
+
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
 LOCATE_PLANTS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/trait_extraction/locate.py'))
