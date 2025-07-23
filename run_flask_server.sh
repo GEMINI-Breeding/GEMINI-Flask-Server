@@ -31,14 +31,9 @@ for dir in "${POSSIBLE_CONDA_DIRS[@]}"; do
     fi
 done
 
-if [ -z "$CONDA_FOUND" ]; then
-    echo "❌ Error: Could not find conda.sh in any of the known locations."
-    exit 1
-fi
-
 # Activate the environment using resolved path (add a check)
 echo "Activating Conda environment at: $conda_env_path"
-conda activate "$conda_env_path" || {
+source activate "$conda_env_path" || {
     echo "❌ Error: Failed to activate Conda environment at $conda_env_path"
     exit 1
 }
