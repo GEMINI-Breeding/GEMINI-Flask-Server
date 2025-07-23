@@ -50,7 +50,17 @@ import sys
 AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
 print(AGROWSTITCH_PATH)
 sys.path.append(AGROWSTITCH_PATH)
-from panorama_maker.AgRowStitch import run as run_agrowstitch
+from scripts.stitch_utils import (
+    georeference_plot,
+    run_stitch_all_plots,
+    run_stitch_process_for_plot,
+    monitor_stitch_updates_multi_plot,
+    monitor_stitch_updates,
+    is_plot_completed
+)
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
+from PIL import ImageFile
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -65,12 +75,10 @@ latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'dro
 training_stopped_event = threading.Event()
 extraction_processes = {}
 extraction_status = "not_started"  # Possible values: not_started, in_progress, done, failed
+extraction_error_message = None  # Stores detailed error message if extraction fails
 odm_method = None
 stitch_thread=None
 stitch_stop_event = threading.Event()
-
-data_root_dir = None
-now_drone_processing = False
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -620,7 +628,7 @@ def upload_files():
     data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
-    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
     
     # Read msgs_synced.csv once if it's an image upload
@@ -667,7 +675,7 @@ def check_files():
     data = request.json
     fileList = data['fileList']
     dirPath = data['dirPath']
-    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dirPath)
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dirPath)
 
     existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
     new_files = [file for file in fileList if file not in existing_files]
@@ -680,7 +688,7 @@ def check_files():
 def get_binary_report():
     data = request.json
     # Construct file path based on metadata
-    report_path = f"{file_app.config['UPLOAD_BASE_DIR']}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
+    report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
     
     try:
         with open(report_path, "r") as f:
@@ -710,36 +718,44 @@ def _cleanup_files(file_paths):
             pass
 
 def _extraction_worker(file_paths, output_path):
-    global extraction_status
+    global extraction_status, extraction_error_message
 
     try:
         extraction_status = "in_progress"
+        extraction_error_message = None
         extract_binary(file_paths, output_path)
         
         # cleanup files
         _cleanup_files(file_paths)
         extraction_status = "done"
     except EOFError as e:
-        print(f"EOFError during binary extraction: {e}")
+        error_msg = f"EOFError during binary extraction: {e}"
+        print(error_msg)
         extraction_status = "failed"
+        extraction_error_message = error_msg
     except Exception as e:
-        print(f"[ERROR] Extraction failed: {e}")
+        error_msg = f"Extraction failed: {e}"
+        print(f"[ERROR] {error_msg}")
         # print full traceback
         traceback.print_exc()
         extraction_status = "failed"
+        extraction_error_message = error_msg
 
 @file_app.route('/get_binary_status', methods=['GET'])
 def get_binary_status():
     print(f"Extraction status: {extraction_status}")
-    return jsonify({'status': extraction_status}), 200
+    response = {'status': extraction_status}
+    if extraction_status == "failed" and extraction_error_message:
+        response['error_message'] = extraction_error_message
+    return jsonify(response), 200
 
 @file_app.route('/extract_binary_file', methods=['POST'])
 def extract_binary_file():
     data = request.json
     files = [secure_filename(f) for f in data['files']]
     dir_path = data['localDirPath']
-    file_paths = [str(Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path / f) for f in files]
-    output_path = Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
+    output_path = Path(UPLOAD_BASE_DIR) / dir_path
     
     def extract_timestamp(filename):
         match = re.match(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d+)", filename)
@@ -747,7 +763,7 @@ def extract_binary_file():
 
     # Sort files by timestamp before constructing paths
     files_sorted = sorted(files, key=extract_timestamp)
-    file_paths = [str(Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path / f) for f in files_sorted]
+    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files_sorted]
 
     print(f"Extracting binary files: {file_paths}")
 
@@ -767,7 +783,7 @@ def extract_binary_file():
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
     dir_path = request.json['localDirPath']
-    dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
+    dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     
     try:
         # Traverse through the directory and its subdirectories
@@ -794,7 +810,7 @@ def upload_chunk():
     total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
-    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -833,7 +849,7 @@ def check_uploaded_chunks():
     data = request.json
     file_identifier = data['fileIdentifier']
     dir_path = data['localDirPath']
-    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     
     uploaded_chunks = [f for f in os.listdir(cache_dir_path) if f.startswith(file_identifier)]
@@ -850,7 +866,7 @@ def clear_upload_dir():
     print(f"Clearing upload directory: {dir_path}")
 
     # 2. Resolve base and target
-    base = Path(file_app.config['UPLOAD_BASE_DIR']).resolve()
+    base = Path(UPLOAD_BASE_DIR).resolve()
     target = (base / dir_path).resolve()
 
     # 3. Safety checks
@@ -878,7 +894,7 @@ def clear_upload_cache():
     try:
         print('Clearing cache...')
         dir_path = request.json['localDirPath']
-        cache_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path, 'cache')
+        cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
         
         # loop through each file in cache directory and remove it
         for file in os.listdir(cache_dir_path):
@@ -1379,57 +1395,56 @@ def get_odm_logs():
     print("Method for logs:", method)  # Debug statement
     
     if method == 'STITCH':
-        logs_path = os.path.join(
+        final_mosaics_path = os.path.join(
             data_root_dir, "Raw", ortho_data['year'],
             ortho_data['experiment'], ortho_data['location'], ortho_data['population'],
             ortho_data['date'], ortho_data['platform'], ortho_data['sensor'], 
-            "Images", "final_mosaics", "top.log"
+            "Images", "final_mosaics"
         )
+        
+        if not os.path.exists(final_mosaics_path):
+            return jsonify({"error": "Final mosaics directory not found"}), 404
+        
+        # Find all plot log files
+        log_files = []
+        for file in os.listdir(final_mosaics_path):
+            if file.startswith("temp_plot_") and file.endswith(".log"):
+                log_files.append(os.path.join(final_mosaics_path, file))
+        
+        if not log_files:
+            return jsonify({"error": "No plot log files found"}), 404
+        
+        # Sort log files by plot ID for consistent order
+        log_files.sort()
+        
+        # Combine logs from all plots
+        combined_logs = []
+        for log_file in log_files:
+            plot_name = os.path.basename(log_file).replace(".log", "")
+            combined_logs.append(f"\n=== {plot_name.upper()} LOG ===\n")
+            
+            try:
+                with open(log_file, 'r') as f:
+                    content = f.read()
+                    combined_logs.append(content)
+                    if not content.endswith('\n'):
+                        combined_logs.append('\n')
+            except Exception as e:
+                combined_logs.append(f"Error reading {log_file}: {str(e)}\n")
+        
+        return jsonify({"log_content": ''.join(combined_logs)}), 200
     else:
+        # Original ODM logs logic
         logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
-    print("Logs Path:", logs_path)  # Debug statement
-    if os.path.exists(logs_path):
-        with open(logs_path, 'r') as log_file:
-            lines = log_file.readlines()
-            # latest_logs = lines[-20:]  # Get the last 20 lines
-        return jsonify({"log_content": ''.join(lines)}), 200
-    else:
-        print("Logs not found at path:", logs_path)  # Debug statement
-        return jsonify({"error": "Logs not found"}), 404
-    
-def run_stitch_process(config_path, cpu_count, stitched_path, save_path):
-    print(f"Stitching started on thread {threading.current_thread().name}")
-
-    for step in run_agrowstitch(config_path, cpu_count):
-        if stitch_stop_event.is_set():
-            print("Stitching canceled by user.")
-            return
-
-    # Now stitching is done — do your move & cleanup here
-    base_name = "AgRowStitch"
-    version = 1
-    existing_files = os.listdir(save_path)
-    version_pattern = re.compile(re.escape(base_name) + r"_v(\d+)\.png")
-
-    for fname in existing_files:
-        match = version_pattern.match(fname)
-        if match:
-            existing_version = int(match.group(1))
-            version = max(version, existing_version + 1)
-
-    new_filename = f"{base_name}_v{version}.tif"
-
-    src_file = os.path.join(stitched_path, 'full_res_mosaic_top.png')
-    dst_file = os.path.join(save_path, new_filename)
-
-    if not os.path.exists(src_file):
-        print("Stitched panorama not found in thread")
-        return
-
-    shutil.move(src_file, dst_file)
-    shutil.rmtree(stitched_path)
-
-    print(f"Saved stitched mosaic as {dst_file}")
+        print("Logs Path:", logs_path)  # Debug statement
+        if os.path.exists(logs_path):
+            with open(logs_path, 'r') as log_file:
+                lines = log_file.readlines()
+                # latest_logs = lines[-20:]  # Get the last 20 lines
+            return jsonify({"log_content": ''.join(lines)}), 200
+        else:
+            print("Logs not found at path:", logs_path)  # Debug statement
+            return jsonify({"error": "Logs not found"}), 404
 
 @file_app.route('/run_stitch', methods=['POST'])
 def run_stitch_endpoint():
@@ -1456,10 +1471,20 @@ def run_stitch_endpoint():
             experiment, location, population,
             date, platform, sensor, "Images", "top"
         )
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
         save_path = os.path.join(
             data_root_dir, "Processed", year,
             experiment, location, population,
             date, platform, sensor
+        )
+        image_calibration = os.path.join(
+            data_root_dir, "Raw", year,
+            experiment, location, population,
+            date, platform, sensor, "Metadata", "top_calibration.json"
         )
         config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
@@ -1476,116 +1501,41 @@ def run_stitch_endpoint():
         if not os.path.exists(save_path):
             os.makedirs(save_path, exist_ok=True)
         
-        # Load original config
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-
-        # Update fields
-        config['image_directory'] = image_path
-        config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"Using device: {config['device']}")
-
-        # Apply any user-specified custom options
-        if isinstance(custom_options, str):
-            print(f"Custom options provided as string: {custom_options}")
-            custom_options = yaml.safe_load(custom_options)
-
-        if custom_options and isinstance(custom_options, dict):
-            print(f"Custom options provided: {custom_options}")
-            config.update(custom_options)
-
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=".yaml") as tmpfile:
-            yaml.safe_dump(config, tmpfile)
-            temp_config_path = tmpfile.name
-
-        cpu_count = os.cpu_count()
+        # Check if msgs_synced.csv exists
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({"status": "error", "message": f"msgs_synced.csv not found at {msgs_synced_path}"}), 404
         
-        # start thread to get ortho progress
-        progress_file = os.path.join(stitched_path, 'top.log')
-        thread_prog = threading.Thread(target=monitor_stitch_updates, args=(progress_file,), daemon=True)
+        # Get processed plots for monitoring
+        import pandas as pd
+        msgs_df = pd.read_csv(msgs_synced_path)
+        unique_plots = [pid for pid in msgs_df['plot_id'].unique() if pid != 0]  # Exclude plot 0
+        
+        # Start multi-plot log monitoring thread
+        final_mosaics_dir = os.path.join(os.path.dirname(image_path), "final_mosaics")
+        
+        def progress_callback(progress):
+            latest_data['ortho'] = progress
+        
+        thread_prog = threading.Thread(
+            target=monitor_stitch_updates_multi_plot, 
+            args=(final_mosaics_dir, unique_plots, progress_callback), 
+            daemon=True
+        )
         thread_prog.start()
         
+        # Start the stitching process for all plots in background
         stitch_thread = threading.Thread(
-            target=run_stitch_process, 
-            args=(temp_config_path, cpu_count, stitched_path, save_path),
+            target=run_stitch_all_plots, 
+            args=(msgs_synced_path, image_path, config_path, custom_options, save_path, image_calibration, stitch_stop_event, progress_callback),
             daemon=True
         )
         stitch_thread.start()
 
-        return jsonify({"status": "started"}), 202
+        return jsonify({"status": "started", "message": "Stitching process started for all plots"}), 202
 
     except Exception as e:
         print(f"Error running AgRowStitch: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-    
-def monitor_stitch_updates(progress_file):
-    global latest_data
-
-    try:
-        total_images = None  # we still extract total images once!
-
-        final_steps = [
-            "Retrieving batches",
-            "Straightening batches",
-            "Extracting batch features",
-            "Matching batch features",
-            "Stitching batches",
-            "Straightening final mosaic",
-            "Saving mosaic at full resolution",
-            "Saving mosaic at resized resolution",
-            "Deleting intermediate images",
-            "Done"
-        ]
-
-        final_step_map = {step: idx for idx, step in enumerate(final_steps)}
-        
-        # Wait for the log file to be created
-        while not os.path.exists(progress_file):
-            print("Waiting for log file to be created...")
-            time.sleep(5)  # Check every 5 seconds
-
-        print("Log file found. Monitoring for updates.")
-
-        with open(progress_file, 'r') as file:
-            file.seek(0, os.SEEK_END)  # Start at end, tail new lines
-
-            while True:
-                line = file.readline()
-                if not line:
-                    time.sleep(1)
-                    continue
-
-                line = line.strip()
-
-                # extract total images once
-                if total_images is None:
-                    match = re.search(r'Found (\d+) images', line)
-                    if match:
-                        total_images = int(match.group(1))
-                        print(f"Total images detected: {total_images}")
-                        continue
-
-                # use actual match info to estimate progress up to 90%
-                if "Succesfully matched image" in line and total_images:
-                    match = re.search(r'Succesfully matched image (\d+) and (\d+)', line)
-                    if match:
-                        img2 = int(match.group(2))
-                        percent = min(int((img2 / total_images) * 90), 90)
-                        latest_data['ortho'] = percent
-
-                # final phases fill last 10%
-                elif any(step in line for step in final_steps):
-                    for step in final_steps:
-                        if step in line:
-                            step_index = final_step_map[step]
-                            percent = 90 + int((step_index + 1) / len(final_steps) * 10)
-                            percent = min(percent, 100)
-                            latest_data['ortho'] = percent
-                            break
-
-    except Exception as e:
-        print(f"Error in thread: {e}")
 
 @file_app.route('/run_odm', methods=['POST'])
 def run_odm_endpoint():
@@ -2730,22 +2680,37 @@ app.add_middleware(
 app.mount("/flask_app", WSGIMiddleware(file_app))
 
 if __name__ == "__main__":
+    
+    # Add arguments to the command line
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data', required=False)
-    parser.add_argument('--flask_port', type=int, default=5000, required=False)
-    parser.add_argument('--titiler_port', type=int, default=8091, required=False)
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
+    # Print the arguments to the console
     print(f"flask_port: {args.flask_port}")
     print(f"titiler_port: {args.titiler_port}")
+
+    # Update global data_root_dir from the argument
+    global data_root_dir
     data_root_dir = args.data_root_dir
     if "~" in data_root_dir:
         data_root_dir = os.path.expanduser(data_root_dir)
     print(f"data_root_dir: {data_root_dir}")
-    file_app.config['DATA_ROOT_DIR'] = data_root_dir
+
+    global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
+
+    global now_drone_processing
     now_drone_processing = False
+
+    # Start the Titiler server using the subprocess module
     titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
+
+    # Start the Flask server
     uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
+
+    # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
