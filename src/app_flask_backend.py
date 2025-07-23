@@ -43,6 +43,7 @@ from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, co
 from scripts.utils import process_directories_in_parallel
 from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
 from scripts.bin_to_images.bin_to_images import extract_binary
+from scripts.plot_marking.plot_marking import plot_marking_bp
 
 # stitch pipeline
 import sys
@@ -58,6 +59,8 @@ EXTRACT_TRAITS = os.path.abspath(os.path.join(os.path.dirname(__file__), 'script
 
 # Define the Flask application for serving files
 file_app = Flask(__name__)
+file_app.register_blueprint(plot_marking_bp)
+
 latest_data = {'epoch': 0, 'map': 0, 'locate': 0, 'extract': 0, 'ortho': 0, 'drone_extract': 0}
 training_stopped_event = threading.Event()
 extraction_processes = {}
@@ -65,6 +68,9 @@ extraction_status = "not_started"  # Possible values: not_started, in_progress, 
 odm_method = None
 stitch_thread=None
 stitch_stop_event = threading.Event()
+
+data_root_dir = None
+now_drone_processing = False
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -108,7 +114,7 @@ def get_tif_to_png():
     tif_path = data['filePath']
     
     # Construct the full file paths
-    tif_full_path = os.path.join(file_app.config['DATA_ROOT_DIR'], tif_path)
+    tif_full_path = os.path.join(data_root_dir, tif_path)
     
     # Generate PNG path by replacing .tif extension
     png_path = tif_full_path.replace('.tif', '.png')
@@ -133,7 +139,7 @@ def get_tif_to_png():
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
     # global data_root_dir
-    return send_from_directory(file_app.config['DATA_ROOT_DIR'], filename)
+    return send_from_directory(data_root_dir, filename)
 
 # endpoint to serve image in memory
 @file_app.route('/images/<path:filename>')
@@ -144,13 +150,13 @@ def serve_image(filename):
 @file_app.route('/fetch_data_root_dir', methods=['GET'])
 def fetch_data_root_dir():
     # global data_root_dir
-    return file_app.config['DATA_ROOT_DIR']
+    return data_root_dir
 
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
     # global data_root_dir
-    dir_path = os.path.join(file_app.config['DATA_ROOT_DIR'], dir_path)  # join with base directory path
+    dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
     if os.path.exists(dir_path):
         dirs = (entry.name for entry in os.scandir(dir_path) if entry.is_dir())
         return jsonify(list(dirs)), 200
@@ -182,13 +188,13 @@ def stream_output(process):
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
-    base_dir = Path(file_app.config['DATA_ROOT_DIR']) / 'Raw'
+    base_dir = Path(data_root_dir) / 'Raw'
     combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
     return jsonify(combined_structure), 200
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
-    base_dir = Path(file_app.config['DATA_ROOT_DIR']) / 'Processed'
+    base_dir = Path(data_root_dir) / 'Processed'
     combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
     return jsonify(combined_structure), 200
 
@@ -196,7 +202,7 @@ async def list_dirs_nested_processed():
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
     # global data_root_dir
-    dir_path = os.path.join(file_app.config['DATA_ROOT_DIR'], dir_path)
+    dir_path = os.path.join(data_root_dir, dir_path)
     if os.path.exists(dir_path):
         files = os.listdir(dir_path)
         files = [x for x in files if not x.startswith('.')]
@@ -215,7 +221,7 @@ def view_synced_data():
         return jsonify({'error': 'Missing base_dir'}), 400
 
     # Construct full path to msgs_synced.csv
-    full_path = os.path.join(file_app.config['DATA_ROOT_DIR'], base_dir, 'Metadata', 'msgs_synced.csv')
+    full_path = os.path.join(data_root_dir, base_dir, 'Metadata', 'msgs_synced.csv')
     print(f"Full path to msgs_synced.csv: {full_path}")
 
     if not os.path.exists(full_path):
@@ -242,14 +248,14 @@ def restore_images():
         return jsonify({'error': 'Missing images or removed_dir'}), 400
 
     # Full path to source in Removed/
-    removed_path = os.path.join(file_app.config['DATA_ROOT_DIR'], removed_dir)
+    removed_path = os.path.join(data_root_dir, removed_dir)
 
     # Replace 'Removed' with 'Images' to get destination
     if 'Removed' not in removed_dir:
         return jsonify({'error': "'Removed' folder not found in path"}), 400
 
     restored_dir_rel = removed_dir.replace('/Removed/', '/Images/')
-    restored_dir_abs = os.path.join(file_app.config['DATA_ROOT_DIR'], restored_dir_rel)
+    restored_dir_abs = os.path.join(data_root_dir, restored_dir_rel)
     os.makedirs(restored_dir_abs, exist_ok=True)
 
     moved = []
@@ -286,14 +292,14 @@ def remove_images():
         return jsonify({'error': 'Missing images or source_dir'}), 400
 
     # Full path to source
-    source_path = os.path.join(file_app.config['DATA_ROOT_DIR'], source_dir)
+    source_path = os.path.join(data_root_dir, source_dir)
 
     # Replace 'Images' with 'Removed' in the path
     if 'Images' not in source_dir:
         return jsonify({'error': "'Images' folder not found in path"}), 400
 
     removed_dir_rel = source_dir.replace('/Images/', '/Removed/')
-    removed_dir_abs = os.path.join(file_app.config['DATA_ROOT_DIR'], removed_dir_rel)
+    removed_dir_abs = os.path.join(data_root_dir, removed_dir_rel)
     os.makedirs(removed_dir_abs, exist_ok=True)
 
     moved = []
@@ -324,7 +330,7 @@ def update_data():
         data = request.json
         old_data = data['oldData']
         new_data = data['updatedData']
-        prefix = file_app.config['DATA_ROOT_DIR']
+        prefix = data_root_dir
 
         new_path_raw = os.path.join(prefix, 'Raw', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
         new_path_intermediate = os.path.join(prefix, 'Intermediate', new_data['year'], new_data['experiment'], new_data['location'], new_data['population'], new_data['date'], new_data['platform'], new_data['sensor'])
@@ -402,7 +408,7 @@ def delete_files():
     try:
         data = request.json
         data_to_del = data['data_to_del']
-        prefix = file_app.config['DATA_ROOT_DIR']
+        prefix = data_root_dir
 
         paths = {
             'Raw': os.path.join(prefix, 'Raw', data_to_del['year'], data_to_del['experiment'], data_to_del['location'], data_to_del['population'], data_to_del['date'], data_to_del['platform'], data_to_del['sensor']),
@@ -529,7 +535,7 @@ def get_best_model_file():
 @file_app.route('/check_runs/<path:dir_path>', methods=['GET'])
 def check_runs(dir_path):
     # global data_root_dir
-    dir_path = os.path.join(file_app.config['DATA_ROOT_DIR'], dir_path)
+    dir_path = os.path.join(data_root_dir, dir_path)
     response_data = {}  # Initialize an empty dictionary for the response
     
     # For the Model column of Locate Plants
@@ -614,7 +620,7 @@ def upload_files():
     data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
     
     # Read msgs_synced.csv once if it's an image upload
@@ -661,7 +667,7 @@ def check_files():
     data = request.json
     fileList = data['fileList']
     dirPath = data['dirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dirPath)
+    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dirPath)
 
     existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
     new_files = [file for file in fileList if file not in existing_files]
@@ -674,7 +680,7 @@ def check_files():
 def get_binary_report():
     data = request.json
     # Construct file path based on metadata
-    report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
+    report_path = f"{file_app.config['UPLOAD_BASE_DIR']}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
     
     try:
         with open(report_path, "r") as f:
@@ -732,8 +738,8 @@ def extract_binary_file():
     data = request.json
     files = [secure_filename(f) for f in data['files']]
     dir_path = data['localDirPath']
-    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files]
-    output_path = Path(UPLOAD_BASE_DIR) / dir_path
+    file_paths = [str(Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path / f) for f in files]
+    output_path = Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path
     
     def extract_timestamp(filename):
         match = re.match(r"(\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}_\d+)", filename)
@@ -741,7 +747,7 @@ def extract_binary_file():
 
     # Sort files by timestamp before constructing paths
     files_sorted = sorted(files, key=extract_timestamp)
-    file_paths = [str(Path(UPLOAD_BASE_DIR) / dir_path / f) for f in files_sorted]
+    file_paths = [str(Path(file_app.config['UPLOAD_BASE_DIR']) / dir_path / f) for f in files_sorted]
 
     print(f"Extracting binary files: {file_paths}")
 
@@ -761,7 +767,7 @@ def extract_binary_file():
 @file_app.route('/get_binary_progress', methods=['POST'])
 def get_binary_progress():
     dir_path = request.json['localDirPath']
-    dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
     
     try:
         # Traverse through the directory and its subdirectories
@@ -788,7 +794,7 @@ def upload_chunk():
     total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -827,7 +833,7 @@ def check_uploaded_chunks():
     data = request.json
     file_identifier = data['fileIdentifier']
     dir_path = data['localDirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    full_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     
     uploaded_chunks = [f for f in os.listdir(cache_dir_path) if f.startswith(file_identifier)]
@@ -844,7 +850,7 @@ def clear_upload_dir():
     print(f"Clearing upload directory: {dir_path}")
 
     # 2. Resolve base and target
-    base = Path(UPLOAD_BASE_DIR).resolve()
+    base = Path(file_app.config['UPLOAD_BASE_DIR']).resolve()
     target = (base / dir_path).resolve()
 
     # 3. Safety checks
@@ -872,7 +878,7 @@ def clear_upload_cache():
     try:
         print('Clearing cache...')
         dir_path = request.json['localDirPath']
-        cache_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path, 'cache')
+        cache_dir_path = os.path.join(file_app.config['UPLOAD_BASE_DIR'], dir_path, 'cache')
         
         # loop through each file in cache directory and remove it
         for file in os.listdir(cache_dir_path):
@@ -907,7 +913,7 @@ def run_script():
 def get_gcp_selcted_images():
     # global data_root_dir
     try:
-        image_folder = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Raw', request.json['year'], 
+        image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
@@ -916,7 +922,7 @@ def get_gcp_selcted_images():
         if os.path.isdir(os.path.join(image_folder, 'top')):
             print("Found 'top' folder in image_folder, adding it to the path")
             image_folder = os.path.join(image_folder, 'top')
-        selected_images = collect_gcp_candidate(file_app.config['DATA_ROOT_DIR'], image_folder, request.json['radius_meters'])
+        selected_images = collect_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
         # Return the selected images and their corresponding GPS coordinates
@@ -937,7 +943,7 @@ def get_gcp_selcted_images():
 def refresh_gcp_selcted_images():
     # global data_root_dir
     try:
-        image_folder = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Raw', request.json['year'], 
+        image_folder = os.path.join(data_root_dir, 'Raw', request.json['year'], 
                                     request.json['experiment'], request.json['location'], 
                                     request.json['population'], request.json['date'], 
                                     request.json['platform'], request.json['sensor'], 'Images')
@@ -945,7 +951,7 @@ def refresh_gcp_selcted_images():
         if os.path.isdir(os.path.join(image_folder, 'top')):
             print("Found 'top' folder in image_folder, adding it to the path")
             image_folder = os.path.join(image_folder, 'top')
-        selected_images = refresh_gcp_candidate(file_app.config['DATA_ROOT_DIR'], image_folder, request.json['radius_meters'])
+        selected_images = refresh_gcp_candidate(data_root_dir, image_folder, request.json['radius_meters'])
         status = "DONE"
 
         # Return the selected images and their corresponding GPS coordinates
@@ -993,8 +999,8 @@ def stop_drone_extract():
     
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff():
-    global now_drone_processing, processed_image_folder
-    
+    global processed_image_folder
+    # global now_drone_processing
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
@@ -1004,8 +1010,8 @@ def process_drone_tiff():
     platform = request.json['platform']
     sensor = request.json['sensor']
 
-    intermediate_prefix = file_app.config['DATA_ROOT_DIR']+'/Intermediate'
-    processed_prefix = file_app.config['DATA_ROOT_DIR']+'/Processed'
+    intermediate_prefix = data_root_dir+'/Intermediate'
+    processed_prefix = data_root_dir+'/Processed'
     intermediate_image_folder = os.path.join(intermediate_prefix, year, experimnent, location, population)
     processed_image_folder = os.path.join(processed_prefix, year, experimnent, location, population, date, platform, sensor)
     # print("Setting processed image folder: "+ processed_image_folder)
@@ -1049,7 +1055,7 @@ def save_array(debug=False):
     platform = data['platform']
     sensor = data['sensor']
     processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
-    save_directory = os.path.join(file_app.config['DATA_ROOT_DIR'], processed_path)
+    save_directory = os.path.join(data_root_dir, processed_path)
     if debug:
         print(save_directory, flush=True)
 
@@ -1123,7 +1129,7 @@ def initialize_file():
     platform = data['platform']
     sensor = data['sensor']
     processed_path = os.path.join(data['basePath'].replace('/Raw/', 'Intermediate/').split(f'/{sensor}')[0], sensor)
-    save_directory = os.path.join(file_app.config['DATA_ROOT_DIR'], processed_path)
+    save_directory = os.path.join(data_root_dir, processed_path)
 
     # Creating the directory if it doesn't exist
     os.makedirs(save_directory, exist_ok=True)
@@ -1163,7 +1169,7 @@ def query_traits():
     year = request.json['year']
     experiment = request.json['experiment']
 
-    prefix = file_app.config['DATA_ROOT_DIR']+'/Processed'
+    prefix = data_root_dir+'/Processed'
     traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
                           '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
@@ -1186,7 +1192,7 @@ def filter_images(geojson_features, year, experiment, location, population, date
     # global data_root_dir
 
     # Construct the CSV path from the state variables
-    csv_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Raw', year, experiment, location, 
+    csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
                             population, date, 'msgs_synced.csv')
     df = pd.read_csv(csv_path)
 
@@ -1213,8 +1219,8 @@ def filter_images(geojson_features, year, experiment, location, population, date
     # Create a list of dictionaries for the filtered images
     filtered_images_new = []
     for image_name in  filtered_images:
-        image_path_abs = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Raw', year, experiment, location, population, date, platform, sensor, image_name)
-        image_path_rel_to_data_root = os.path.relpath(image_path_abs, file_app.config['DATA_ROOT_DIR'])
+        image_path_abs = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, date, platform, sensor, image_name)
+        image_path_rel_to_data_root = os.path.relpath(image_path_abs, data_root_dir)
         filtered_images_new.append(image_path_rel_to_data_root)
 
     imageDataQuery = [{'imageName': image, 'label': label, 'plot': plot} for image, label, plot in zip(filtered_images_new, filtered_labels, filtered_plots)]
@@ -1239,7 +1245,7 @@ def query_images():
 
     if platform == 'Drone':
         # Do Drone Image query
-        filtered_images = query_drone_images(data,file_app.config['DATA_ROOT_DIR'])
+        filtered_images = query_drone_images(data,data_root_dir)
     else:
         filtered_images = filter_images(geojson_features, year, experiment, location, 
                                         population, date, platform, sensor, middle_image)
@@ -1277,7 +1283,7 @@ def dload_zipped():
     
     # Copy the images to the subdirectories
     for image in filtered_images:
-        image_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Raw', year, experiment, location, population, 
+        image_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, population, 
                                   date, platform, sensor, image['imageName'])
         
         label_dir = os.path.join(temp_dir, image['label'])
@@ -1303,7 +1309,7 @@ def save_csv():
     filename = data.get('filename')
 
     # Construct file path based on GCP variables
-    prefix = file_app.config['DATA_ROOT_DIR']+'/Processed'
+    prefix = data_root_dir+'/Processed'
     file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
                              selected_population_gcp, filename)
 
@@ -1326,7 +1332,7 @@ def save_geojson():
     gdf = gpd.GeoDataFrame.from_features(geojson_data)
 
     # Construct file path based on GCP variables
-    prefix = file_app.config['DATA_ROOT_DIR']+'/Intermediate'
+    prefix = data_root_dir+'/Intermediate'
     file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
                              selected_population_gcp, filename)
     
@@ -1350,7 +1356,7 @@ def load_geojson():
     print(data, flush=True)
 
     # Construct file path
-    prefix = file_app.config['DATA_ROOT_DIR']+'/Intermediate'
+    prefix = data_root_dir+'/Intermediate'
     file_path = os.path.join(prefix, selected_year_gcp, selected_experiment_gcp, selected_location_gcp, 
                              selected_population_gcp, filename)
 
@@ -1374,13 +1380,13 @@ def get_odm_logs():
     
     if method == 'STITCH':
         logs_path = os.path.join(
-            file_app.config['DATA_ROOT_DIR'], "Raw", ortho_data['year'],
+            data_root_dir, "Raw", ortho_data['year'],
             ortho_data['experiment'], ortho_data['location'], ortho_data['population'],
             ortho_data['date'], ortho_data['platform'], ortho_data['sensor'], 
             "Images", "final_mosaics", "top.log"
         )
     else:
-        logs_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp', 'project', 'code', 'logs.txt')
+        logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
     print("Logs Path:", logs_path)  # Debug statement
     if os.path.exists(logs_path):
         with open(logs_path, 'r') as log_file:
@@ -1446,12 +1452,12 @@ def run_stitch_endpoint():
     
     try:
         image_path = os.path.join(
-            file_app.config['DATA_ROOT_DIR'], "Raw", year,
+            data_root_dir, "Raw", year,
             experiment, location, population,
             date, platform, sensor, "Images", "top"
         )
         save_path = os.path.join(
-            file_app.config['DATA_ROOT_DIR'], "Processed", year,
+            data_root_dir, "Processed", year,
             experiment, location, population,
             date, platform, sensor
         )
@@ -1596,12 +1602,12 @@ def run_odm_endpoint():
     custom_options = data.get('custom_options')
 
     if not temp_dir:
-        temp_dir = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp/project')
+        temp_dir = os.path.join(data_root_dir, 'temp/project')
     if not reconstruction_quality:
         reconstruction_quality = 'Low'
 
     # Run ODM
-    args = make_odm_args(file_app.config['DATA_ROOT_DIR'], 
+    args = make_odm_args(data_root_dir, 
                          location, 
                          population, 
                          date, 
@@ -1623,7 +1629,7 @@ def run_odm_endpoint():
 
         if container_exists:
             print('Removing temp folder...')
-            folder_to_delete = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp', 'project')
+            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
             cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
             cleanup_command = cleanup_command.split()
             cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
@@ -1651,8 +1657,8 @@ def run_odm_endpoint():
         thread.start()
         
         # Run progress tracker
-        logs_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp/project/code/logs.txt')
-        progress_file = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp/progress.txt')
+        logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
+        progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
         os.makedirs(os.path.dirname(progress_file), exist_ok=True)
         thread_prog = threading.Thread(target=monitor_log_updates, args=(logs_path, progress_file), daemon=True)
         thread_prog.start()
@@ -1690,7 +1696,7 @@ def stop_odm():
         else:
             print('ODM processed stopped by user.')
             print('Removing temp folder...')
-            folder_to_delete = os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp', 'project')
+            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
             cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
             cleanup_command = cleanup_command.split()
             cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
@@ -1711,8 +1717,8 @@ def stop_odm():
             # Run the command
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
-            # reset_odm(file_app.config['DATA_ROOT_DIR'])
-            shutil.rmtree(os.path.join(file_app.config['DATA_ROOT_DIR'], 'temp'))
+            # reset_odm(data_root_dir)
+            shutil.rmtree(os.path.join(data_root_dir, 'temp'))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -1732,7 +1738,7 @@ def get_ortho_metadata():
     location = request.args.get('location')
     population = request.args.get('population')
     
-    metadata_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Processed', year, experiment, location, population, date, platform, sensor, 'ortho_metadata.json')
+    metadata_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor, 'ortho_metadata.json')
     
     if not os.path.exists(metadata_path):
         return jsonify({"error": "Metadata file not found"}), 404
@@ -1754,7 +1760,7 @@ def download_ortho():
     data = request.get_json()
     try:
         file_path = os.path.join(
-            file_app.config['DATA_ROOT_DIR'],
+            data_root_dir,
             'Processed',
             data['year'],
             data['experiment'],
@@ -1774,6 +1780,7 @@ def download_ortho():
                 tif_path = file_path.replace('.png', '.tif')
                 
                 # convert tif to png
+
                 if os.path.exists(tif_path):
                     convert_tif_to_png(tif_path)
                     
@@ -1810,7 +1817,7 @@ def delete_ortho():
     platform = data.get('platform')
     sensor = data.get('sensor')
     # modify when allowing for creation of orthos with same date and different quality
-    ortho_path = os.path.join(file_app.config['DATA_ROOT_DIR'], 'Processed', year, experiment, location, population, date)
+    ortho_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
     try:
         shutil.rmtree(ortho_path)
     except FileNotFoundError:
@@ -1899,7 +1906,7 @@ def monitor_log_updates(logs_path, progress_file):
 @file_app.route('/start_cvat', methods=['POST'])
 def start_cvat():
     # global data_root_dir
-    clone_dir = os.path.join(file_app.config['DATA_ROOT_DIR'], 'cvat')
+    clone_dir = os.path.join(data_root_dir, 'cvat')
     
     # Create the directory if it doesn't exist
     os.makedirs(clone_dir, exist_ok=True)
@@ -2012,7 +2019,7 @@ def check_labels(dir_path):
     data = []
     
     # get labels path
-    labels_path = Path(file_app.config['DATA_ROOT_DIR'])/dir_path
+    labels_path = Path(data_root_dir)/dir_path
 
     if labels_path.exists() and labels_path.is_dir():
         # Use glob to find all .txt files in the directory
@@ -2031,7 +2038,7 @@ def check_existing_labels():
     data = request.json
     fileList = data['fileList']
     dirPath = data['dirPath']
-    full_dir_path = os.path.join(file_app.config['DATA_ROOT_DIR'], dirPath)
+    full_dir_path = os.path.join(data_root_dir, dirPath)
 
     # existing_files = set(os.listdir(full_dir_path)) if os.path.exists(full_dir_path) else set()
     existing_files = [file.name for file in Path(full_dir_path).rglob('*.txt')]
@@ -2046,7 +2053,7 @@ def upload_trait_labels():
     # global data_root_dir
     
     dir_path = request.form.get('dirPath')
-    full_dir_path = os.path.join(file_app.config['DATA_ROOT_DIR'], dir_path)
+    full_dir_path = os.path.join(data_root_dir, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
 
     for file in request.files.getlist("files"):
@@ -2248,8 +2255,8 @@ def train_model():
         experiment = request.json['experiment']
         
         # prepare labels
-        annotations = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
-        all_images = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        annotations = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/annotations'
+        all_images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
         # all_images = Path('/home/gemini/mnt/d/Annotations/Plant Detection/obj_train_data')
         check_if_images_exist = prepare_labels(annotations, all_images)
         # wait for 1 minute
@@ -2258,21 +2265,21 @@ def train_model():
             return jsonify({"error": "No images found for training. Press stop and upload images."}), 404
         
         # extract labels
-        labels_path = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
+        labels_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection/labels/train'
         labels = get_labels(labels_path)
         labels_arg = " ".join(labels).split()
         
         # other training args
         pretrained = "yolov8n.pt"
-        save_train_model = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Training'/platform
-        scan_save = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
+        save_train_model = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform
+        scan_save = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'{sensor} {trait} Detection'
         scan_save = Path(scan_save)
         scan_save.mkdir(parents=True, exist_ok=True)
         latest_data['epoch'] = 0
         latest_data['map'] = 0
         training_stopped_event.clear()
         threading.Thread(target=scan_for_new_folders, args=(scan_save,), daemon=True).start()
-        images = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
+        images = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Labels/{trait} Detection'
         
         cmd = (
             f"python {TRAIN_MODEL} "
@@ -2464,19 +2471,19 @@ def locate_plants():
     
     # other args
     # container_dir = Path('/app/mnt/GEMINI-App-Data')
-    images = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-    disparity = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
-    configs = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-    plotmap = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
+    images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+    disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
+    configs = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+    plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
     
     # generate save folder
     version = generate_hash(trait='Locate')
-    save_base = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'
+    save_base = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'
     while (save_base / f'{version}').exists():
         version = generate_hash(trait='Locate')
-    save_locate = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
+    save_locate = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/date/platform/sensor/f'Locate'/f'{version}'
     save_locate.mkdir(parents=True, exist_ok=True)
-    model_path = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt' # TODO: DEBUG
+    model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt' # TODO: DEBUG
     # model_path = "/mnt/d/GEMINI-App-Data/Intermediate/2022/GEMINI/Davis/Legumes/Training/Amiga-Onboard/RGB Plant Detection/Plant-btRN26/weights/last.pt"
     
     # save logs file
@@ -2587,16 +2594,16 @@ def extract_traits():
         locate_id = match_locate_id.group(1)
         
         # other args
-        summary_path = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-        model_path = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
-        images = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
-        disparity = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
-        plotmap = Path(file_app.config['DATA_ROOT_DIR'])/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
-        metadata = Path(file_app.config['DATA_ROOT_DIR'])/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
-        save = Path(file_app.config['DATA_ROOT_DIR'])/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-Traits-WGS84.geojson'
-        save_extract = Path(file_app.config['DATA_ROOT_DIR'])/'Processed'/year/experiment/location/population/date/platform/sensor
-        temp = Path(file_app.config['DATA_ROOT_DIR'])/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
-        temp_extract = Path(file_app.config['DATA_ROOT_DIR'])/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        summary_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
+        model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
+        images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
+        disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
+        plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
+        metadata = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Metadata'
+        save = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/f'{date}-{platform}-{sensor}-Traits-WGS84.geojson'
+        save_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor
+        temp = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
+        temp_extract = Path(data_root_dir)/'Processed'/year/experiment/location/population/date/platform/sensor/'temp'
         temp_extract.mkdir(parents=True, exist_ok=True) #if it doesnt exists
         save_extract.mkdir(parents=True, exist_ok=True)
         
@@ -2677,157 +2684,6 @@ def stop_extract():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
-def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None):
-    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
-    image_dir_path = os.path.join(data_root_dir_path, directory)
-    metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
-    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    start_image_name = "/top/" + start_image_name  # Ensure the image name starts with 'top/'
-    end_image_name = "/top/" + end_image_name
-    print(f"DEBUG: CSV path is {csv_path}")
-    if not os.path.exists(csv_path):
-        print(f"DEBUG: msgs_synced.csv not found at {csv_path}")
-        return jsonify({"error": f"msgs_synced.csv not found at {csv_path}"}), 404
-    df = pd.read_csv(csv_path)
-    if 'plot_index' not in df.columns:
-        df['plot_index'] = -1
-    image_column = f'/{camera}/rgb_file'
-    if image_column not in df.columns:
-        print(f"DEBUG: Image column '{image_column}' not found in {csv_path}")
-        return jsonify({"error": f"Image column '{image_column}' not found in {csv_path}"}), 404
-    try:
-        start_row_index = df.index[df[image_column] == start_image_name].tolist()[0]
-        end_row_index = df.index[df[image_column] == end_image_name].tolist()[0]
-    except IndexError:
-        print(f"DEBUG: Image '{start_image_name}' or '{end_image_name}' not found in column '{image_column}'")
-        return jsonify({"error": f"Image '{start_image_name}' or '{end_image_name}' not found in column '{image_column}'"}), 404
-    current_plot_index = int(plot_index)
-    df.loc[start_row_index:end_row_index, 'plot_index'] = current_plot_index
-    df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
-    df.to_csv(csv_path, index=False)
-    return jsonify({"message": "Plot index updated successfully"}), 200
-
-@file_app.route('/mark_plot', methods=['POST'])
-def mark_plot():
-    data = request.json
-    if 'stitch_direction' not in data:
-        data['stitch_direction'] = None
-    return update_plot_index(data['directory'], data['start_image_name'], data['end_image_name'], data['plot_index'], data['camera'], data.get('stitch_direction'))
-
-@file_app.route('/get_max_plot_index', methods=['POST'])
-def get_max_plot_index():
-    data = request.get_json()
-    directory = data.get('directory')
-    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
-    dir_path = os.path.join(data_root_dir_path, directory)
-    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
-    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    print(f"DEBUG: CSV path is {csv_path}")
-    if not directory:
-        return jsonify({'error': 'Missing directory'}), 400
-    if not os.path.exists(csv_path):
-        # If the CSV doesn't exist, no plots have been marked.
-        print(f"DEBUG: msgs_synced.csv not found at {csv_path}")
-        return jsonify({'max_plot_index': -1}), 200
-
-    try:
-        df = pd.read_csv(csv_path)
-        if 'plot_index' in df.columns and not df['plot_index'].empty:
-            max_index = df['plot_index'].max()
-            print(f"DEBUG: Max plot index found: {max_index}")
-            return jsonify({'max_plot_index': int(max_index)}), 200
-        else:
-            # If column doesn't exist or is empty, no plots marked.
-            print("DEBUG: No plot_index column found or it is empty.")
-            return jsonify({'max_plot_index': -1}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@file_app.route('/get_image_plot_index', methods=['POST'])
-def get_image_plot_index():
-    data = request.get_json()
-    directory = data.get('directory')
-    image_name = data.get('image_name')
-    image_name = "/top/" + image_name
-    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
-    image_dir_path = os.path.join(data_root_dir_path, directory)
-    metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
-    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    if not directory or not image_name:
-        return jsonify({'error': 'Missing directory or image name'}), 400
-
-    try:
-        df = pd.read_csv(csv_path)
-        
-        # Find the column that contains the image name
-        image_col = None
-        for col in df.columns:
-            if col.endswith('_file'):
-                if image_name in df[col].values:
-                    image_col = col
-                    break
-        
-        if not image_col:
-            return jsonify({'plot_index': -1}), 200 # Image not in msgs_synced, so no index
-
-        row = df[df[image_col] == image_name]
-
-        if not row.empty:
-            plot_index = row['plot_index'].iloc[0]
-            return jsonify({'plot_index': int(plot_index)}), 200
-        else:
-            return jsonify({'plot_index': -1}), 200 # Image not in msgs_synced, so no index
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@file_app.route('/delete_plot', methods=['POST'])
-def delete_plot():
-    data = request.get_json()
-    directory = data.get('directory')
-    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
-    dir_path = os.path.join(data_root_dir_path, directory)
-    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
-    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    plot_index = data.get('plot_index')
-    df = pd.read_csv(csv_path)
-    if 'plot_index' not in df.columns:
-        return jsonify({"error": "'plot_index' column not found in csv"}), 500
-    df.loc[df['plot_index'] == plot_index, 'plot_index'] = -1
-    df.to_csv(csv_path, index=False)
-
-    return jsonify({"status": "success", "message": f"Plot {plot_index} deleted successfully."})
-
-
-@file_app.route('/get_plot_data', methods=['POST'])
-def get_plot_data():
-    data = request.get_json()
-    directory = data.get('directory')
-    data_root_dir_path = os.path.abspath(file_app.config['DATA_ROOT_DIR'])
-    dir_path = os.path.join(data_root_dir_path, directory)
-    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
-    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    try:
-        df = pd.read_csv(csv_path)
-        if 'plot_index' not in df.columns:
-            return jsonify([])
-        # Filter for plots that have been marked
-        marked_plots_df = df[df['plot_index'] > -1].copy()
-        if marked_plots_df.empty:
-            return jsonify([])
-        image_col = '/top/rgb_file'
-        start_plots_df = marked_plots_df.groupby('plot_index').first().reset_index()
-        # Rename column to match what frontend expects
-        start_plots_df = start_plots_df.rename(columns={image_col: 'image_name'})
-
-        start_plots = start_plots_df[['plot_index', 'image_name']].to_dict('records')
-        
-        return jsonify(start_plots)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @file_app.route('/done_extract', methods=['POST'])
 def done_extract():
     global temp_extract, save_extract, model_id, summary_date, locate_id, trait_extract, extract_process
@@ -2861,96 +2717,35 @@ def done_extract():
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
 
+app = FastAPI()
 
-@file_app.route('/download_amiga_images', methods=['POST'])
-def download_amiga_images():
-    """
-    Downloads images extracted from an Amiga binary.
-    
-    If a 'plot_index' column with marked plots (> -1) exists in the metadata, 
-    only those marked images are zipped. Otherwise, all images from the directory are zipped.
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Invalid JSON payload"}), 400
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        # --- 1. Get request data and construct paths using pathlib ---
-        year = data.get('year')
-        experiment = data.get('experiment')
-        location = data.get('location')
-        population = data.get('population')
-        date = data.get('date')
-        camera = data.get('camera')
-        print(f"DEBUG: Received data: {data}")
-        # Using pathlib for cleaner and more robust path manipulation
-        base_path = Path(file_app.config['DATA_ROOT_DIR']) / 'Raw' / year / experiment / location / population / date / 'rover'
-        images_path = base_path / 'RGB' / 'Images' / camera
-        csv_path = base_path / 'RGB' / 'Metadata' / 'msgs_synced.csv'
+app.mount("/flask_app", WSGIMiddleware(file_app))
 
-        if not images_path.is_dir():
-            return jsonify({"error": f"Images directory not found at: {images_path}"}), 404
-        if not csv_path.is_file():
-            return jsonify({"error": f"Metadata CSV not found at: {csv_path}"}), 404
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data', required=False)
+    parser.add_argument('--flask_port', type=int, default=5000, required=False)
+    parser.add_argument('--titiler_port', type=int, default=8091, required=False)
+    args = parser.parse_args()
 
-        # --- 2. Image Selection Logic ---
-        df = pd.read_csv(csv_path)
-        marked_images_filenames = set()
-        download_all = True
-
-        # Check if plots have been marked and the corresponding column exists
-        plot_index_col = 'plot_index'
-        image_file_col = f'/{camera}/rgb_file'
-
-        if plot_index_col in df.columns and image_file_col in df.columns:
-            # Filter for rows where a plot has been marked
-            marked_plots_df = df[df[plot_index_col] > -1]
-            if not marked_plots_df.empty:
-                print("Marked plots found. Preparing to download specific images.")
-                download_all = False
-                # Get the basename of each marked image file (e.g., 'image_001.png')
-                marked_images_filenames = set(
-                    Path(f).name for f in marked_plots_df[image_file_col].dropna()
-                )
-        
-        if download_all:
-            print("No marked plots found. Preparing to download all images.")
-
-        # --- 3. Zipping and Sending the File ---
-        zip_filename = f"{year}_{experiment}_{location}_{population}_{date}_Amiga_RGB.zip"
-        # Place the zip file in a temporary or cache directory if possible
-        zip_path = images_path.parent / zip_filename
-
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Walk through the images directory
-            for file in os.listdir(images_path):
-                file_path = images_path / file
-                if file_path.is_file():
-                    # If downloading all, or if the file is in our marked set, add it to the zip
-                    if download_all or file in marked_images_filenames:
-                        if not download_all and file in marked_images_filenames:
-                            # Find the row in the DataFrame matching this file by comparing just the file name
-                            df_row = marked_plots_df[marked_plots_df[image_file_col].apply(lambda x: Path(x).name) == {file}]
-                            if not df_row.empty:
-                                plot_index = df_row['plot_index'].iloc[0]
-                                new_filename = f"plot{plot_index}-{file}"
-                            else:
-                                new_filename = file
-                            zipf.write(file_path, arcname=new_filename)
-                        else:
-                            # Use 'arcname' to keep the zip file flat (no parent directories)
-                            zipf.write(file_path, arcname=file)
-        
-        # Send the created zip file to the user for download
-        return send_file(zip_path, as_attachment=True)
-
-    except FileNotFoundError:
-        return jsonify({"error": "A specified file or directory was not found."}), 404
-    except pd.errors.EmptyDataError:
-        return jsonify({"error": "Metadata CSV file is empty."}), 400
-    except KeyError as e:
-        return jsonify({"error": f"Missing expected key in data: {e}"}), 400
-    except Exception as e:
-        # Generic error handler for unexpected issues
-        print(f"An unexpected error occurred: {e}")
-        return jsonify({"error": "An internal server error occurred."}), 500
+    print(f"flask_port: {args.flask_port}")
+    print(f"titiler_port: {args.titiler_port}")
+    data_root_dir = args.data_root_dir
+    if "~" in data_root_dir:
+        data_root_dir = os.path.expanduser(data_root_dir)
+    print(f"data_root_dir: {data_root_dir}")
+    file_app.config['DATA_ROOT_DIR'] = data_root_dir
+    UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
+    now_drone_processing = False
+    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
+    titiler_process = subprocess.Popen(titiler_command, shell=True)
+    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
+    titiler_process.terminate()

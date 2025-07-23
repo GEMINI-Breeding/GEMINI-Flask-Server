@@ -61,7 +61,7 @@ echo "Flask Port: $flask_port"
 titiler_port="${3:-8091}"
 echo "Titiler Port: $titiler_port"
 
-python src/app.py --data_root_dir $data_root_dir --flask_port $flask_port --titiler_port $titiler_port
+python src/app_flask_backend.py --data_root_dir $data_root_dir --flask_port $flask_port --titiler_port $titiler_port
 
 # Change back to the original directory
 popd
