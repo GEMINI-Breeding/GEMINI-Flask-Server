@@ -229,7 +229,7 @@ def download_amiga_images():
         camera = data.get('camera')
         print(f"DEBUG: Received data: {data}")
         # Using pathlib for cleaner and more robust path manipulation
-        base_path = Path(data_root_dir) / 'Raw' / year / experiment / location / population / date / 'rover'
+        base_path = Path(current_app.config['DATA_ROOT_DIR']) / 'Raw' / year / experiment / location / population / date / 'rover'
         images_path = base_path / 'RGB' / 'Images' / camera
         csv_path = base_path / 'RGB' / 'Metadata' / 'msgs_synced.csv'
 
