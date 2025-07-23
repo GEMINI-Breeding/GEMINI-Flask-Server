@@ -2705,7 +2705,7 @@ if __name__ == "__main__":
     if "~" in data_root_dir:
         data_root_dir = os.path.expanduser(data_root_dir)
     print(f"data_root_dir: {data_root_dir}")
-
+    file_app.config['DATA_ROOT_DIR'] = data_root_dir
     global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
