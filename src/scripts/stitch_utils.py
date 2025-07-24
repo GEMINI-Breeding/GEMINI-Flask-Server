@@ -188,7 +188,7 @@ def reproject_to_wgs84(src_path: str, dst_path: str):
                 )
     print(f"Finished reprojection to {dst_path}")
 
-def georeference_plot(plot_id,
+def georeference_plot(plot_index,
                       plot_data,
                       plot_stitched_path,
                       versioned_output_path,
@@ -219,14 +219,14 @@ def georeference_plot(plot_id,
         Image.MAX_IMAGE_PIXELS = None
 
         base_name = "AgRowStitch"
-        print(f"\n========== Georeferencing Plot {plot_id} ==========")
+        print(f"\n========== Georeferencing Plot {plot_index} ==========")
 
         # ---- find mosaic ----
         mosaic_candidates = [
-            f"{base_name}_plot-id-{plot_id}.png",
-            f"{base_name}_plot-id-{plot_id}.tif",
-            f"full_res_mosaic_temp_plot_{plot_id}.png",
-            f"full_res_mosaic_temp_plot_{plot_id}.tif",
+            f"{base_name}_plot-id-{plot_index}.png",
+            f"{base_name}_plot-id-{plot_index}.tif",
+            f"full_res_mosaic_temp_plot_{plot_index}.png",
+            f"full_res_mosaic_temp_plot_{plot_index}.tif",
         ]
         src_file = None
         for fname in mosaic_candidates:
@@ -235,13 +235,13 @@ def georeference_plot(plot_id,
                 src_file = p
                 break
         if src_file is None:
-            print(f"[Plot {plot_id}] No mosaic file found in {versioned_output_path}")
+            print(f"[Plot {plot_index}] No mosaic file found in {versioned_output_path}")
             return False
-        print(f"[Plot {plot_id}] Using mosaic file: {src_file}")
+        print(f"[Plot {plot_index}] Using mosaic file: {src_file}")
 
         # ---- GPS sanity ----
         if "lat" not in plot_data.columns or "lon" not in plot_data.columns:
-            print(f"[Plot {plot_id}] lat/lon columns missing.")
+            print(f"[Plot {plot_index}] lat/lon columns missing.")
             return False
 
         plot_df = (plot_data.sort_values("/top/rgb_file")
@@ -251,13 +251,13 @@ def georeference_plot(plot_id,
         lats = plot_df["lat"].dropna().to_numpy()
         lons = plot_df["lon"].dropna().to_numpy()
         if lats.size == 0 or lons.size == 0:
-            print(f"[Plot {plot_id}] No valid lat/lon values.")
+            print(f"[Plot {plot_index}] No valid lat/lon values.")
             return False
 
         first_lat, first_lon = lats[0], lons[0]
         last_lat,  last_lon  = lats[-1], lons[-1]
-        print(f"[Plot {plot_id}] First GPS  ({first_lat:.6f}, {first_lon:.6f})")
-        print(f"[Plot {plot_id}] Last  GPS  ({last_lat:.6f}, {last_lon:.6f})")
+        print(f"[Plot {plot_index}] First GPS  ({first_lat:.6f}, {first_lon:.6f})")
+        print(f"[Plot {plot_index}] Last  GPS  ({last_lat:.6f}, {last_lon:.6f})")
 
         lat_diff = last_lat - first_lat
         lon_diff = last_lon - first_lon
@@ -265,13 +265,13 @@ def georeference_plot(plot_id,
             rover_direction = "NORTH" if lat_diff > 0 else "SOUTH"
         else:
             rover_direction = "EAST" if lon_diff > 0 else "WEST"
-        print(f"[Plot {plot_id}] Rover direction guess: {rover_direction}")
+        print(f"[Plot {plot_index}] Rover direction guess: {rover_direction}")
 
         if has_stitch_direction and "stitch_direction" in plot_df.columns:
             stitch_direction = str(plot_df["stitch_direction"].iloc[0]).upper()
         else:
             stitch_direction = "UNKNOWN"
-        print(f"[Plot {plot_id}] Stitching direction (column): {stitch_direction}")
+        print(f"[Plot {plot_index}] Stitching direction (column): {stitch_direction}")
 
         # ---- read mosaic ----
         with Image.open(src_file) as im:
@@ -279,13 +279,13 @@ def georeference_plot(plot_id,
                 im = im.convert("RGB")
             img_array = np.array(im)
         h, w = img_array.shape[:2]
-        print(f"[Plot {plot_id}] Image size: {w} x {h}")
+        print(f"[Plot {plot_index}] Image size: {w} x {h}")
 
         # ---- choose UTM ----
         center_lat = (lats.min() + lats.max()) / 2.0
         center_lon = (lons.min() + lons.max()) / 2.0
         utm_epsg = pick_utm_epsg(center_lon, center_lat)
-        print(f"[Plot {plot_id}] Using UTM CRS: EPSG:{utm_epsg}")
+        print(f"[Plot {plot_index}] Using UTM CRS: EPSG:{utm_epsg}")
 
         transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg}", always_xy=True)
         xs, ys = transformer.transform(lons, lats)
@@ -293,7 +293,7 @@ def georeference_plot(plot_id,
         # ---- PCA heading ----
         theta = fit_angle_pca(xs, ys)
         theta_deg = math.degrees(theta) % 360
-        print(f"[Plot {plot_id}] PCA trajectory angle: {theta_deg:.2f}° (0° = +X/East)")
+        print(f"[Plot {plot_index}] PCA trajectory angle: {theta_deg:.2f}° (0° = +X/East)")
 
         # enforce left→right order (first should be left)
         cos_t, sin_t = math.cos(theta), math.sin(theta)
@@ -303,13 +303,13 @@ def georeference_plot(plot_id,
             theta += math.pi
             theta_deg = (theta_deg + 180) % 360
             cos_t, sin_t = math.cos(theta), math.sin(theta)
-            print(f"[Plot {plot_id}] Flipped θ by 180° to match mosaic L→R order")
+            print(f"[Plot {plot_index}] Flipped θ by 180° to match mosaic L→R order")
 
         # ---- axis extents from GPS ----
         u_min, u_max, v_min, v_max, width_m_axis, height_m_axis = compute_axes_extents(
             xs, ys, theta, buffer_frac=0.05
         )
-        print(f"[Plot {plot_id}] Raw axis extents: width={width_m_axis:.3f}m, height={height_m_axis:.3f}m")
+        print(f"[Plot {plot_index}] Raw axis extents: width={width_m_axis:.3f}m, height={height_m_axis:.3f}m")
 
         # ---- cross-track decision using helper ----
         px_along = width_m_axis / w  # meters per pixel along-track
@@ -318,7 +318,7 @@ def georeference_plot(plot_id,
         if CROSS_TRACK_STRATEGY == "intrinsics" and camera_intrinsics:
             intr_gsd = calc_gsd_from_intrinsics(camera_intrinsics, camera_height, w, h)
             if intr_gsd is not None:
-                print(f"[Plot {plot_id}] Intrinsics GSD: {intr_gsd:.6f} m/px")
+                print(f"[Plot {plot_index}] Intrinsics GSD: {intr_gsd:.6f} m/px")
 
         ideal_height_m = width_m_axis * (h / w)
         min_height_from_intr = (intr_gsd * h) if intr_gsd is not None else 0.0
@@ -336,7 +336,7 @@ def georeference_plot(plot_id,
         )
 
         if height_m_axis < min_height_allowed:
-            print(f"[Plot {plot_id}] Cross-track too small ({height_m_axis:.3f}m). Expanding to {min_height_allowed:.3f}m.")
+            print(f"[Plot {plot_index}] Cross-track too small ({height_m_axis:.3f}m). Expanding to {min_height_allowed:.3f}m.")
             v_center = 0.5 * (v_min + v_max)
             v_min = v_center - min_height_allowed / 2.0
             v_max = v_center + min_height_allowed / 2.0
@@ -352,23 +352,23 @@ def georeference_plot(plot_id,
             v_center = 0.5 * (v_min + v_max)
             v_min = v_center - height_m_axis / 2.0
             v_max = v_center + height_m_axis / 2.0
-            print(f"[Plot {plot_id}] Forced square pixels. px=py={px:.6f} m/px")
+            print(f"[Plot {plot_index}] Forced square pixels. px=py={px:.6f} m/px")
 
         gsd_avg = (px + py) / 2.0
-        print(f"[Plot {plot_id}] Final ground coverage: {width_m_axis:.2f}m x {height_m_axis:.2f}m")
-        print(f"[Plot {plot_id}] Pixel size / GSD: {gsd_avg:.6f} m/px (x: {px:.6f}, y: {py:.6f})")
+        print(f"[Plot {plot_index}] Final ground coverage: {width_m_axis:.2f}m x {height_m_axis:.2f}m")
+        print(f"[Plot {plot_index}] Pixel size / GSD: {gsd_avg:.6f} m/px (x: {px:.6f}, y: {py:.6f})")
 
         # ---- affine transform ----
         transform = build_rotated_affine(u_min, v_max, width_m_axis, height_m_axis, theta, px, py)
 
-        print("[Plot {plot_id}] Affine transform:")
+        print("[Plot {plot_index}] Affine transform:")
         print(f"    a={transform.a:.8f}, b={transform.b:.8f}, c={transform.c:.3f}")
         print(f"    d={transform.d:.8f}, e={transform.e:.8f}, f={transform.f:.3f}")
-        print(f"[Plot {plot_id}] Rotation encoded: {theta_deg:.2f}°; rover guess: {rover_direction}")
+        print(f"[Plot {plot_index}] Rotation encoded: {theta_deg:.2f}°; rover guess: {rover_direction}")
 
         # ---- write UTM GeoTIFF ----
-        utm_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_id}_utm.tif")
-        print(f"[Plot {plot_id}] Writing UTM GeoTIFF: {utm_out}")
+        utm_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_index}_utm.tif")
+        print(f"[Plot {plot_index}] Writing UTM GeoTIFF: {utm_out}")
         with rasterio.open(
             utm_out, "w",
             driver="GTiff",
@@ -385,20 +385,20 @@ def georeference_plot(plot_id,
         ) as dst:
             for i in range(3):
                 dst.write(img_array[:, :, i], i + 1)
-        print(f"[Plot {plot_id}] UTM GeoTIFF written.")
+        print(f"[Plot {plot_index}] UTM GeoTIFF written.")
 
         # ---- reproject to WGS84 ----
-        wgs_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_id}.tif")
+        wgs_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_index}.tif")
         reproject_to_wgs84(utm_out, wgs_out)
 
-        print(f"[Plot {plot_id}] DONE. Outputs:")
+        print(f"[Plot {plot_index}] DONE. Outputs:")
         print(f"    UTM GeoTIFF : {utm_out}")
         print(f"    WGS84 GeoTIFF: {wgs_out}")
         print("====================================================\n")
         return True
 
     except Exception as e:
-        print(f"[Plot {plot_id}] ERROR during georeferencing: {e}")
+        print(f"[Plot {plot_index}] ERROR during georeferencing: {e}")
         return False
 
 def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_options, save_path, calibration_path=None, stitch_stop_event=None, final_progress_callback=None):
@@ -421,14 +421,14 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
         print(f"Loaded msgs_synced.csv with {len(msgs_df)} rows")
         
         # Check required columns
-        required_columns = ['plot_id', '/top/rgb_file']
+        required_columns = ['plot_index', '/top/rgb_file']
         missing_columns = [col for col in required_columns if col not in msgs_df.columns]
         if missing_columns:
             print(f"Error: Missing columns in msgs_synced.csv: {missing_columns}")
             return
         
         # Get unique plot IDs
-        unique_plots = msgs_df['plot_id'].unique()
+        unique_plots = msgs_df['plot_index'].unique()
         print(f"Found {len(unique_plots)} unique plots: {unique_plots}")
 
         # Check for stitch_direction column (optional)
@@ -458,31 +458,31 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
         processed_plots = []
         failed_plots = []
         
-        for plot_id in unique_plots:
+        for plot_index in unique_plots:
             if stitch_stop_event and stitch_stop_event.is_set():
                 print("Stitching process stopped by user")
                 break
             
             # Skip plot index 0
-            if plot_id == 0:
-                print(f"Skipping plot {plot_id} (plot index 0)")
+            if plot_index == 0:
+                print(f"Skipping plot {plot_index} (plot index 0)")
                 continue
                 
             try:
-                print(f"Processing plot {plot_id}")
+                print(f"Processing plot {plot_index}")
                 
                 # Filter data for current plot
-                plot_data = msgs_df[msgs_df['plot_id'] == plot_id]
+                plot_data = msgs_df[msgs_df['plot_index'] == plot_index]
 
                 # Get image filenames for this plot
                 image_files = plot_data['/top/rgb_file'].dropna().tolist()
                 if not image_files:
-                    print(f"No images found for plot {plot_id}, skipping")
-                    failed_plots.append(plot_id)
+                    print(f"No images found for plot {plot_index}, skipping")
+                    failed_plots.append(plot_index)
                     continue
                 
                 # Create temporary directory for this plot's images
-                plot_temp_dir = os.path.join(os.path.dirname(image_path), f"temp_plot_{plot_id}")
+                plot_temp_dir = os.path.join(os.path.dirname(image_path), f"temp_plot_{plot_index}")
                 if os.path.exists(plot_temp_dir):
                     shutil.rmtree(plot_temp_dir)
                 os.makedirs(plot_temp_dir, exist_ok=True)
@@ -500,12 +500,12 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                         print(f"Warning: Image {img_file} not found at {src_path}")
                 
                 if not copied_files:
-                    print(f"No valid images copied for plot {plot_id}, skipping")
+                    print(f"No valid images copied for plot {plot_index}, skipping")
                     shutil.rmtree(plot_temp_dir)
-                    failed_plots.append(plot_id)
+                    failed_plots.append(plot_index)
                     continue
                 
-                print(f"Copied {len(copied_files)} images for plot {plot_id}")
+                print(f"Copied {len(copied_files)} images for plot {plot_index}")
                 
                 # Load original config
                 with open(config_path, 'r') as f:
@@ -518,12 +518,12 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 # Set stitching direction if available
                 if has_stitch_direction:
                     stitching_direction = plot_data['stitch_direction'].iloc[0]
-                    print(f"Stitching direction for plot {plot_id}: {stitching_direction}")
+                    print(f"Stitching direction for plot {plot_index}: {stitching_direction}")
                     if pd.notna(stitching_direction):
                         config['stitching_direction'] = stitching_direction
-                        print(f"Set stitching_direction to {stitching_direction} for plot {plot_id}")
+                        print(f"Set stitching_direction to {stitching_direction} for plot {plot_index}")
                 else:
-                    print(f"No stitching_direction found for plot {plot_id}, using default direction")
+                    print(f"No stitching_direction found for plot {plot_index}, using default direction")
 
                 # Apply any user-specified custom options
                 if isinstance(custom_options, str):
@@ -532,7 +532,7 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                     config.update(custom_options)
 
                 # Save to temp config file
-                with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=f"_plot_{plot_id}.yaml") as tmpfile:
+                with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=f"_plot_{plot_index}.yaml") as tmpfile:
                     yaml.safe_dump(config, tmpfile)
                     temp_config_path = tmpfile.name
 
@@ -542,34 +542,34 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 plot_stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
                 
                 # Run stitching for this plot
-                print(f"Starting stitching for plot {plot_id}")
+                print(f"Starting stitching for plot {plot_index}")
                 
                 # Run the stitching process for this plot
-                run_stitch_process_for_plot(temp_config_path, cpu_count, plot_stitched_path, versioned_output_path, plot_id, stitch_stop_event)
+                run_stitch_process_for_plot(temp_config_path, cpu_count, plot_stitched_path, versioned_output_path, plot_index, stitch_stop_event)
                 
                 # Georeference the individual plot at full resolution (maximum quality)
-                print(f"Georeferencing individual plot {plot_id} at full resolution...")
-                georeference_success = georeference_plot(plot_id, plot_data, plot_stitched_path, versioned_output_path, has_stitch_direction, camera_intrinsics)
+                print(f"Georeferencing individual plot {plot_index} at full resolution...")
+                georeference_success = georeference_plot(plot_index, plot_data, plot_stitched_path, versioned_output_path, has_stitch_direction, camera_intrinsics)
                 if georeference_success:
-                    print(f"Successfully georeferenced plot {plot_id}")
+                    print(f"Successfully georeferenced plot {plot_index}")
                 else:
-                    print(f"Warning: Failed to georeference plot {plot_id}")
+                    print(f"Warning: Failed to georeference plot {plot_index}")
                 
                 # Clean up temporary files
                 os.unlink(temp_config_path)
                 shutil.rmtree(plot_temp_dir)
                 
-                processed_plots.append(plot_id)
-                print(f"Successfully processed plot {plot_id}")
+                processed_plots.append(plot_index)
+                print(f"Successfully processed plot {plot_index}")
                 
                 # DEBUG: Break after plot 3 and create combined mosaic # TODO: DELETE LATE
-                if plot_id == 3:
+                if plot_index == 3:
                     print("DEBUG: Breaking after plot 3 to create combined mosaic")
                     break
                 
             except Exception as e:
-                print(f"Error processing plot {plot_id}: {str(e)}")
-                failed_plots.append(plot_id)
+                print(f"Error processing plot {plot_index}: {str(e)}")
+                failed_plots.append(plot_index)
                 
                 # Clean up on error
                 if 'plot_temp_dir' in locals() and os.path.exists(plot_temp_dir):
@@ -596,9 +596,9 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
         print(f"Error in run_stitch_all_plots: {str(e)}")
 
 
-def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned_output_path, plot_id, stitch_stop_event=None):
+def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned_output_path, plot_index, stitch_stop_event=None):
     """Run the stitching process for a single plot"""
-    print(f"Stitching started for plot {plot_id} on thread {threading.current_thread().name}")
+    print(f"Stitching started for plot {plot_index} on thread {threading.current_thread().name}")
 
     try:
         # Run the AgRowStitch process
@@ -609,7 +609,7 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
         
         # Check if the result is iterable
         if agrowstitch_result is None:
-            print(f"AgRowStitch returned None for plot {plot_id}")
+            print(f"AgRowStitch returned None for plot {plot_index}")
             # Don't return immediately, continue to check for output files
         else:
             # Try to iterate through the result
@@ -617,20 +617,20 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
                 if hasattr(agrowstitch_result, '__iter__') and not isinstance(agrowstitch_result, (str, bytes)):
                     for step in agrowstitch_result:
                         if stitch_stop_event and stitch_stop_event.is_set():
-                            print(f"Stitching canceled by user for plot {plot_id}.")
+                            print(f"Stitching canceled by user for plot {plot_index}.")
                             return
-                        print(f"Plot {plot_id} - Step: {step}")
+                        print(f"Plot {plot_index} - Step: {step}")
                 else:
-                    print(f"AgRowStitch result is not iterable for plot {plot_id}, but process may have completed")
+                    print(f"AgRowStitch result is not iterable for plot {plot_index}, but process may have completed")
             except TypeError as e:
-                print(f"AgRowStitch result is not iterable for plot {plot_id}: {e}")
+                print(f"AgRowStitch result is not iterable for plot {plot_index}: {e}")
                 # If it's not iterable, assume the process completed successfully
-                print(f"Assuming stitching completed successfully for plot {plot_id}")
+                print(f"Assuming stitching completed successfully for plot {plot_index}")
             except Exception as e:
-                print(f"Error during AgRowStitch iteration for plot {plot_id}: {e}")
+                print(f"Error during AgRowStitch iteration for plot {plot_index}: {e}")
                 # Don't return, continue to check for output files
         
-        print(f"AgRowStitch processing completed for plot {plot_id}, checking for output files...")
+        print(f"AgRowStitch processing completed for plot {plot_index}, checking for output files...")
 
         # Now stitching is done — look for the actual generated files
         # Check if the stitched_path exists, if not wait a bit for it to be created
@@ -642,7 +642,7 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
             wait_count += 1
         
         if not os.path.exists(stitched_path):
-            print(f"Stitched output directory not found for plot {plot_id}: {stitched_path}")
+            print(f"Stitched output directory not found for plot {plot_index}: {stitched_path}")
             # Try to find alternative output directories
             possible_dirs = [
                 os.path.join(os.path.dirname(stitched_path), "output"),
@@ -658,27 +658,27 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
                     print(f"Files in {alt_dir}: {all_files}")
                     
                     # Look for any files related to this plot
-                    plot_files = [f for f in all_files if str(plot_id) in f or 'plot' in f.lower()]
+                    plot_files = [f for f in all_files if str(plot_index) in f or 'plot' in f.lower()]
                     if plot_files:
                         stitched_path = alt_dir
                         print(f"Using alternative directory {alt_dir} with files: {plot_files}")
                         break
             else:
-                print(f"No suitable output directory found for plot {plot_id}")
+                print(f"No suitable output directory found for plot {plot_index}")
                 return
         
         # List all files in the stitched directory to see what was actually generated
         all_files = os.listdir(stitched_path)
         print(f"Files found in {stitched_path}: {all_files}")
         
-        # Look for files that match this plot_id pattern - try multiple patterns
+        # Look for files that match this plot_index pattern - try multiple patterns
         # Only use plot-specific patterns first, avoid generic ones that could match multiple plots
         plot_patterns = [
-            f"temp_plot_{plot_id}",
-            f"full_res_mosaic_temp_plot_{plot_id}",
-            f"plot_{plot_id}",
-            f"plot-{plot_id}",
-            str(int(plot_id)) if float(plot_id).is_integer() else str(plot_id),
+            f"temp_plot_{plot_index}",
+            f"full_res_mosaic_temp_plot_{plot_index}",
+            f"plot_{plot_index}",
+            f"plot-{plot_index}",
+            str(int(plot_index)) if float(plot_index).is_integer() else str(plot_index),
         ]
         
         plot_files = []
@@ -688,7 +688,7 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
         
         # Remove duplicates while preserving order
         plot_files = list(dict.fromkeys(plot_files))
-        print(f"Files matching plot {plot_id} patterns: {plot_files}")
+        print(f"Files matching plot {plot_index} patterns: {plot_files}")
         
         # If no specific plot files found, look for any image files that might be the result
         if not plot_files:
@@ -701,28 +701,28 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
                 plot_files = image_files
                 print(f"Using single image file as result: {plot_files}")
             elif len(image_files) > 1:
-                # Look for files with "mosaic" or "stitch" in the name AND the plot_id
+                # Look for files with "mosaic" or "stitch" in the name AND the plot_index
                 plot_specific_mosaic = [f for f in image_files if 
                                       ('mosaic' in f.lower() or 'stitch' in f.lower()) and 
-                                      str(plot_id) in f]
+                                      str(plot_index) in f]
                 if plot_specific_mosaic:
                     plot_files = plot_specific_mosaic
                     print(f"Using plot-specific mosaic files: {plot_files}")
                 else:
                     # Only use generic approach if we're sure it's plot-specific
-                    # Look for files that contain the plot_id as a substring
-                    plot_id_files = [f for f in image_files if str(plot_id) in f]
+                    # Look for files that contain the plot_index as a substring
+                    plot_id_files = [f for f in image_files if str(plot_index) in f]
                     if plot_id_files:
                         # Take the largest plot-specific file
                         largest_file = max(plot_id_files, key=lambda f: os.path.getsize(os.path.join(stitched_path, f)))
                         plot_files = [largest_file]
                         print(f"Using largest plot-specific image file: {plot_files}")
                     else:
-                        print(f"Warning: No plot-specific files found for plot {plot_id}. Skipping to avoid incorrect georeferencing.")
+                        print(f"Warning: No plot-specific files found for plot {plot_index}. Skipping to avoid incorrect georeferencing.")
                         return
         
         if not plot_files:
-            print(f"No files found for plot {plot_id} in {stitched_path}")
+            print(f"No files found for plot {plot_index} in {stitched_path}")
             return
         
         # Copy files directly to the versioned output directory
@@ -755,20 +755,20 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
                 files_copied += 1
                 
                 # Identify the main mosaic file for renaming
-                # Look for patterns that indicate the main mosaic AND contain the plot_id
+                # Look for patterns that indicate the main mosaic AND contain the plot_index
                 main_patterns = [
-                    f"temp_plot_{plot_id}",
-                    f"full_res_mosaic_temp_plot_{plot_id}",
+                    f"temp_plot_{plot_index}",
+                    f"full_res_mosaic_temp_plot_{plot_index}",
                 ]
                 
-                # Also check for generic patterns but only if plot_id is in filename
+                # Also check for generic patterns but only if plot_index is in filename
                 generic_patterns = ["mosaic", "stitch"]
                 
                 # First try plot-specific patterns
                 is_main_file = any(pattern in file_name.lower() for pattern in main_patterns)
                 
-                # If not found, try generic patterns but only if plot_id is in filename
-                if not is_main_file and str(plot_id) in file_name:
+                # If not found, try generic patterns but only if plot_index is in filename
+                if not is_main_file and str(plot_index) in file_name:
                     is_main_file = any(pattern in file_name.lower() for pattern in generic_patterns)
                 
                 if is_main_file:
@@ -778,10 +778,10 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
                 print(f"Error copying file {file_name}: {str(e)}")
                 continue
         
-        print(f"Successfully copied {files_copied} files for plot {plot_id}")
+        print(f"Successfully copied {files_copied} files for plot {plot_index}")
         
         if files_copied == 0:
-            print(f"No files were successfully copied for plot {plot_id}")
+            print(f"No files were successfully copied for plot {plot_index}")
             return
         
         # Rename the main mosaic file to include a cleaner name
@@ -789,7 +789,7 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
             try:
                 src_mosaic = os.path.join(versioned_output_path, main_mosaic_file)
                 file_extension = os.path.splitext(main_mosaic_file)[1]
-                new_mosaic_name = f"{base_name}_plot-id-{plot_id}{file_extension}"
+                new_mosaic_name = f"{base_name}_plot-id-{plot_index}{file_extension}"
                 dst_mosaic = os.path.join(versioned_output_path, new_mosaic_name)
                 
                 # Only rename if the destination doesn't already exist
@@ -801,12 +801,12 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
             except Exception as e:
                 print(f"Error renaming main mosaic file: {str(e)}")
         else:
-            print(f"Warning: No main mosaic file found to rename for plot {plot_id}")
+            print(f"Warning: No main mosaic file found to rename for plot {plot_index}")
         
-        print(f"Completed processing plot {plot_id} - copied {files_copied} files to {versioned_output_path}")
+        print(f"Completed processing plot {plot_index} - copied {files_copied} files to {versioned_output_path}")
             
     except Exception as e:
-        print(f"Error in stitching process for plot {plot_id}: {str(e)}")
+        print(f"Error in stitching process for plot {plot_index}: {str(e)}")
         raise
 
 
@@ -826,15 +826,15 @@ def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest
         
         while True:
             # Check each plot's log file to see if it's completed
-            for plot_id in processed_plots:
-                if plot_id not in completed_plots:
-                    log_file = os.path.join(final_mosaics_dir, f"temp_plot_{plot_id}.log")
+            for plot_index in processed_plots:
+                if plot_index not in completed_plots:
+                    log_file = os.path.join(final_mosaics_dir, f"temp_plot_{plot_index}.log")
                     
                     if os.path.exists(log_file):
                         # Check if this plot is done by looking for completion indicators
                         if is_plot_completed(log_file):
-                            completed_plots.add(plot_id)
-                            print(f"Plot {plot_id} completed!")
+                            completed_plots.add(plot_index)
+                            print(f"Plot {plot_index} completed!")
             
             # Calculate progress based on completed plots (0-100% since no combined mosaic)
             progress_percentage = int((len(completed_plots) / total_plots) * 100)

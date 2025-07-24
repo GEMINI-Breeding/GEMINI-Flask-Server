@@ -1530,10 +1530,27 @@ def run_stitch_endpoint():
         if not os.path.exists(msgs_synced_path):
             return jsonify({"status": "error", "message": f"msgs_synced.csv not found at {msgs_synced_path}"}), 404
         
-        # Get processed plots for monitoring
+        # Load and validate plot indices
         import pandas as pd
         msgs_df = pd.read_csv(msgs_synced_path)
-        unique_plots = [pid for pid in msgs_df['plot_id'].unique() if pid != 0]  # Exclude plot 0
+        
+        # Check if plot_index column exists
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({
+                "status": "error", 
+                "message": "Plot index column not found in msgs_synced.csv. Please perform plot marking in File Management first."
+            }), 400
+        
+        # Check if any plot indices are defined (excluding plot 0 which is usually background/unassigned)
+        unique_plots = [pid for pid in msgs_df['plot_index'].unique() if pid != 0 and not pd.isna(pid)]
+        
+        if len(unique_plots) == 0:
+            return jsonify({
+                "status": "error", 
+                "message": "No plot indices are defined in the dataset. Please perform plot marking in File Management to assign images to plots before running AgRowStitch."
+            }), 400
+        
+        print(f"Found {len(unique_plots)} unique plots for stitching: {unique_plots}")
         
         # Start multi-plot log monitoring thread
         final_mosaics_dir = os.path.join(os.path.dirname(image_path), "final_mosaics")
@@ -1845,17 +1862,240 @@ def delete_ortho():
     date = data.get('date')
     platform = data.get('platform')
     sensor = data.get('sensor')
-    # modify when allowing for creation of orthos with same date and different quality
-    ortho_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+    delete_type = data.get('deleteType', 'ortho')  # 'ortho' or 'agrowstitch'
+    
+    base_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+    
     try:
-        shutil.rmtree(ortho_path)
+        if delete_type == 'agrowstitch':
+            # Delete specific AgRowStitch version directory
+            agrowstitch_dir = data.get('agrowstitchDir')
+            if agrowstitch_dir:
+                agrowstitch_path = os.path.join(base_path, agrowstitch_dir)
+                if os.path.exists(agrowstitch_path):
+                    shutil.rmtree(agrowstitch_path)
+                    print(f"Deleted AgRowStitch directory: {agrowstitch_path}")
+                else:
+                    print(f"AgRowStitch directory not found: {agrowstitch_path}")
+            else:
+                return jsonify({"error": "AgRowStitch directory name not provided"}), 400
+        else:
+            # Delete specific orthomosaic file
+            file_name = data.get('fileName')
+            if file_name:
+                file_path = os.path.join(base_path, file_name)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"Deleted file: {file_path}")
+                else:
+                    print(f"File not found: {file_path}")
+            else:
+                # For backward compatibility, try to find and delete standard orthomosaic files
+                # Look for common orthomosaic file patterns
+                ortho_patterns = [
+                    f"{date}-RGB-Pyramid.tif",
+                    f"{date}-RGB.tif", 
+                    f"{date}-RGB.png",
+                    f"{date}-DEM-Pyramid.tif",
+                    f"{date}-DEM.tif"
+                ]
+                
+                deleted_files = []
+                for pattern in ortho_patterns:
+                    file_path = os.path.join(base_path, pattern)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        deleted_files.append(pattern)
+                        print(f"Deleted file: {file_path}")
+                
+                if not deleted_files:
+                    return jsonify({"error": "No orthomosaic files found to delete"}), 404
+                
     except FileNotFoundError:
-        print(f"Directory not found: {ortho_path}")
+        print("Path not found during deletion")
+        return jsonify({"error": "File or directory not found"}), 404
     except PermissionError:
-        print(f"Permission denied: Unable to delete {ortho_path}")
+        print("Permission denied during deletion")
+        return jsonify({"error": "Permission denied"}), 403
     except Exception as e:
-        print(f"An error occurred while deleting {ortho_path}: {str(e)}")
-    return jsonify({"message": "Ortho file deleted successfully"}), 200
+        print(f"An error occurred during deletion: {str(e)}")
+        return jsonify({"error": f"Deletion failed: {str(e)}"}), 500
+        
+    return jsonify({"message": "Ortho deleted successfully"}), 200
+
+@file_app.route('/associate_plots_with_boundaries', methods=['POST'])
+def associate_plots_with_boundaries():
+    """
+    Associate AgRowStitch plots with boundary polygons and update msgs_synced.csv with plot labels
+    """
+    import geopandas as gpd
+    from shapely.geometry import Point
+    import pandas as pd
+    
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    agrowstitch_dir = data.get('agrowstitchDir')
+    boundaries = data.get('boundaries')  # GeoJSON FeatureCollection
+    
+    if not all([year, experiment, location, population, date, platform, sensor, agrowstitch_dir, boundaries]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+    
+    try:
+        # Paths
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
+        agrowstitch_path = os.path.join(
+            data_root_dir, "Processed", year, experiment, location, population,
+            date, platform, sensor, agrowstitch_dir
+        )
+        
+        # Check if msgs_synced.csv exists
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({'error': f'msgs_synced.csv not found at {msgs_synced_path}'}), 404
+            
+        # Check if AgRowStitch directory exists
+        if not os.path.exists(agrowstitch_path):
+            return jsonify({'error': f'AgRowStitch directory not found at {agrowstitch_path}'}), 404
+            
+        # Load msgs_synced.csv
+        msgs_df = pd.read_csv(msgs_synced_path)
+        
+        # Check if plot_index column exists
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({'error': 'plot_index column not found in msgs_synced.csv'}), 400
+            
+        # Get unique plot indices (excluding unassigned)
+        plot_indices = [idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]
+        
+        if len(plot_indices) == 0:
+            return jsonify({'error': 'No plot indices found in msgs_synced.csv'}), 400
+            
+        # Create GeoDataFrame from boundaries
+        boundaries_gdf = gpd.GeoDataFrame.from_features(boundaries['features'])
+        boundaries_gdf.set_crs(epsg=4326, inplace=True)
+        
+        # Initialize plot_labels column if it doesn't exist
+        if 'plot_labels' not in msgs_df.columns:
+            msgs_df['plot_labels'] = None
+            
+        # Track associations to prevent duplicates
+        plot_associations = {}
+        
+        # For each plot index, find its center point and associate with boundary
+        for plot_idx in plot_indices:
+            plot_data = msgs_df[msgs_df['plot_index'] == plot_idx]
+            
+            if plot_data.empty:
+                continue
+                
+            # Calculate center point of plot based on GPS coordinates
+            center_lat = plot_data['lat'].mean()
+            center_lon = plot_data['lon'].mean()
+            center_point = Point(center_lon, center_lat)
+            
+            # Find which boundary contains this point
+            for _, boundary in boundaries_gdf.iterrows():
+                if boundary.geometry.contains(center_point):
+                    # Get plot and accession from boundary properties
+                    boundary_plot = boundary.get('plot', boundary.get('Plot'))
+                    boundary_accession = boundary.get('accession', boundary.get('Accession'))
+                    
+                    # Check if this boundary is already associated with another plot
+                    boundary_key = f"{boundary_plot}_{boundary_accession}"
+                    if boundary_key in plot_associations:
+                        print(f"Warning: Boundary {boundary_key} already associated with plot {plot_associations[boundary_key]}")
+                        continue
+                        
+                    # Create plot label
+                    plot_label = f"Plot_{boundary_plot}"
+                    if boundary_accession:
+                        plot_label += f"_Acc_{boundary_accession}"
+                        
+                    # Update msgs_synced.csv
+                    msgs_df.loc[msgs_df['plot_index'] == plot_idx, 'plot_labels'] = plot_label
+                    
+                    # Track association
+                    plot_associations[boundary_key] = plot_idx
+                    
+                    print(f"Associated plot index {plot_idx} with boundary {boundary_key} -> {plot_label}")
+                    break
+                    
+        # Save updated msgs_synced.csv
+        msgs_df.to_csv(msgs_synced_path, index=False)
+        
+        # Return association summary
+        return jsonify({
+            'message': 'Plot associations completed successfully',
+            'associations': len(plot_associations),
+            'plot_associations': plot_associations
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in plot association: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_agrowstitch_plot_associations', methods=['POST'])
+def get_agrowstitch_plot_associations():
+    """
+    Get current plot associations for AgRowStitch plots
+    """
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    
+    if not all([year, experiment, location, population, date, platform, sensor]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+        
+    try:
+        # Path to msgs_synced.csv
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
+        
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({'error': 'msgs_synced.csv not found'}), 404
+            
+        # Load msgs_synced.csv
+        msgs_df = pd.read_csv(msgs_synced_path)
+        
+        # Check required columns
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({'error': 'plot_index column not found'}), 400
+            
+        # Get plot associations
+        associations = {}
+        if 'plot_labels' in msgs_df.columns:
+            plot_data = msgs_df[msgs_df['plot_index'] > 0].groupby('plot_index').first()
+            for plot_idx, row in plot_data.iterrows():
+                if pd.notna(row.get('plot_labels')):
+                    associations[int(plot_idx)] = {
+                        'plot_label': row['plot_labels'],
+                        'center_lat': float(row['lat']) if pd.notna(row['lat']) else None,
+                        'center_lon': float(row['lon']) if pd.notna(row['lon']) else None
+                    }
+                    
+        return jsonify({
+            'associations': associations,
+            'total_plots': len([idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)])
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting plot associations: {e}")
+        return jsonify({'error': str(e)}), 500
 
 def update_progress_file(progress_file, progress, debug=False):
     with open(progress_file, 'w') as pf:
