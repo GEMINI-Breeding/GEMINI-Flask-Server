@@ -4,10 +4,13 @@ import pandas as pd
 import zipfile
 from pathlib import Path
 from flask import Blueprint, request, jsonify, current_app, send_file
+from pyproj import Geod
 
 plot_marking_bp = Blueprint('plot_marking', __name__)
 
-def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None, original_plot_index=None):
+def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None, original_plot_index=None, filter=False):
+    print("DEBUG: Starting update_plot_index with parameters:")
+    print(f"DEBUG: directory={directory}, start_image_name={start_image_name}, end_image_name={end_image_name}, plot_index={plot_index}, camera={camera}, stitch_direction={stitch_direction}, original_plot_index={original_plot_index}, filter={filter}")
     data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
     image_dir_path = os.path.join(data_root_dir_path, directory)
     metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
@@ -16,7 +19,8 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     end_image_name = "/top/" + end_image_name
     print(f"DEBUG: CSV path is {csv_path}")
     if not os.path.exists(csv_path):
-        return jsonify({"error": f"Metadata CSV not found at {csv_path}"}), 404
+        print(f"ERROR: Metadata CSV not found at {csv_path}")
+        return False
     df = pd.read_csv(csv_path)
     if 'plot_index' not in df.columns:
         df['plot_index'] = -1
@@ -29,53 +33,58 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
 
     image_column = f'/{camera}/rgb_file'
     if image_column not in df.columns:
-        return jsonify({"error": f"Image column '{image_column}' not found in CSV"}), 400
+        print(f"ERROR: Image column '{image_column}' not found in CSV")
+        return False
     try:
         start_row_index = df.index[df[image_column] == start_image_name].tolist()[0]
         end_row_index = df.index[df[image_column] == end_image_name].tolist()[0]
+        print(f"DEBUG: Start row index: {start_row_index}, End row index: {end_row_index}")
     except IndexError:
-        return jsonify({"error": "Start or end image not found in metadata"}), 404
+        print("ERROR: Start or end image not found in metadata")
+        return False
     current_plot_index = int(plot_index)
     df.loc[start_row_index:end_row_index, 'plot_index'] = current_plot_index
     df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
     df.to_csv(csv_path, index=False)
 
     # Create or update plot_borders.csv
-    try:
-        start_lat = df.loc[start_row_index, 'lat']
-        start_lon = df.loc[start_row_index, 'lon']
-        end_lat = df.loc[end_row_index, 'lat']
-        end_lon = df.loc[end_row_index, 'lon']
+    if not filter: 
+        try:
+            start_lat = df.loc[start_row_index, 'lat']
+            start_lon = df.loc[start_row_index, 'lon']
+            end_lat = df.loc[end_row_index, 'lat']
+            end_lon = df.loc[end_row_index, 'lon']
 
-        plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
-        # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
-        if os.path.exists(plot_borders_path):
-            borders_df = pd.read_csv(plot_borders_path)
-        else:
-            borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon"])
+            plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
+            # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
+            if os.path.exists(plot_borders_path):
+                borders_df = pd.read_csv(plot_borders_path)
+            else:
+                borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon", "stitch_direction"])
 
-        new_border_data = {
-            "plot_index": current_plot_index,
-            "start_lat": start_lat,
-            "start_lon": start_lon,
-            "end_lat": end_lat,
-            "end_lon": end_lon
-        }
+            new_border_data = {
+                "plot_index": current_plot_index,
+                "start_lat": start_lat,
+                "start_lon": start_lon,
+                "end_lat": end_lat,
+                "end_lon": end_lon,
+                "stitch_direction": stitch_direction    
 
-        # Check if plot_index already exists and update it, otherwise append
-        if current_plot_index in borders_df['plot_index'].values:
-            idx = borders_df.index[borders_df['plot_index'] == current_plot_index].tolist()[0]
-            borders_df.loc[idx] = new_border_data
-        else:
-            borders_df = pd.concat([borders_df, pd.DataFrame([new_border_data])], ignore_index=True)
-        
-        borders_df.to_csv(plot_borders_path, index=False)
-        print(f"DEBUG: Successfully updated {plot_borders_path}")
+            }
 
-    except Exception as e:
-        print(f"ERROR: Could not update plot_borders.csv: {e}")
-    
-    return jsonify({"status": "success", "message": f"Plot {plot_index} marked successfully."})
+            # Check if plot_index already exists and update it, otherwise append
+            if current_plot_index in borders_df['plot_index'].values:
+                idx = borders_df.index[borders_df['plot_index'] == current_plot_index].tolist()[0]
+                borders_df.loc[idx] = new_border_data
+            else:
+                borders_df = pd.concat([borders_df, pd.DataFrame([new_border_data])], ignore_index=True)
+            
+            borders_df.to_csv(plot_borders_path, index=False)
+            print(f"DEBUG: Successfully updated {plot_borders_path}")
+
+        except Exception as e:
+            print(f"ERROR: Could not update plot_borders.csv: {e}")
+    return True
 
 @plot_marking_bp.route('/mark_plot', methods=['POST'])
 def mark_plot():
@@ -91,7 +100,11 @@ def mark_plot():
     if not all([directory, start_image_name, end_image_name, plot_index is not None, camera]):
         return jsonify({"error": "Missing required parameters"}), 400
 
-    return update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction, original_plot_index)
+    success = update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction, original_plot_index)
+    if success:
+        return jsonify({"status": "success", "message": f"Plot {plot_index} marked successfully."})
+    else:
+        return jsonify({"error": "Failed to mark plot."}), 500
 
 
 @plot_marking_bp.route('/get_max_plot_index', methods=['POST'])
@@ -206,6 +219,68 @@ def get_plot_data():
         return jsonify(start_plots)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@plot_marking_bp.route('/filter_plot_borders', methods=['POST'])
+def filter_plot_borders():
+    geod = Geod(ellps='WGS84')
+    data = request.get_json()
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
+    population_path = os.path.join(data_root_dir_path, 'Raw', year, experiment, location, population)
+    metadata_dir = os.path.abspath(os.path.join(population_path, date, 'rover', 'RGB', 'Metadata'))
+    msgs_synced_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+    plot_borders_path = os.path.join(population_path, 'plot_borders.csv')
+    if not os.path.exists(plot_borders_path):
+        return jsonify({"error": "plot_borders.csv not found"}), 500
+    else:
+        pb_df = pd.read_csv(plot_borders_path)
+        msgs_df = pd.read_csv(msgs_synced_path)
+        if 'plot_index' in msgs_df.columns and msgs_df['plot_index'].max() > -1:
+            # no filtering
+            print("DEBUG: No filtering applied, plot borders already exist.")
+            return jsonify({"status": "success", "message": "No filtering applied, plot borders already exist."}), 200
+        for _, border_row in pb_df.iterrows():
+            plot_idx = border_row['plot_index']
+            target_start_lat = border_row['start_lat']
+            target_start_lon = border_row['start_lon']
+            target_end_lat = border_row['end_lat']
+            target_end_lon = border_row['end_lon']
+            
+            min_start_distance = float('inf')
+            min_end_distance = float('inf')
+            start_image = None
+            end_image = None
+
+            for _, msg_row in msgs_df.iterrows():
+                curr_lat = msg_row['lat']
+                curr_lon = msg_row['lon']
+                
+                # Calculate distance from target start point
+                _, _, dist_start = geod.inv(target_start_lon, target_start_lat, curr_lon, curr_lat)
+                if dist_start < min_start_distance:
+                    min_start_distance = dist_start
+                    start_image = msg_row['/top/rgb_file']  # column expected in msgs_synced.csv
+                
+                # Calculate distance from target end point
+                _, _, dist_end = geod.inv(target_end_lon, target_end_lat, curr_lon, curr_lat)
+                if dist_end < min_end_distance:
+                    min_end_distance = dist_end
+                    end_image = msg_row['/top/rgb_file']
+
+            # Assume camera is 'top' and construct a relative directory as used in update_plot_index
+            directory = os.path.join('Raw', year, experiment, location, population, date, 'rover', 'RGB', 'Images', 'top')
+            camera = 'top'
+            # Call update_plot_index to update the plot index entries in msgs_synced.csv
+            start_image = start_image.replace('/top/', '')  # Remove '/top/' prefix for consistency
+            end_image = end_image.replace('/top/', '')  # Remove '/top/' prefix for consistency
+            success = update_plot_index(directory, start_image, end_image, plot_idx, camera, stitch_direction=border_row['stitch_direction'], filter=True)
+
+    return jsonify({"status": "success", "message": "Plot borders filtered and updated successfully."}), 200
+
 
 @plot_marking_bp.route('/download_amiga_images', methods=['POST'])
 def download_amiga_images():
