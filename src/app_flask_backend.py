@@ -162,6 +162,24 @@ def serve_image(filename):
     global image_dict
     return image_dict[filename]
 
+# endpoint to serve PNG files directly
+@file_app.route('/get_png_file', methods=['POST'])
+def get_png_file():
+    data = request.json
+    png_path = data['filePath']
+    
+    # Construct the full file path
+    png_full_path = os.path.join(data_root_dir, png_path)
+    
+    if not os.path.exists(png_full_path):
+        return jsonify({'error': 'PNG file not found'}), 404
+    
+    try:
+        # Send the PNG file directly
+        return send_file(png_full_path, mimetype='image/png')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @file_app.route('/fetch_data_root_dir', methods=['GET'])
 def fetch_data_root_dir():
     # global data_root_dir
@@ -1759,6 +1777,60 @@ def download_ortho():
         
     except Exception as e:
         print(f"An error occurred while downloading the ortho: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/download_plot_ortho', methods=['POST'])
+def download_plot_ortho():
+    data = request.get_json()
+    try:
+        # Build the path to the plot images directory
+        plot_dir = os.path.join(
+            data_root_dir,
+            'Processed',
+            data['year'],
+            data['experiment'],
+            data['location'],
+            data['population'],
+            data['date'],
+            data['platform'],
+            data['sensor'],
+            data['agrowstitchDir']
+        )
+        
+        if not os.path.exists(plot_dir):
+            return jsonify({'error': 'Plot directory not found'}), 404
+        
+        # Find all plot PNG files
+        plot_files = [f for f in os.listdir(plot_dir) 
+                     if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+        
+        if not plot_files:
+            return jsonify({'error': 'No plot files found'}), 404
+        
+        # Create a temporary zip file
+        import tempfile
+        import zipfile
+        
+        temp_dir = tempfile.mkdtemp()
+        zip_filename = f"{data['date']}-{data['platform']}-{data['sensor']}-{data['agrowstitchDir']}-plots.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for plot_file in sorted(plot_files):
+                file_path = os.path.join(plot_dir, plot_file)
+                # Add file to zip with just the filename (no directory structure)
+                zipf.write(file_path, plot_file)
+        
+        print(f"Sending zip file: {zip_path}")
+        return send_file(
+            zip_path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=zip_filename
+        )
+    
+    except Exception as e:
+        print(f"An error occurred while downloading plot ortho: {str(e)}")
         return jsonify({'error': str(e)}), 500
         
 
