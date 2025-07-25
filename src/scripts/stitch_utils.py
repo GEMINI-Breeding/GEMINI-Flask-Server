@@ -41,6 +41,43 @@ def pick_utm_epsg(lon: float, lat: float) -> int:
     zone = int((lon + 180) // 6) + 1
     return (32700 if lat < 0 else 32600) + zone
 
+def check_drone_orthomosaic_crs(drone_tiff_path: str):
+    """
+    Check the CRS and bounds of a drone orthomosaic to help with alignment debugging.
+    """
+    try:
+        with rasterio.open(drone_tiff_path) as src:
+            print(f"Drone orthomosaic CRS: {src.crs}")
+            print(f"Drone orthomosaic bounds: {src.bounds}")
+            print(f"Drone orthomosaic transform: {src.transform}")
+            print(f"Drone orthomosaic dimensions: {src.width} x {src.height}")
+            
+            # Calculate drone GSD
+            drone_gsd_x = abs(src.transform.a)  # pixel width in CRS units
+            drone_gsd_y = abs(src.transform.e)  # pixel height in CRS units
+            print(f"Drone orthomosaic GSD: x={drone_gsd_x:.6f} m/px, y={drone_gsd_y:.6f} m/px")
+            
+            # Convert bounds to WGS84 for comparison
+            if src.crs != CRS.from_epsg(4326):
+                transformer = Transformer.from_crs(src.crs, "EPSG:4326", always_xy=True)
+                min_x, min_y, max_x, max_y = src.bounds
+                min_lon, min_lat = transformer.transform(min_x, min_y)
+                max_lon, max_lat = transformer.transform(max_x, max_y)
+                print(f"Drone orthomosaic WGS84 bounds: ({min_lon:.6f}, {min_lat:.6f}) to ({max_lon:.6f}, {max_lat:.6f})")
+            
+            return {
+                'crs': str(src.crs),
+                'bounds': src.bounds,
+                'transform': src.transform,
+                'width': src.width,
+                'height': src.height,
+                'gsd_x': drone_gsd_x,
+                'gsd_y': drone_gsd_y
+            }
+    except Exception as e:
+        print(f"Error reading drone orthomosaic: {e}")
+        return None
+
 def fit_angle_pca(x: np.ndarray, y: np.ndarray) -> float:
     pts = np.column_stack([x, y]) - np.column_stack([x, y]).mean(axis=0)
     _, _, v = np.linalg.svd(pts, full_matrices=False)
@@ -129,20 +166,60 @@ def calc_gsd_from_intrinsics(camera_intrinsics: dict,
     except Exception:
         return None
     
+def determine_stitch_direction_from_gps(xs, ys, theta_deg, rover_direction):
+    """
+    Determine stitching direction from GPS trajectory analysis.
+    """
+    # Analyze the primary movement direction
+    dx = xs[-1] - xs[0]
+    dy = ys[-1] - ys[0]
+    
+    # Determine if movement is more horizontal or vertical
+    if abs(dx) > abs(dy):
+        # Horizontal movement
+        direction = "RIGHT" if dx > 0 else "LEFT"
+    else:
+        # Vertical movement  
+        direction = "UP" if dy > 0 else "DOWN"
+    
+    print(f"  GPS-derived stitching direction: {direction} (dx={dx:.3f}m, dy={dy:.3f}m)")
+    return direction
+
 def estimate_cross_track_auto(xs, ys, theta, h_pixels, px_along, strategy,
-                              intr_gsd=None, fixed_min=None, ratio=None, k_sigma=5):
+                              intr_gsd=None, fixed_min=None, ratio=None, k_sigma=5,
+                              stitch_direction=None, img_w=None, img_h=None):
     """
     Returns (height_m_axis, v_min, v_max) based on chosen strategy.
-    - strategy: 'intrinsics', 'std', 'ratio', 'fixed'
+    - strategy: 'intrinsics', 'std', 'ratio', 'fixed', 'hybrid'
+    - stitch_direction: Direction of stitching (LEFT, RIGHT, UP, DOWN)
+    - img_w, img_h: Image dimensions for direction-aware hybrid calculation
     """
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     v_vec = np.array([-sin_t, cos_t])
     v_vals = np.column_stack([xs, ys]) @ v_vec
-    v_min = v_vals.min(); v_max = v_vals.max()
+    v_min = v_vals.min()
+    v_max = v_vals.max()
     height_gps = v_max - v_min
 
     if strategy == 'intrinsics' and intr_gsd is not None:
         height_need = intr_gsd * h_pixels
+    elif strategy == 'hybrid' and intr_gsd is not None:
+        # HYBRID: Direction-aware approach
+        if stitch_direction in ['LEFT', 'RIGHT']:
+            # Horizontal stitching: GPS = along-track, intrinsics height = cross-track
+            intrinsics_height = intr_gsd * img_h if img_h else intr_gsd * h_pixels
+            height_need = max(height_gps, intrinsics_height)
+            print(f"  Hybrid (H-stitch): GPS={height_gps:.3f}m, intrinsics_height={intrinsics_height:.3f}m, using={height_need:.3f}m")
+        elif stitch_direction in ['UP', 'DOWN']:
+            # Vertical stitching: GPS = along-track, intrinsics width = cross-track
+            intrinsics_width = intr_gsd * img_w if img_w else intr_gsd * h_pixels
+            height_need = max(height_gps, intrinsics_width)
+            print(f"  Hybrid (V-stitch): GPS={height_gps:.3f}m, intrinsics_width={intrinsics_width:.3f}m, using={height_need:.3f}m")
+        else:
+            # Unknown direction: use default hybrid approach
+            intrinsics_height = intr_gsd * h_pixels
+            height_need = max(height_gps, intrinsics_height)
+            print(f"  Hybrid (unknown dir): GPS={height_gps:.3f}m, intrinsics={intrinsics_height:.3f}m, using={height_need:.3f}m")
     elif strategy == 'std':
         sigma = np.std(v_vals)
         height_need = max(height_gps, k_sigma * sigma)
@@ -193,9 +270,15 @@ def georeference_plot(plot_index,
                       plot_stitched_path,
                       versioned_output_path,
                       has_stitch_direction,
-                      camera_intrinsics=None):
+                      camera_intrinsics=None,
+                      gps_offset_x=0.0,
+                      gps_offset_y=0.0):
     """
     Georeference a stitched plot image using GPS points at image centers.
+
+    Args:
+        gps_offset_x: Manual GPS offset in meters (UTM X direction)
+        gps_offset_y: Manual GPS offset in meters (UTM Y direction)
 
     Modes:
       - GPS_ONLY:          only GPS extents, enforce a reasonable min cross-track (stats/ratio/fixed)
@@ -204,13 +287,14 @@ def georeference_plot(plot_index,
     Keeps all your prints.
     """
     # ----------- CONFIG SWITCHES -----------
-    MODE = "INTRINSICS_BOUND"      # "GPS_ONLY" or "INTRINSICS_BOUND"
+    MODE = "HYBRID"                # "GPS_ONLY", "INTRINSICS_BOUND", or "HYBRID" - HYBRID recommended for stitched images
     FORCE_SQUARE_PIXELS = True
+    USE_INTRINSICS_FOR_SCALE = False  # Use GPS-derived scale for stitched images (intrinsics are for single frames)
     camera_height = 1.2            # meters (hard-coded)
     min_cross_track_aspect = 0.3   # floor = 30% of ideal (width * h/w) if GPS is too thin
 
     # Strategy options for helper
-    CROSS_TRACK_STRATEGY = "intrinsics" if MODE == "INTRINSICS_BOUND" else "std"
+    CROSS_TRACK_STRATEGY = "hybrid" if MODE == "HYBRID" else ("intrinsics" if MODE == "INTRINSICS_BOUND" else "std")
     FIXED_MIN_CT = 0.6   # used if strategy == 'fixed'
     K_SIGMA = 5          # used if strategy == 'std'
 
@@ -286,14 +370,54 @@ def georeference_plot(plot_index,
         center_lon = (lons.min() + lons.max()) / 2.0
         utm_epsg = pick_utm_epsg(center_lon, center_lat)
         print(f"[Plot {plot_index}] Using UTM CRS: EPSG:{utm_epsg}")
+        print(f"[Plot {plot_index}] Center coordinates: lat={center_lat:.6f}, lon={center_lon:.6f}")
 
         transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg}", always_xy=True)
         xs, ys = transformer.transform(lons, lats)
+
+        # Apply manual GPS offset if provided
+        if gps_offset_x != 0.0 or gps_offset_y != 0.0:
+            xs = xs + gps_offset_x
+            ys = ys + gps_offset_y
+            print(f"[Plot {plot_index}] Applied GPS offset: x={gps_offset_x:.3f}m, y={gps_offset_y:.3f}m")
+
+        # If no stitch direction available, determine from GPS trajectory
+        if stitch_direction == "UNKNOWN" or stitch_direction not in ['LEFT', 'RIGHT', 'UP', 'DOWN']:
+            stitch_direction = determine_stitch_direction_from_gps(xs, ys, 0, rover_direction)  # theta_deg not available yet
+            print(f"[Plot {plot_index}] Using GPS-derived stitching direction: {stitch_direction}")
+
+        # ---- GPS accuracy assessment ----
+        gps_distances = []
+        for i in range(1, len(xs)):
+            dist = np.sqrt((xs[i] - xs[i-1])**2 + (ys[i] - ys[i-1])**2)
+            gps_distances.append(dist)
+        
+        if gps_distances:
+            avg_gps_spacing = np.mean(gps_distances)
+            std_gps_spacing = np.std(gps_distances)
+            print(f"[Plot {plot_index}] GPS point spacing: avg={avg_gps_spacing:.3f}m, std={std_gps_spacing:.3f}m")
+            print(f"[Plot {plot_index}] GPS extent: {xs.max()-xs.min():.3f}m x {ys.max()-ys.min():.3f}m")
 
         # ---- PCA heading ----
         theta = fit_angle_pca(xs, ys)
         theta_deg = math.degrees(theta) % 360
         print(f"[Plot {plot_index}] PCA trajectory angle: {theta_deg:.2f}° (0° = +X/East)")
+
+        # Alternative angle calculation using first and last points
+        dx = xs[-1] - xs[0]
+        dy = ys[-1] - ys[0]
+        simple_angle = math.atan2(dy, dx)
+        simple_angle_deg = math.degrees(simple_angle) % 360
+        angle_diff = abs(theta_deg - simple_angle_deg)
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+        print(f"[Plot {plot_index}] Simple angle (first->last): {simple_angle_deg:.2f}°, diff from PCA: {angle_diff:.2f}°")
+        
+        # Use simple angle if PCA and simple angle differ significantly (suggests noisy GPS)
+        if angle_diff > 30:  # More than 30 degrees difference
+            print(f"[Plot {plot_index}] Large angle difference detected, using simple first->last angle")
+            theta = simple_angle
+            theta_deg = simple_angle_deg
 
         # enforce left→right order (first should be left)
         cos_t, sin_t = math.cos(theta), math.sin(theta)
@@ -332,7 +456,10 @@ def georeference_plot(plot_index,
             intr_gsd=intr_gsd,
             fixed_min=FIXED_MIN_CT,
             ratio=(h / w),
-            k_sigma=K_SIGMA
+            k_sigma=K_SIGMA,
+            stitch_direction=stitch_direction,
+            img_w=w,
+            img_h=h
         )
 
         if height_m_axis < min_height_allowed:
@@ -343,16 +470,57 @@ def georeference_plot(plot_index,
             height_m_axis = min_height_allowed
 
         # ---- pixel sizes ----
-        px = width_m_axis / w
-        py = height_m_axis / h
-        if FORCE_SQUARE_PIXELS:
-            px = py = max(px, py)
-            width_m_axis  = px * w
+        if USE_INTRINSICS_FOR_SCALE and intr_gsd is not None:
+            # Use intrinsics-derived GSD for pixel scale (more accurate)
+            px = py = intr_gsd
+            print(f"[Plot {plot_index}] Using intrinsics-based pixel scale: {px:.6f} m/px")
+            
+            # Recalculate extents based on intrinsics scale
+            width_m_axis = px * w
             height_m_axis = py * h
-            v_center = 0.5 * (v_min + v_max)
+            
+            # Adjust positioning to center the GPS track within the intrinsics-sized image
+            u_center = (u_min + u_max) / 2.0
+            v_center = (v_min + v_max) / 2.0
+            u_min = u_center - width_m_axis / 2.0
+            u_max = u_center + width_m_axis / 2.0
             v_min = v_center - height_m_axis / 2.0
             v_max = v_center + height_m_axis / 2.0
-            print(f"[Plot {plot_index}] Forced square pixels. px=py={px:.6f} m/px")
+            
+        else:
+            # Use GPS-derived scale (original method)
+            px = width_m_axis / w
+            py = height_m_axis / h
+            
+            if FORCE_SQUARE_PIXELS:
+                px = py = max(px, py)
+                width_m_axis  = px * w
+                height_m_axis = py * h
+                v_center = 0.5 * (v_min + v_max)
+                v_min = v_center - height_m_axis / 2.0
+                v_max = v_center + height_m_axis / 2.0
+                print(f"[Plot {plot_index}] Forced square pixels. px=py={px:.6f} m/px")
+        
+        print(f"[Plot {plot_index}] SCALE DIAGNOSTICS:")
+        print(f"  Image dimensions: {w} x {h} pixels")
+        print(f"  GPS-derived extent: {width_m_axis:.3f}m x {height_m_axis:.3f}m")
+        print(f"  Final extent: {width_m_axis:.3f}m x {height_m_axis:.3f}m")
+        print(f"  Final pixel size: x={px:.6f} m/px, y={py:.6f} m/px")
+        if intr_gsd is not None:
+            print(f"  Single-frame intrinsics GSD: {intr_gsd:.6f} m/px (for comparison only)")
+            # Calculate GPS-derived pixel size from original GPS extents
+            gps_width = xs.max() - xs.min()
+            gps_height = ys.max() - ys.min()
+            gps_px_x = gps_width / w if w > 0 else 0
+            gps_px_y = gps_height / h if h > 0 else 0
+            print(f"  Original GPS extent: {gps_width:.3f}m x {gps_height:.3f}m")
+            print(f"  GPS-derived pixel size: x={gps_px_x:.6f} m/px, y={gps_px_y:.6f} m/px")
+            if MODE == "HYBRID":
+                print(f"  Note: Using HYBRID approach - GPS for along-track, intrinsics for cross-track width (direction: {stitch_direction})")
+            else:
+                print("  Note: Using GPS-derived scale for stitched panorama (intrinsics are for single frames)")
+        else:
+            print("  Note: Using GPS-derived scale (recommended for stitched images)")
 
         gsd_avg = (px + py) / 2.0
         print(f"[Plot {plot_index}] Final ground coverage: {width_m_axis:.2f}m x {height_m_axis:.2f}m")
@@ -464,8 +632,8 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 break
             
             # Skip plot index 0
-            if plot_index == 0:
-                print(f"Skipping plot {plot_index} (plot index 0)")
+            if plot_index == -1:
+                print(f"Skipping plot {plot_index} (plot index -1)")
                 continue
                 
             try:
@@ -518,6 +686,11 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 # Set stitching direction if available
                 if has_stitch_direction:
                     stitching_direction = plot_data['stitch_direction'].iloc[0]
+                    
+                    # capitalize the stitching direction
+                    if isinstance(stitching_direction, str):
+                        stitching_direction = stitching_direction.strip().upper()
+                        
                     print(f"Stitching direction for plot {plot_index}: {stitching_direction}")
                     if pd.notna(stitching_direction):
                         config['stitching_direction'] = stitching_direction
@@ -562,10 +735,10 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 processed_plots.append(plot_index)
                 print(f"Successfully processed plot {plot_index}")
                 
-                # DEBUG: Break after plot 3 and create combined mosaic # TODO: DELETE LATE
-                if plot_index == 3:
-                    print("DEBUG: Breaking after plot 3 to create combined mosaic")
-                    break
+                # # DEBUG: Break after plot 3 and create combined mosaic # TODO: DELETE LATE
+                # if plot_index == 3:
+                #     print("DEBUG: Breaking after plot 3 to create combined mosaic")
+                #     break
                 
             except Exception as e:
                 print(f"Error processing plot {plot_index}: {str(e)}")
