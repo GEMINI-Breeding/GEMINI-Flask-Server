@@ -7,6 +7,7 @@ import time
 import shutil
 import tempfile
 import threading
+import traceback
 import gc
 import pandas as pd
 import numpy as np
@@ -18,6 +19,7 @@ from rasterio.crs import CRS
 from pyproj import Transformer
 from rasterio.transform import Affine
 from rasterio.warp import reproject, calculate_default_transform, Resampling
+from rasterio.merge import merge
 
 try:
     import gc
@@ -281,28 +283,265 @@ def estimate_cross_track_auto(xs, ys, theta, h_pixels, px_along, strategy,
     return height_gps, v_min, v_max
 
 def reproject_to_wgs84(src_path: str, dst_path: str):
+    """
+    Reproject a UTM GeoTIFF to WGS84 (EPSG:4326).
+    """
     print(f"Reprojecting {src_path} → {dst_path} (EPSG:4326)")
-    with rasterio.open(src_path) as src:
-        transform, width, height = calculate_default_transform(
-            src.crs, "EPSG:4326", src.width, src.height, *src.bounds
-        )
-        kwargs = src.meta.copy()
-        kwargs.update(dict(crs=CRS.from_epsg(4326),
-                           transform=transform,
-                           width=width,
-                           height=height))
-        with rasterio.open(dst_path, "w", **kwargs) as dst:
-            for i in range(1, src.count + 1):
-                reproject(
-                    source=rasterio.band(src, i),
-                    destination=rasterio.band(dst, i),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs="EPSG:4326",
-                    resampling=Resampling.bilinear
-                )
-    print(f"Finished reprojection to {dst_path}")
+    try:
+        with rasterio.open(src_path) as src:
+            transform, width, height = calculate_default_transform(
+                src.crs, "EPSG:4326", src.width, src.height, *src.bounds
+            )
+            kwargs = src.meta.copy()
+            kwargs.update({
+                'crs': CRS.from_epsg(4326),
+                'transform': transform,
+                'width': width,
+                'height': height
+            })
+            
+            with rasterio.open(dst_path, "w", **kwargs) as dst:
+                for i in range(1, src.count + 1):
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs="EPSG:4326",
+                        resampling=Resampling.bilinear
+                    )
+        print(f"Finished reprojection to {dst_path}")
+        return True
+    except Exception as e:
+        print(f"Error during reprojection: {str(e)}")
+        return False
+
+def combine_utm_tiffs_to_mosaic(versioned_output_path: str, processed_plots: list):
+    """
+    Combine individual UTM GeoTIFFs into one mosaic with proper handling of rotated plots.
+    Each plot may have its own rotation, so we need to reproject them to a common grid.
+    """
+    print("=== STARTING MOSAIC CREATION WITH ROTATION HANDLING ===")
+    
+    # 1) build list of existing UTM files
+    utm_files = []
+    for pid in processed_plots:
+        p = os.path.join(versioned_output_path, f"georeferenced_plot_{pid}_utm.tif")
+        if os.path.exists(p):
+            utm_files.append(p)
+            print(f"Found UTM file for plot {pid}: {p}")
+        else:
+            print(f"Warning: missing {p}")
+    
+    if not utm_files:
+        print("No UTM files found; skipping mosaic.")
+        return False
+
+    print(f"Processing {len(utm_files)} UTM files for mosaic creation")
+
+    # 2) if only one, just copy
+    combined_utm = os.path.join(versioned_output_path, "combined_mosaic_utm.tif")
+    if len(utm_files) == 1:
+        print("Only one plot found, copying directly")
+        shutil.copy2(utm_files[0], combined_utm)
+    else:
+        try:
+            print("Multiple plots found, creating mosaic with rotation handling...")
+            
+            # Open all source files and analyze their properties
+            srcs = []
+            transforms = []
+            bounds_list = []
+            
+            for fp in utm_files:
+                src = rasterio.open(fp)
+                srcs.append(src)
+                transforms.append(src.transform)
+                bounds_list.append(src.bounds)
+                
+                # Check if the raster has rotation
+                has_rotation = src.transform.b != 0 or src.transform.d != 0
+                print(f"File: {os.path.basename(fp)}")
+                print(f"  Transform: {src.transform}")
+                print(f"  Has rotation: {has_rotation}")
+                print(f"  Bounds: {src.bounds}")
+                print(f"  Size: {src.width}x{src.height}")
+            
+            # Calculate overall bounds
+            min_x = min(bounds[0] for bounds in bounds_list)
+            min_y = min(bounds[1] for bounds in bounds_list)
+            max_x = max(bounds[2] for bounds in bounds_list)
+            max_y = max(bounds[3] for bounds in bounds_list)
+            
+            print(f"Overall bounds: ({min_x}, {min_y}, {max_x}, {max_y})")
+            
+            # Determine output resolution based on the first source
+            # Use the minimum pixel size from all sources to maintain detail
+            pixel_sizes = []
+            for i, src in enumerate(srcs):
+                # For rotated transforms, calculate the actual pixel size
+                # Handle case where transform components might be very small or malformed
+                pixel_size_x = abs(src.transform.a) if abs(src.transform.a) > 1e-10 else None
+                pixel_size_y = abs(src.transform.e) if abs(src.transform.e) > 1e-10 else None
+                
+                # If transform seems malformed, calculate from bounds and dimensions
+                if pixel_size_x is None or pixel_size_y is None:
+                    bounds = src.bounds
+                    calc_pixel_size_x = (bounds.right - bounds.left) / src.width
+                    calc_pixel_size_y = (bounds.top - bounds.bottom) / src.height
+                    print("  Transform appears malformed, using bounds-based calculation:")
+                    print(f"    Bounds-based pixel size: x={calc_pixel_size_x:.6f}, y={calc_pixel_size_y:.6f}")
+                    pixel_size_x = calc_pixel_size_x
+                    pixel_size_y = calc_pixel_size_y
+                
+                # Take the smaller dimension to preserve detail
+                effective_pixel_size = min(pixel_size_x, pixel_size_y)
+                pixel_sizes.append(effective_pixel_size)
+                
+                print(f"  Plot {processed_plots[i]} effective pixel size: {effective_pixel_size:.6f} meters/pixel")
+            
+            output_pixel_size = min(pixel_sizes)
+            print(f"Using output pixel size: {output_pixel_size:.6f} meters/pixel")
+            
+            # Calculate output dimensions with safety checks
+            out_width = int((max_x - min_x) / output_pixel_size)
+            out_height = int((max_y - min_y) / output_pixel_size)
+            
+            # Safety check: prevent extremely large mosaics that could cause memory issues
+            max_dimension = 10000  # Maximum dimension in pixels
+            if out_width > max_dimension or out_height > max_dimension:
+                print(f"WARNING: Calculated output size {out_width}x{out_height} is too large!")
+                
+                # Calculate a safer pixel size
+                safe_pixel_size_x = (max_x - min_x) / max_dimension
+                safe_pixel_size_y = (max_y - min_y) / max_dimension
+                output_pixel_size = max(safe_pixel_size_x, safe_pixel_size_y, output_pixel_size)
+                
+                out_width = int((max_x - min_x) / output_pixel_size)
+                out_height = int((max_y - min_y) / output_pixel_size)
+                
+                print(f"Adjusted to safer pixel size: {output_pixel_size:.6f} meters/pixel")
+                print(f"New output size: {out_width}x{out_height} pixels")
+            
+            print(f"Output mosaic size: {out_width}x{out_height} pixels")
+            
+            # Create output transform (no rotation - aligned to coordinate system)
+            out_transform = rasterio.transform.from_bounds(
+                min_x, min_y, max_x, max_y, out_width, out_height
+            )
+            
+            print(f"Output transform: {out_transform}")
+            
+            # Create output array
+            mosaic = np.zeros((3, out_height, out_width), dtype=np.uint8)
+            
+            # Reproject each source to the common grid
+            for i, src in enumerate(srcs):
+                print(f"Reprojecting plot {processed_plots[i]}...")
+                
+                # Create temporary arrays for reprojection
+                temp_data = np.zeros((3, out_height, out_width), dtype=np.uint8)
+                
+                # Reproject each band
+                for band_idx in range(3):
+                    reproject(
+                        source=rasterio.band(src, band_idx + 1),
+                        destination=temp_data[band_idx],
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=out_transform,
+                        dst_crs=src.crs,  # Same CRS, just different grid
+                        resampling=Resampling.bilinear,
+                        dst_nodata=0
+                    )
+                
+                # Combine with mosaic using "first" method (non-zero values take precedence)
+                for band_idx in range(3):
+                    mask = temp_data[band_idx] != 0
+                    mosaic[band_idx][mask] = temp_data[band_idx][mask]
+                
+                print(f"Completed reprojection for plot {processed_plots[i]}")
+            
+            # Write the mosaic
+            out_meta = srcs[0].meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_height,
+                "width": out_width,
+                "transform": out_transform,
+                "crs": srcs[0].crs,
+                "compress": "lzw",
+                "tiled": True,
+                "blockxsize": 512,
+                "blockysize": 512,
+                "count": 3,
+                "dtype": "uint8"
+            })
+
+            with rasterio.open(combined_utm, "w", **out_meta) as dst:
+                dst.write(mosaic)
+                print(f"Written mosaic with {3} bands")
+
+            # Close all source files
+            for src in srcs:
+                src.close()
+            
+            print("Successfully created UTM mosaic with proper rotation handling")
+            
+        except Exception as e:
+            print(f"Error creating mosaic: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            
+            # Close any open files
+            for src in srcs:
+                try:
+                    src.close()
+                except Exception:
+                    pass
+            return False
+
+    print(f"Written UTM mosaic → {combined_utm}")
+
+    # 4) reproject to WGS84
+    try:
+        print("Creating WGS84 version of mosaic...")
+        combined_wgs84 = os.path.join(versioned_output_path, "combined_mosaic.tif")
+        
+        with rasterio.open(combined_utm) as src:
+            dst_crs = CRS.from_epsg(4326)
+            transform, w, h = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds
+            )
+            meta = src.meta.copy()
+            meta.update({
+                "crs": dst_crs,
+                "transform": transform,
+                "width": w,
+                "height": h
+            })
+            with rasterio.open(combined_wgs84, "w", **meta) as dst:
+                for i in range(1, src.count+1):
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs=dst_crs,
+                        resampling=Resampling.bilinear
+                    )
+
+        print(f"Written WGS84 mosaic → {combined_wgs84}")
+        print("=== MOSAIC CREATION COMPLETED SUCCESSFULLY ===")
+        return True
+        
+    except Exception as e:
+        print(f"Error creating WGS84 mosaic: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
 
 def georeference_plot(plot_index,
                       plot_data,
@@ -696,13 +935,9 @@ def georeference_plot(plot_index,
                 dst.write(img_array[:, :, i], i + 1)
         print(f"[Plot {plot_index}] UTM GeoTIFF written.")
 
-        # ---- reproject to WGS84 ----
-        wgs_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_index}.tif")
-        reproject_to_wgs84(utm_out, wgs_out)
-
         print(f"[Plot {plot_index}] DONE. Outputs:")
         print(f"    UTM GeoTIFF : {utm_out}")
-        print(f"    WGS84 GeoTIFF: {wgs_out}")
+        # print(f"    WGS84 GeoTIFF: {wgs_out}")
         print("====================================================\n")
         return True
 
@@ -767,6 +1002,13 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
         processed_plots = []
         failed_plots = []
         
+        print("\n========== STARTING PLOT PROCESSING ==========")
+        print(f"Total plots to process: {len(unique_plots)}")
+        print(f"Plot indices: {list(unique_plots)}")
+        print(f"Stop event status: {stitch_stop_event.is_set() if stitch_stop_event else 'No stop event'}")
+        print("===============================================")
+        
+        counter = 0
         for plot_index in unique_plots:
             if stitch_stop_event and stitch_stop_event.is_set():
                 print("Stitching process stopped by user")
@@ -778,17 +1020,21 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 continue
                 
             try:
-                print(f"Processing plot {plot_index}")
+                print(f"\n========== Processing plot {plot_index} ==========")
+                print(f"Plot {plot_index}: Starting processing...")
                 
                 # Filter data for current plot
                 plot_data = msgs_df[msgs_df['plot_index'] == plot_index]
+                print(f"Plot {plot_index}: Found {len(plot_data)} data rows")
 
                 # Get image filenames for this plot
                 image_files = plot_data['/top/rgb_file'].dropna().tolist()
                 if not image_files:
-                    print(f"No images found for plot {plot_index}, skipping")
+                    print(f"Plot {plot_index}: No images found, skipping")
                     failed_plots.append(plot_index)
                     continue
+                
+                print(f"Plot {plot_index}: Found {len(image_files)} images")
                 
                 # Create temporary directory for this plot's images
                 plot_temp_dir = os.path.join(os.path.dirname(image_path), f"temp_plot_{plot_index}")
@@ -876,38 +1122,114 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 processed_plots.append(plot_index)
                 print(f"Successfully processed plot {plot_index}")
                 
-                # # DEBUG: Break after plot 3 and create combined mosaic # TODO: DELETE LATE
-                # if plot_index == 3:
-                #     print("DEBUG: Breaking after plot 3 to create combined mosaic")
+                # DEBUG: Break after specified number of plots for testing
+                counter += 1
+                # if counter >= 3:
+                #     print(f"DEBUG: Breaking after {counter} plots to test combined mosaic creation")
                 #     break
                 
             except Exception as e:
-                print(f"Error processing plot {plot_index}: {str(e)}")
+                print(f"ERROR: Exception processing plot {plot_index}: {str(e)}")
+                print(f"Exception type: {type(e).__name__}")
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
                 failed_plots.append(plot_index)
                 
                 # Clean up on error
-                if 'plot_temp_dir' in locals() and os.path.exists(plot_temp_dir):
-                    shutil.rmtree(plot_temp_dir)
-                if 'temp_config_path' in locals() and os.path.exists(temp_config_path):
-                    os.unlink(temp_config_path)
+                try:
+                    if 'plot_temp_dir' in locals() and os.path.exists(plot_temp_dir):
+                        shutil.rmtree(plot_temp_dir)
+                        print(f"Cleaned up temp directory for plot {plot_index}")
+                except Exception as cleanup_error:
+                    print(f"Error cleaning up temp directory: {cleanup_error}")
+                    
+                try:
+                    if 'temp_config_path' in locals() and os.path.exists(temp_config_path):
+                        os.unlink(temp_config_path)
+                        print(f"Cleaned up temp config for plot {plot_index}")
+                except Exception as cleanup_error:
+                    print(f"Error cleaning up temp config: {cleanup_error}")
 
+        # Summary of processing
+        print("\n========== PROCESSING SUMMARY ==========")
+        print(f"Total plots to process: {len(unique_plots)}")
+        print(f"Successfully processed: {len(processed_plots)}")
+        print(f"Failed: {len(failed_plots)}")
+        if processed_plots:
+            print(f"Successful plots: {processed_plots}")
+        if failed_plots:
+            print(f"Failed plots: {failed_plots}")
+        print("=========================================")
+        
         result_message = f"Stitching completed. Processed plots: {processed_plots}"
         if failed_plots:
             result_message += f", Failed plots: {failed_plots}"
         
         print(result_message)
         
-        # Skip combined mosaic creation - individual georeferenced TIFFs provide maximum quality
+        # Individual plots completed - return results for separate mosaic creation
         if processed_plots:
             print(f"Successfully processed and georeferenced {len(processed_plots)} individual plots at full resolution")
-            print("Individual georeferenced TIFF files created for maximum quality - no combined mosaic needed")
+            print("Individual georeferenced TIFF files created for maximum quality")
+            print("Note: Combined mosaic will be created separately to avoid multiprocessing issues")
+                
             if final_progress_callback:
-                final_progress_callback(100)  # Completed everything
+                final_progress_callback(90)  # Individual plots completed, mosaic creation pending
         else:
             print("No plots were successfully processed")
+            
+        # Return the results for external mosaic creation
+        return {
+            'processed_plots': processed_plots,
+            'failed_plots': failed_plots,
+            'versioned_output_path': versioned_output_path
+        }
         
     except Exception as e:
         print(f"Error in run_stitch_all_plots: {str(e)}")
+
+
+def create_combined_mosaic_separate(versioned_output_path: str, processed_plots: list, final_progress_callback=None):
+    """
+    Create combined mosaic separately from the main stitching process to avoid multiprocessing issues.
+    This function is designed to be called after individual plot processing is complete.
+    """
+    try:
+        print("=== STARTING SEPARATE MOSAIC CREATION ===")
+        print(f"Creating combined mosaic from {len(processed_plots)} processed plots")
+        print(f"Output directory: {versioned_output_path}")
+        
+        if not processed_plots:
+            print("No processed plots provided for mosaic creation")
+            if final_progress_callback:
+                final_progress_callback(100)
+            return False
+        
+        # Create combined mosaic from all UTM files
+        print("Creating combined mosaic from individual UTM files...")
+        mosaic_success = combine_utm_tiffs_to_mosaic(versioned_output_path, processed_plots)
+        
+        if mosaic_success:
+            print("SUCCESS: Combined mosaic created successfully")
+            print("Individual georeferenced TIFF files available for maximum quality")
+            print("Combined mosaic also created for overview purposes")
+        else:
+            print("WARNING: Failed to create combined mosaic")
+            print("Individual georeferenced TIFF files still available for maximum quality")
+        
+        if final_progress_callback:
+            final_progress_callback(100)  # Completed everything
+        
+        print("=== MOSAIC CREATION COMPLETED ===")
+        return mosaic_success
+        
+    except Exception as e:
+        print(f"ERROR in create_combined_mosaic_separate: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        if final_progress_callback:
+            final_progress_callback(100)  # Mark as complete even on error
+        return False
 
 
 def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned_output_path, plot_index, stitch_stop_event=None):
@@ -915,6 +1237,11 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
     print(f"Stitching started for plot {plot_index} on thread {threading.current_thread().name}")
 
     try:
+        # Check if AgRowStitch is available
+        if run_agrowstitch is None:
+            print(f"ERROR: AgRowStitch module not available for plot {plot_index}")
+            raise ImportError("AgRowStitch module not found or could not be imported")
+        
         # Run the AgRowStitch process
         print(f"Calling run_agrowstitch with config: {config_path} and cpu_count: {cpu_count}")
         agrowstitch_result = run_agrowstitch(config_path, cpu_count)
@@ -1046,6 +1373,13 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
         
         for file_name in plot_files:
             try:
+                # Skip files that should not be copied to final folder
+                excluded_patterns = []
+                
+                if file_name in excluded_patterns:
+                    print(f"Skipping excluded file: {file_name}")
+                    continue
+                
                 src_file_path = os.path.join(stitched_path, file_name)
                 
                 # Verify source file exists and has content

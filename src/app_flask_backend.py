@@ -51,16 +51,10 @@ AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../A
 print(AGROWSTITCH_PATH)
 sys.path.append(AGROWSTITCH_PATH)
 from scripts.stitch_utils import (
-    georeference_plot,
     run_stitch_all_plots,
-    run_stitch_process_for_plot,
     monitor_stitch_updates_multi_plot,
-    monitor_stitch_updates,
-    is_plot_completed
+    create_combined_mosaic_separate
 )
-from rasterio.transform import from_bounds
-from rasterio.crs import CRS
-from PIL import ImageFile
 
 # stitch pipeline
 import sys
@@ -86,6 +80,50 @@ extraction_error_message = None  # Stores detailed error message if extraction f
 odm_method = None
 stitch_thread=None
 stitch_stop_event = threading.Event()
+
+def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_options, 
+                            save_path, image_calibration, stitch_stop_event, progress_callback):
+    """
+    Complete workflow function that handles both stitching and mosaic creation
+    """
+    try:
+        # Run the main stitching process
+        print("=== STARTING MAIN STITCHING PROCESS ===")
+        stitch_results = run_stitch_all_plots(
+            msgs_synced_path, image_path, config_path, custom_options, 
+            save_path, image_calibration, stitch_stop_event, progress_callback
+        )
+        
+        # Check if stitching was successful and we have results
+        if stitch_results and stitch_results.get('processed_plots'):
+            print("=== MAIN STITCHING COMPLETED, STARTING MOSAIC CREATION ===")
+            
+            # Create the combined mosaic separately to avoid multiprocessing issues
+            mosaic_success = create_combined_mosaic_separate(
+                stitch_results['versioned_output_path'],
+                stitch_results['processed_plots'],
+                progress_callback
+            )
+            
+            if mosaic_success:
+                print("=== COMPLETE WORKFLOW FINISHED SUCCESSFULLY ===")
+                if progress_callback:
+                    progress_callback(100)  # Mark as complete even if failed
+            else:
+                print("=== WORKFLOW COMPLETED WITH MOSAIC WARNING ===")
+                if progress_callback:
+                    progress_callback(100)  # Mark as complete even if failed
+        else:
+            print("=== STITCHING FAILED OR NO PLOTS PROCESSED ===")
+            if progress_callback:
+                progress_callback(100)  # Mark as complete even if failed
+                
+    except Exception as e:
+        print(f"ERROR in complete_stitch_workflow: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        if progress_callback:
+            progress_callback(100)  # Mark as complete even on error
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -1567,8 +1605,9 @@ def run_stitch_endpoint():
         
         # Start the stitching process for all plots in background
         stitch_thread = threading.Thread(
-            target=run_stitch_all_plots, 
-            args=(msgs_synced_path, image_path, config_path, custom_options, save_path, image_calibration, stitch_stop_event, progress_callback),
+            target=complete_stitch_workflow,
+            args=(msgs_synced_path, image_path, config_path, custom_options, 
+                  save_path, image_calibration, stitch_stop_event, progress_callback),
             daemon=True
         )
         stitch_thread.start()
