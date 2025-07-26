@@ -86,14 +86,23 @@ def fit_angle_pca(x: np.ndarray, y: np.ndarray) -> float:
 
 def compute_axes_extents(xs: np.ndarray, ys: np.ndarray, theta: float, buffer_frac: float = 0.05):
     """Project (xs, ys) to heading axis (u) and orthogonal axis (v);
-    return buffered extents and widths in meters."""
+    return buffered extents and widths in meters.
+    
+    Returns extents relative to the GPS track center (for proper coordinate transformation).
+    """
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     u_vec = np.array([cos_t, sin_t])        # along-track
     v_vec = np.array([-sin_t, cos_t])       # cross-track
 
-    pts = np.column_stack([xs, ys])
-    u_proj = pts @ u_vec
-    v_proj = pts @ v_vec
+    # Center the GPS coordinates first
+    gps_center_x = xs.mean()
+    gps_center_y = ys.mean()
+    xs_centered = xs - gps_center_x
+    ys_centered = ys - gps_center_y
+    
+    pts_centered = np.column_stack([xs_centered, ys_centered])
+    u_proj = pts_centered @ u_vec
+    v_proj = pts_centered @ v_vec
 
     u_min, u_max = u_proj.min(), u_proj.max()
     v_min, v_max = v_proj.min(), v_proj.max()
@@ -111,22 +120,42 @@ def compute_axes_extents(xs: np.ndarray, ys: np.ndarray, theta: float, buffer_fr
     return u_min, u_max, v_min, v_max, width_m, height_m
 
 
-def build_rotated_affine(u_min, v_max, width_m, height_m, theta, px, py):
-    """Return rasterio Affine with rotation encoded."""
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
+def build_rotated_affine(u_min, v_max, width_m, height_m, theta, px, py, gps_center_x, gps_center_y):
+    """Return rasterio Affine with rotation encoded.
+    
+    Args:
+        u_min, v_max: Extents in centered rotated coordinate system
+        px, py: Pixel sizes in rotated coordinate system (width_m_axis/w, height_m_axis/h)
+        gps_center_x, gps_center_y: Center of GPS track in UTM coordinates
+    """
+    theta_corrected = theta + math.pi
+    cos_t, sin_t = math.cos(theta_corrected), math.sin(theta_corrected)
 
-    # top-left in (u,v)
+    # top-left in centered (u,v) coordinate system
     u_tl = u_min
     v_tl = v_max
 
-    # back to XY (UTM)
-    x_tl = u_tl * cos_t + v_tl * (-sin_t)
-    y_tl = u_tl * sin_t + v_tl * ( cos_t)
+    # Transform back to UTM coordinates:
+    # 1. Apply rotation to get offset from center
+    x_offset = u_tl * cos_t + v_tl * (-sin_t)
+    y_offset = u_tl * sin_t + v_tl * ( cos_t)
+    
+    # 2. Add GPS center to get absolute UTM coordinates
+    x_tl = gps_center_x + x_offset
+    y_tl = gps_center_y + y_offset
 
-    a =  px * cos_t
-    b = -px * sin_t
-    d =  py * sin_t
-    e = -py * cos_t
+    # The affine transform maps image pixels to world coordinates
+    # px, py are already in the rotated (u,v) coordinate system
+    
+    a = px * cos_t       # dX for +1 col
+    d = px * sin_t       # dY for +1 col
+    b = py * sin_t       # dX for +1 row  = -(-py)*sin, simplified
+    e = -py * cos_t      # dY for +1 row
+    
+    print(f"DEBUG AFFINE: px={px:.6f}, py={py:.6f}, theta={math.degrees(theta):.2f}°")
+    print(f"DEBUG AFFINE: cos_t={cos_t:.6f}, sin_t={sin_t:.6f}")
+    print(f"DEBUG AFFINE: a={a:.6f}, b={b:.6f}, d={d:.6f}, e={e:.6f}")
+    
     c = x_tl
     f = y_tl
     return Affine(a, b, c, d, e, f)
@@ -193,10 +222,19 @@ def estimate_cross_track_auto(xs, ys, theta, h_pixels, px_along, strategy,
     - strategy: 'intrinsics', 'std', 'ratio', 'fixed', 'hybrid'
     - stitch_direction: Direction of stitching (LEFT, RIGHT, UP, DOWN)
     - img_w, img_h: Image dimensions for direction-aware hybrid calculation
+    
+    Returns v_min, v_max in centered coordinate system.
     """
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     v_vec = np.array([-sin_t, cos_t])
-    v_vals = np.column_stack([xs, ys]) @ v_vec
+    
+    # Center the GPS coordinates first (same as compute_axes_extents)
+    gps_center_x = xs.mean()
+    gps_center_y = ys.mean()
+    xs_centered = xs - gps_center_x
+    ys_centered = ys - gps_center_y
+    
+    v_vals = np.column_stack([xs_centered, ys_centered]) @ v_vec
     v_min = v_vals.min()
     v_max = v_vals.max()
     height_gps = v_max - v_min
@@ -234,6 +272,7 @@ def estimate_cross_track_auto(xs, ys, theta, h_pixels, px_along, strategy,
 
     # Center on original v_center
     if height_need > height_gps:
+        print(f"  Centering: {height_need:.3f}m > {height_gps:.3f}m")
         v_center = 0.5 * (v_min + v_max)
         v_min = v_center - height_need / 2.0
         v_max = v_center + height_need / 2.0
@@ -288,14 +327,17 @@ def georeference_plot(plot_index,
     """
     # ----------- CONFIG SWITCHES -----------
     MODE = "HYBRID"                # "GPS_ONLY", "INTRINSICS_BOUND", or "HYBRID" - HYBRID recommended for stitched images
-    FORCE_SQUARE_PIXELS = True
-    USE_INTRINSICS_FOR_SCALE = False  # Use GPS-derived scale for stitched images (intrinsics are for single frames)
     camera_height = 1.2            # meters (hard-coded)
-    min_cross_track_aspect = 0.3   # floor = 30% of ideal (width * h/w) if GPS is too thin
+    min_cross_track_aspect = 0.0   # floor = 30% of ideal (width * h/w) if GPS is too thin
+    
+    # GPS validation and correction options
+    AUTO_CORRECT_GPS_LENGTH = True  # Automatically correct GPS length if it seems unreasonable
+    GPS_LENGTH_TOLERANCE = 0.3      # Allow 30% difference between PCA and direct GPS distance
+    PREFERRED_LENGTH_METHOD = "direct"  # "direct", "pca", or "path" - which GPS length to prefer
 
     # Strategy options for helper
-    CROSS_TRACK_STRATEGY = "hybrid" if MODE == "HYBRID" else ("intrinsics" if MODE == "INTRINSICS_BOUND" else "std")
-    FIXED_MIN_CT = 0.6   # used if strategy == 'fixed'
+    CROSS_TRACK_STRATEGY = "fixed"
+    FIXED_MIN_CT = 1.0   # used if strategy == 'fixed'
     K_SIGMA = 5          # used if strategy == 'std'
 
     try:
@@ -370,10 +412,16 @@ def georeference_plot(plot_index,
         center_lon = (lons.min() + lons.max()) / 2.0
         utm_epsg = pick_utm_epsg(center_lon, center_lat)
         print(f"[Plot {plot_index}] Using UTM CRS: EPSG:{utm_epsg}")
-        print(f"[Plot {plot_index}] Center coordinates: lat={center_lat:.6f}, lon={center_lon:.6f}")
+        print(f"[Plot {plot_index}] Plot-specific center coordinates: lat={center_lat:.6f}, lon={center_lon:.6f}")
 
         transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg}", always_xy=True)
         xs, ys = transformer.transform(lons, lats)
+        
+        # DIAGNOSTIC: Show actual GPS positioning for each plot
+        print(f"[Plot {plot_index}] GPS POSITIONING DIAGNOSTICS:")
+        print(f"  Plot GPS bounds in UTM: X({xs.min():.3f} to {xs.max():.3f}), Y({ys.min():.3f} to {ys.max():.3f})")
+        print(f"  Plot center in UTM: X={xs.mean():.3f}m, Y={ys.mean():.3f}m")
+        print(f"  GPS track extent: {xs.max()-xs.min():.3f}m x {ys.max()-ys.min():.3f}m")
 
         # Apply manual GPS offset if provided
         if gps_offset_x != 0.0 or gps_offset_y != 0.0:
@@ -431,9 +479,87 @@ def georeference_plot(plot_index,
 
         # ---- axis extents from GPS ----
         u_min, u_max, v_min, v_max, width_m_axis, height_m_axis = compute_axes_extents(
-            xs, ys, theta, buffer_frac=0.05
+            xs, ys, theta, buffer_frac=0.0
         )
         print(f"[Plot {plot_index}] Raw axis extents: width={width_m_axis:.3f}m, height={height_m_axis:.3f}m")
+        
+        # Get GPS center for coordinate transformation
+        gps_center_x = xs.mean()
+        gps_center_y = ys.mean()
+        
+        # DIAGNOSTIC: Show actual positioning coordinates (now correctly centered)
+        print(f"[Plot {plot_index}] POSITIONING DIAGNOSTICS:")
+        print(f"  GPS center in UTM: X={gps_center_x:.3f}m, Y={gps_center_y:.3f}m")
+        print(f"  Centered rotated coordinates: u_min={u_min:.3f}m, u_max={u_max:.3f}m")
+        print(f"  Centered rotated coordinates: v_min={v_min:.3f}m, v_max={v_max:.3f}m")
+        
+        # Calculate where the top-left corner will be positioned in UTM
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        x_offset = u_min * cos_t + v_max * (-sin_t)
+        y_offset = u_min * sin_t + v_max * cos_t
+        utm_top_left_x = gps_center_x + x_offset
+        utm_top_left_y = gps_center_y + y_offset
+        print(f"  Plot will be positioned at UTM: ({utm_top_left_x:.3f}, {utm_top_left_y:.3f}) as top-left corner")
+        
+        # ---- Validate GPS extents against expected plot length ----
+        # Calculate direct distance between first and last GPS points
+        direct_gps_distance = np.sqrt((xs[-1] - xs[0])**2 + (ys[-1] - ys[0])**2)
+        total_gps_path_length = sum(np.sqrt(np.diff(xs)**2 + np.diff(ys)**2))
+        
+        print(f"[Plot {plot_index}] GPS VALIDATION:")
+        print(f"  Direct distance (first→last): {direct_gps_distance:.3f}m")
+        print(f"  Total GPS path length: {total_gps_path_length:.3f}m")
+        print(f"  PCA-derived width (along-track): {width_m_axis:.3f}m")
+        print(f"  Ratio (PCA/direct): {width_m_axis/direct_gps_distance:.3f}")
+        
+        # Check for reasonable agreement between different length measures
+        max_reasonable_ratio = 1.0 + GPS_LENGTH_TOLERANCE  # Allow tolerance difference
+        min_reasonable_ratio = 1.0 - GPS_LENGTH_TOLERANCE  # Don't allow PCA to be too different
+        
+        length_correction_applied = False
+        if AUTO_CORRECT_GPS_LENGTH:
+            if width_m_axis > direct_gps_distance * max_reasonable_ratio:
+                print(f"[Plot {plot_index}] WARNING: PCA width seems too large compared to direct GPS distance")
+                print("  Auto-correcting using direct GPS distance")
+                length_correction_applied = True
+            elif width_m_axis < direct_gps_distance * min_reasonable_ratio:
+                print(f"[Plot {plot_index}] WARNING: PCA width seems too small compared to direct GPS distance")
+                print("  Auto-correcting using direct GPS distance")
+                length_correction_applied = True
+            elif PREFERRED_LENGTH_METHOD == "direct":
+                print(f"[Plot {plot_index}] Using preferred method: direct GPS distance")
+                length_correction_applied = True
+            elif PREFERRED_LENGTH_METHOD == "path" and abs(total_gps_path_length - width_m_axis) < abs(direct_gps_distance - width_m_axis):
+                print(f"[Plot {plot_index}] Using preferred method: total GPS path length")
+                # Use path length instead of direct distance
+                direct_gps_distance = total_gps_path_length
+                length_correction_applied = True
+        else:
+            # Just warn but don't correct
+            if width_m_axis > direct_gps_distance * max_reasonable_ratio:
+                print(f"[Plot {plot_index}] WARNING: PCA width seems too large compared to direct GPS distance")
+                print("  Consider using direct GPS distance as reference")
+            elif width_m_axis < direct_gps_distance * min_reasonable_ratio:
+                print(f"[Plot {plot_index}] WARNING: PCA width seems too small compared to direct GPS distance")
+                print("  This might indicate GPS noise or poor trajectory alignment")
+        
+        # Apply length correction if needed
+        if length_correction_applied:
+            print(f"[Plot {plot_index}] Applying GPS length correction")
+            # Recalculate extents centered on the trajectory but with corrected length
+            # The u_min, u_max from compute_axes_extents are already centered, so we just
+            # need to scale them based on the corrected width
+            old_width = width_m_axis
+            width_m_axis = direct_gps_distance
+            
+            # Scale the centered extents proportionally
+            current_width = u_max - u_min
+            scale_factor = width_m_axis / current_width
+            u_center = (u_min + u_max) / 2.0
+            u_half_width = (u_max - u_min) / 2.0 * scale_factor
+            u_min = u_center - u_half_width
+            u_max = u_center + u_half_width
+            print(f"  Corrected width_m_axis: {old_width:.3f}m → {width_m_axis:.3f}m")
 
         # ---- cross-track decision using helper ----
         px_along = width_m_axis / w  # meters per pixel along-track
@@ -470,42 +596,33 @@ def georeference_plot(plot_index,
             height_m_axis = min_height_allowed
 
         # ---- pixel sizes ----
-        if USE_INTRINSICS_FOR_SCALE and intr_gsd is not None:
-            # Use intrinsics-derived GSD for pixel scale (more accurate)
-            px = py = intr_gsd
-            print(f"[Plot {plot_index}] Using intrinsics-based pixel scale: {px:.6f} m/px")
-            
-            # Recalculate extents based on intrinsics scale
-            width_m_axis = px * w
-            height_m_axis = py * h
-            
-            # Adjust positioning to center the GPS track within the intrinsics-sized image
-            u_center = (u_min + u_max) / 2.0
-            v_center = (v_min + v_max) / 2.0
-            u_min = u_center - width_m_axis / 2.0
-            u_max = u_center + width_m_axis / 2.0
-            v_min = v_center - height_m_axis / 2.0
-            v_max = v_center + height_m_axis / 2.0
-            
-        else:
-            # Use GPS-derived scale (original method)
-            px = width_m_axis / w
-            py = height_m_axis / h
-            
-            if FORCE_SQUARE_PIXELS:
-                px = py = max(px, py)
-                width_m_axis  = px * w
-                height_m_axis = py * h
-                v_center = 0.5 * (v_min + v_max)
-                v_min = v_center - height_m_axis / 2.0
-                v_max = v_center + height_m_axis / 2.0
-                print(f"[Plot {plot_index}] Forced square pixels. px=py={px:.6f} m/px")
+        # Calculate pixel sizes directly from the final calculated extents
+        px = width_m_axis / w  # meters per pixel in X direction
+        py = height_m_axis / h  # meters per pixel in Y direction
+        
+        print(f"[Plot {plot_index}] Using calculated extents for pixel scale")
+        print(f"  Width: {width_m_axis:.3f}m ÷ {w}px = {px:.6f} m/px")
+        print(f"  Height: {height_m_axis:.3f}m ÷ {h}px = {py:.6f} m/px")
         
         print(f"[Plot {plot_index}] SCALE DIAGNOSTICS:")
         print(f"  Image dimensions: {w} x {h} pixels")
-        print(f"  GPS-derived extent: {width_m_axis:.3f}m x {height_m_axis:.3f}m")
         print(f"  Final extent: {width_m_axis:.3f}m x {height_m_axis:.3f}m")
         print(f"  Final pixel size: x={px:.6f} m/px, y={py:.6f} m/px")
+        print(f"  Rotated bounds: u_min={u_min:.3f}m, u_max={u_max:.3f}m, v_min={v_min:.3f}m, v_max={v_max:.3f}m")
+        print(f"  Calculated width check: u_max - u_min = {u_max - u_min:.3f}m (should match width_m_axis: {width_m_axis:.3f}m)")
+        print(f"  Calculated height check: v_max - v_min = {v_max - v_min:.3f}m (should match height_m_axis: {height_m_axis:.3f}m)")
+        
+        # Verify extent consistency
+        width_diff = abs((u_max - u_min) - width_m_axis)
+        height_diff = abs((v_max - v_min) - height_m_axis)
+        if width_diff > 0.001:  # tolerance of 1mm
+            print(f"  WARNING: Width mismatch of {width_diff:.6f}m between bounds and final extent!")
+        if height_diff > 0.001:  # tolerance of 1mm
+            print(f"  WARNING: Height mismatch of {height_diff:.6f}m between bounds and final extent!")
+        
+        if width_diff <= 0.001 and height_diff <= 0.001:
+            print("  Extent consistency verified - TIF will be positioned correctly within bounds")
+        
         if intr_gsd is not None:
             print(f"  Single-frame intrinsics GSD: {intr_gsd:.6f} m/px (for comparison only)")
             # Calculate GPS-derived pixel size from original GPS extents
@@ -527,12 +644,36 @@ def georeference_plot(plot_index,
         print(f"[Plot {plot_index}] Pixel size / GSD: {gsd_avg:.6f} m/px (x: {px:.6f}, y: {py:.6f})")
 
         # ---- affine transform ----
-        transform = build_rotated_affine(u_min, v_max, width_m_axis, height_m_axis, theta, px, py)
+        transform = build_rotated_affine(u_min, v_max, width_m_axis, height_m_axis, theta, px, py, gps_center_x, gps_center_y)
 
-        print("[Plot {plot_index}] Affine transform:")
+        print(f"[Plot {plot_index}] Affine transform:")
         print(f"    a={transform.a:.8f}, b={transform.b:.8f}, c={transform.c:.3f}")
         print(f"    d={transform.d:.8f}, e={transform.e:.8f}, f={transform.f:.3f}")
+        print(f"[Plot {plot_index}] Transform positions plot at UTM: ({transform.c:.3f}, {transform.f:.3f})")
         print(f"[Plot {plot_index}] Rotation encoded: {theta_deg:.2f}°; rover guess: {rover_direction}")
+        
+        # Verify what dimensions this affine transform will actually produce
+        # Calculate the four corners of the image in world coordinates
+        corners_image = [(0, 0), (w, 0), (w, h), (0, h)]  # top-left, top-right, bottom-right, bottom-left
+        corners_world = [transform * corner for corner in corners_image]
+        
+        # Extract X and Y coordinates
+        xs_corners = [corner[0] for corner in corners_world]
+        ys_corners = [corner[1] for corner in corners_world]
+        
+        # Calculate actual dimensions that will appear in QGIS
+        actual_width = max(xs_corners) - min(xs_corners)
+        actual_height = max(ys_corners) - min(ys_corners)
+        
+        print(f"[Plot {plot_index}] VERIFICATION - Actual TIF dimensions in QGIS:")
+        print(f"    Expected: {width_m_axis:.3f}m x {height_m_axis:.3f}m")
+        print(f"    Calculated: {actual_width:.3f}m x {actual_height:.3f}m")
+        print(f"    Image corners in UTM: {corners_world}")
+        
+        if abs(actual_width - width_m_axis) > 0.1 or abs(actual_height - height_m_axis) > 0.1:
+            print("    WARNING: Dimension mismatch detected!")
+            print(f"    Width difference: {abs(actual_width - width_m_axis):.3f}m")
+            print(f"    Height difference: {abs(actual_height - height_m_axis):.3f}m")
 
         # ---- write UTM GeoTIFF ----
         utm_out = os.path.join(versioned_output_path, f"georeferenced_plot_{plot_index}_utm.tif")
