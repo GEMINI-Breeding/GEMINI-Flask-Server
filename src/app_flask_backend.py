@@ -1965,7 +1965,7 @@ def delete_ortho():
 @file_app.route('/associate_plots_with_boundaries', methods=['POST'])
 def associate_plots_with_boundaries():
     """
-    Associate AgRowStitch plots with boundary polygons and update msgs_synced.csv with plot labels
+    Associate AgRowStitch plots with boundary polygons and update plot_borders.csv with plot labels
     """
     import geopandas as gpd
     from shapely.geometry import Point
@@ -1991,6 +1991,10 @@ def associate_plots_with_boundaries():
             data_root_dir, "Raw", year, experiment, location, population,
             date, platform, sensor, "Metadata", "msgs_synced.csv"
         )
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
         agrowstitch_path = os.path.join(
             data_root_dir, "Processed", year, experiment, location, population,
             date, platform, sensor, agrowstitch_dir
@@ -2000,6 +2004,10 @@ def associate_plots_with_boundaries():
         if not os.path.exists(msgs_synced_path):
             return jsonify({'error': f'msgs_synced.csv not found at {msgs_synced_path}'}), 404
             
+        # Check if plot_borders.csv exists
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': f'plot_borders.csv not found at {plot_borders_path}'}), 404
+            
         # Check if AgRowStitch directory exists
         if not os.path.exists(agrowstitch_path):
             return jsonify({'error': f'AgRowStitch directory not found at {agrowstitch_path}'}), 404
@@ -2007,9 +2015,15 @@ def associate_plots_with_boundaries():
         # Load msgs_synced.csv
         msgs_df = pd.read_csv(msgs_synced_path)
         
+        # Load plot_borders.csv
+        borders_df = pd.read_csv(plot_borders_path)
+        
         # Check if plot_index column exists
         if 'plot_index' not in msgs_df.columns:
             return jsonify({'error': 'plot_index column not found in msgs_synced.csv'}), 400
+            
+        if 'plot_index' not in borders_df.columns:
+            return jsonify({'error': 'plot_index column not found in plot_borders.csv'}), 400
             
         # Get unique plot indices (excluding unassigned)
         plot_indices = [idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]
@@ -2021,9 +2035,11 @@ def associate_plots_with_boundaries():
         boundaries_gdf = gpd.GeoDataFrame.from_features(boundaries['features'])
         boundaries_gdf.set_crs(epsg=4326, inplace=True)
         
-        # Initialize plot_labels column if it doesn't exist
-        if 'plot_labels' not in msgs_df.columns:
-            msgs_df['plot_labels'] = None
+        # Initialize Plot and Accession columns if they don't exist
+        if 'Plot' not in borders_df.columns:
+            borders_df['Plot'] = None
+        if 'Accession' not in borders_df.columns:
+            borders_df['Accession'] = None
             
         # Track associations to prevent duplicates
         plot_associations = {}
@@ -2053,27 +2069,23 @@ def associate_plots_with_boundaries():
                         print(f"Warning: Boundary {boundary_key} already associated with plot {plot_associations[boundary_key]}")
                         continue
                         
-                    # Create plot label
-                    plot_label = f"Plot_{boundary_plot}"
-                    if boundary_accession:
-                        plot_label += f"_Acc_{boundary_accession}"
-                        
-                    # Update msgs_synced.csv
-                    msgs_df.loc[msgs_df['plot_index'] == plot_idx, 'plot_labels'] = plot_label
+                    # Update plot_borders.csv with Plot and Accession
+                    borders_df.loc[borders_df['plot_index'] == plot_idx, 'Plot'] = boundary_plot
+                    borders_df.loc[borders_df['plot_index'] == plot_idx, 'Accession'] = boundary_accession
                     
                     # Track association
-                    plot_associations[boundary_key] = plot_idx
+                    plot_associations[boundary_key] = int(plot_idx)
                     
-                    print(f"Associated plot index {plot_idx} with boundary {boundary_key} -> {plot_label}")
+                    print(f"Associated plot index {plot_idx} with boundary {boundary_key} -> Plot: {boundary_plot}, Accession: {boundary_accession}")
                     break
                     
-        # Save updated msgs_synced.csv
-        msgs_df.to_csv(msgs_synced_path, index=False)
+        # Save updated plot_borders.csv
+        borders_df.to_csv(plot_borders_path, index=False)
         
         # Return association summary
         return jsonify({
             'message': 'Plot associations completed successfully',
-            'associations': len(plot_associations),
+            'associations': int(len(plot_associations)),
             'plot_associations': plot_associations
         }), 200
         
@@ -2084,7 +2096,7 @@ def associate_plots_with_boundaries():
 @file_app.route('/get_agrowstitch_plot_associations', methods=['POST'])
 def get_agrowstitch_plot_associations():
     """
-    Get current plot associations for AgRowStitch plots
+    Get current plot associations for AgRowStitch plots from plot_borders.csv
     """
     data = request.json
     year = data.get('year')
@@ -2099,41 +2111,197 @@ def get_agrowstitch_plot_associations():
         return jsonify({'error': 'Missing required parameters'}), 400
         
     try:
-        # Path to msgs_synced.csv
+        # Path to msgs_synced.csv (for plot indices)
         msgs_synced_path = os.path.join(
             data_root_dir, "Raw", year, experiment, location, population,
             date, platform, sensor, "Metadata", "msgs_synced.csv"
         )
         
+        # Path to plot_borders.csv (for plot labels)
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
         if not os.path.exists(msgs_synced_path):
             return jsonify({'error': 'msgs_synced.csv not found'}), 404
             
-        # Load msgs_synced.csv
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': 'plot_borders.csv not found'}), 404
+            
+        # Load both files
         msgs_df = pd.read_csv(msgs_synced_path)
+        borders_df = pd.read_csv(plot_borders_path)
         
         # Check required columns
         if 'plot_index' not in msgs_df.columns:
-            return jsonify({'error': 'plot_index column not found'}), 400
+            return jsonify({'error': 'plot_index column not found in msgs_synced.csv'}), 400
             
-        # Get plot associations
+        if 'plot_index' not in borders_df.columns:
+            return jsonify({'error': 'plot_index column not found in plot_borders.csv'}), 400
+            
+        # Get plot associations from plot_borders.csv
         associations = {}
-        if 'plot_labels' in msgs_df.columns:
-            plot_data = msgs_df[msgs_df['plot_index'] > 0].groupby('plot_index').first()
-            for plot_idx, row in plot_data.iterrows():
-                if pd.notna(row.get('plot_labels')):
-                    associations[int(plot_idx)] = {
-                        'plot_label': row['plot_labels'],
-                        'center_lat': float(row['lat']) if pd.notna(row['lat']) else None,
-                        'center_lon': float(row['lon']) if pd.notna(row['lon']) else None
+        for _, row in borders_df.iterrows():
+            plot_idx = row['plot_index']
+            if plot_idx > 0 and (pd.notna(row.get('Plot')) or pd.notna(row.get('Accession'))):
+                # Get center coordinates from msgs_synced.csv
+                plot_data = msgs_df[msgs_df['plot_index'] == plot_idx]
+                if not plot_data.empty:
+                    center_lat = plot_data['lat'].mean()
+                    center_lon = plot_data['lon'].mean()
+                    
+                    # Create plot label
+                    plot_value = row.get('Plot')
+                    accession_value = row.get('Accession')
+                    
+                    plot_label = f"Plot_{plot_value if pd.notna(plot_value) else 'Unknown'}"
+                    if pd.notna(accession_value):
+                        plot_label += f"_Acc_{accession_value}"
+                    
+                    associations[str(int(plot_idx))] = {
+                        'plot_label': plot_label,
+                        'center_lat': float(center_lat) if pd.notna(center_lat) else None,
+                        'center_lon': float(center_lon) if pd.notna(center_lon) else None
                     }
                     
         return jsonify({
             'associations': associations,
-            'total_plots': len([idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)])
+            'total_plots': int(len([idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]))
         }), 200
         
     except Exception as e:
         print(f"Error getting plot associations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_plot_borders_data', methods=['POST'])
+def get_plot_borders_data():
+    """
+    Get plot borders data with plot labels and accessions
+    """
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment') 
+    location = data.get('location')
+    population = data.get('population')
+    
+    if not all([year, experiment, location, population]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+        
+    try:
+        # Path to plot_borders.csv
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': 'plot_borders.csv not found'}), 404
+            
+        # Load plot_borders.csv
+        borders_df = pd.read_csv(plot_borders_path)
+        
+        # Create a dictionary mapping plot_index to plot labels and accessions
+        plot_data = {}
+        for _, row in borders_df.iterrows():
+            plot_idx = row.get('plot_index')
+            if pd.notna(plot_idx) and plot_idx > 0:
+                plot_data[int(plot_idx)] = {
+                    'plot': row.get('Plot') if pd.notna(row.get('Plot')) else None,
+                    'accession': row.get('Accession') if pd.notna(row.get('Accession')) else None
+                }
+                
+        return jsonify({'plot_data': plot_data}), 200
+        
+    except Exception as e:
+        print(f"Error getting plot borders data: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/download_single_plot', methods=['POST'])
+def download_single_plot():
+    """
+    Download a single plot image with plot label and accession in filename
+    """
+    data = request.get_json()
+    try:
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        platform = data['platform']
+        sensor = data['sensor']
+        agrowstitch_dir = data['agrowstitchDir']
+        plot_filename = data['plotFilename']
+        
+        # Extract plot index from filename
+        plot_match = re.search(r'temp_plot_(\d+)', plot_filename)
+        if not plot_match:
+            return jsonify({'error': 'Could not extract plot index from filename'}), 400
+        
+        plot_index = int(plot_match.group(1))
+        
+        # Get plot borders data
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
+        plot_label = None
+        accession = None
+        
+        if os.path.exists(plot_borders_path):
+            try:
+                borders_df = pd.read_csv(plot_borders_path)
+                plot_row = borders_df[borders_df['plot_index'] == plot_index]
+                if not plot_row.empty:
+                    plot_label = plot_row.iloc[0].get('Plot')
+                    accession = plot_row.iloc[0].get('Accession')
+                    if pd.isna(plot_label):
+                        plot_label = None
+                    if pd.isna(accession):
+                        accession = None
+            except Exception as e:
+                print(f"Error reading plot borders: {e}")
+        
+        # Build original file path
+        file_path = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor, agrowstitch_dir, plot_filename
+        )
+        
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'Plot file not found'}), 404
+        
+        # Create new filename with plot label and accession
+        base_name = os.path.splitext(plot_filename)[0]
+        extension = os.path.splitext(plot_filename)[1]
+        
+        new_filename_parts = [base_name]
+        if plot_label:
+            new_filename_parts.append(f"Plot_{plot_label}")
+        if accession:
+            new_filename_parts.append(f"Acc_{accession}")
+        
+        new_filename = "_".join(new_filename_parts) + extension
+        
+        print(f"Download debug - Original: {plot_filename}, Enhanced: {new_filename}")
+        print(f"Plot data - plot_index: {plot_index}, plot_label: {plot_label}, accession: {accession}")
+        
+        # Create the response with explicit Content-Disposition header
+        response = make_response(send_file(
+            file_path,
+            as_attachment=True
+        ))
+        
+        # Explicitly set the Content-Disposition header
+        response.headers['Content-Disposition'] = f'attachment; filename="{new_filename}"'
+        print(f"Setting Content-Disposition header: attachment; filename=\"{new_filename}\"")
+        
+        return response
+        
+    except Exception as e:
+        print(f"Error downloading single plot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 def update_progress_file(progress_file, progress, debug=False):
