@@ -8,7 +8,7 @@ from pyproj import Geod
 
 plot_marking_bp = Blueprint('plot_marking', __name__)
 
-def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None, original_plot_index=None, filter=False):
+def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None, original_plot_index=None, filter=False, shift_all=False, shift_amount=0, original_start_image_index=None):
     print("DEBUG: Starting update_plot_index with parameters:")
     print(f"DEBUG: directory={directory}, start_image_name={start_image_name}, end_image_name={end_image_name}, plot_index={plot_index}, camera={camera}, stitch_direction={stitch_direction}, original_plot_index={original_plot_index}, filter={filter}")
     data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
@@ -45,6 +45,54 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     current_plot_index = int(plot_index)
     df.loc[start_row_index:end_row_index, 'plot_index'] = current_plot_index
     df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
+    print(f"DEBUG: shift_amount: {shift_amount}, original_start_image_index: {original_start_image_index}")
+    
+    # Handle shift_all logic for plot index adjustments
+    if shift_all and shift_amount != 0 and original_plot_index is not None:
+        print(f"DEBUG: Applying shift_all logic. Shift amount: {shift_amount}")
+        
+        # Get all unique plot indices that are greater than the current plot
+        unique_plots_to_shift = df[df['plot_index'] > current_plot_index]['plot_index'].unique()
+        unique_plots_to_shift = unique_plots_to_shift[unique_plots_to_shift != -1]  # Exclude unassigned plots
+        
+        if len(unique_plots_to_shift) > 0:
+            print(f"DEBUG: Found {len(unique_plots_to_shift)} plots to shift: {unique_plots_to_shift}")
+            
+            # Create a copy of the original plot assignments before clearing them
+            plot_assignments = {}
+            for plot_idx in unique_plots_to_shift:
+                plot_rows = df[df['plot_index'] == plot_idx].index.tolist()
+                plot_assignments[plot_idx] = {
+                    'rows': plot_rows,
+                    'stitch_direction': df.loc[plot_rows[0], 'stitch_direction'] if plot_rows else None
+                }
+                # Clear the original assignments
+                df.loc[df['plot_index'] == plot_idx, 'plot_index'] = -1
+                df.loc[df['plot_index'] == plot_idx, 'stitch_direction'] = None
+            
+            # Now reassign each plot to its new shifted position
+            for plot_idx, assignment in plot_assignments.items():
+                old_rows = assignment['rows']
+                stitch_dir = assignment['stitch_direction']
+                
+                # Calculate new row positions by shifting
+                # If shift_amount is positive (original start was later), we moved earlier, so subsequent plots should also move earlier (subtract)
+                # If shift_amount is negative (original start was earlier), we moved later, so subsequent plots should also move later (add)
+                new_rows = []
+                for old_row in old_rows:
+                    new_row = old_row - shift_amount  # Reverse the direction
+                    # Ensure the new row is within bounds
+                    if 0 <= new_row < len(df):
+                        new_rows.append(new_row)
+                
+                # Assign the plot to the new rows
+                if new_rows:
+                    df.loc[new_rows, 'plot_index'] = plot_idx
+                    df.loc[new_rows, 'stitch_direction'] = stitch_dir
+                    print(f"DEBUG: Shifted plot {plot_idx} from rows {old_rows} to rows {new_rows}")
+                else:
+                    print(f"WARNING: Plot {plot_idx} could not be shifted - new position out of bounds")
+    
     df.to_csv(csv_path, index=False)
 
     # Create or update plot_borders.csv
@@ -96,11 +144,14 @@ def mark_plot():
     camera = data.get('camera')
     stitch_direction = data.get('stitch_direction')
     original_plot_index = data.get('original_plot_index') # Can be None
+    shift_all = data.get('shift_all', False)
+    shift_amount = data.get('shift_amount', 0)
+    original_start_image_index = data.get('original_start_image_index')
 
     if not all([directory, start_image_name, end_image_name, plot_index is not None, camera]):
         return jsonify({"error": "Missing required parameters"}), 400
 
-    success = update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction, original_plot_index)
+    success = update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction, original_plot_index, filter=False, shift_all=shift_all, shift_amount=shift_amount, original_start_image_index=original_start_image_index)
     if success:
         return jsonify({"status": "success", "message": f"Plot {plot_index} marked successfully."})
     else:
@@ -210,8 +261,6 @@ def get_gps_data():
     try:
         df = pd.read_csv(csv_path)
         
-        # NOTE: Removed the sort_values call to preserve the original path order from the CSV
-        
         if 'lat' in df.columns and 'lon' in df.columns:
             gps_data = df[['lat', 'lon']].to_dict('records')
             return jsonify(gps_data)
@@ -234,6 +283,7 @@ def delete_plot():
     if 'plot_index' not in df.columns:
         return jsonify({"error": "'plot_index' column not found in csv"}), 500
     df.loc[df['plot_index'] == plot_index, 'plot_index'] = -1
+    df.loc[df['plot_index'] == plot_index, 'stitch_direction'] = None
     df.to_csv(csv_path, index=False)
 
     return jsonify({"status": "success", "message": f"Plot {plot_index} deleted successfully."})
@@ -419,3 +469,10 @@ def download_amiga_images():
         # Generic error handler for unexpected issues
         print(f"An unexpected error occurred: {e}")
         return jsonify({"error": "An internal server error occurred."}), 500
+
+
+# @plot_marking_bp.route('/save_stitch_boundary', methods=['POST'])
+# def save_stitch_boundary():
+#     data = request.get_json()
+#     mask = data.get('mask')
+    
