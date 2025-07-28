@@ -15,7 +15,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     image_dir_path = os.path.join(data_root_dir_path, directory)
     metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
     csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
-    start_image_name = "/top/" + start_image_name  
+    start_image_name = "/top/" + start_image_name
     end_image_name = "/top/" + end_image_name
     print(f"DEBUG: CSV path is {csv_path}")
     if not os.path.exists(csv_path):
@@ -24,7 +24,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     df = pd.read_csv(csv_path)
     if 'plot_index' not in df.columns:
         df['plot_index'] = -1
-    
+
     # If this is an update, clear the old plot index entries first
     if original_plot_index is not None:
         print(f"DEBUG: Clearing old plot index: {original_plot_index}")
@@ -48,7 +48,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     df.to_csv(csv_path, index=False)
 
     # Create or update plot_borders.csv
-    if not filter: 
+    if not filter:
         try:
             start_lat = df.loc[start_row_index, 'lat']
             start_lon = df.loc[start_row_index, 'lon']
@@ -68,7 +68,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
                 "start_lon": start_lon,
                 "end_lat": end_lat,
                 "end_lon": end_lon,
-                "stitch_direction": stitch_direction    
+                "stitch_direction": stitch_direction
 
             }
 
@@ -78,7 +78,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
                 borders_df.loc[idx] = new_border_data
             else:
                 borders_df = pd.concat([borders_df, pd.DataFrame([new_border_data])], ignore_index=True)
-            
+
             borders_df.to_csv(plot_borders_path, index=False)
             print(f"DEBUG: Successfully updated {plot_borders_path}")
 
@@ -153,24 +153,70 @@ def get_image_plot_index():
     try:
         df = pd.read_csv(csv_path)
         
-        # Find the column that contains the image name
         image_col = None
         for col in df.columns:
             if col.endswith('_file'):
+                # Use .str.contains as a fallback if exact match fails, though exact is better
                 if image_name in df[col].values:
                     image_col = col
                     break
         
         if not image_col:
-            return jsonify({'plot_index': -1}), 200 # Image not in msgs_synced, so no index
+            return jsonify({'plot_index': -1, 'lat': None, 'lon': None}), 200
 
         row = df[df[image_col] == image_name]
 
         if not row.empty:
+            if 'plot_index' not in row.columns:
+                if 'lat' not in row.columns or 'lon' not in row.columns:
+                    # If no plot_index, lat, or lon columns, return -1 for plot_index and None for lat/lon
+                    return jsonify({'plot_index': -1, 'lat': None, 'lon': None}), 200
+                lat = row['lat'].iloc[0] 
+                lon = row['lon'].iloc[0] 
+                lat_val = float(lat)
+                lon_val = float(lon)
+                return jsonify({'plot_index': -1, 'lat': lat_val, 'lon': lon_val}), 200
             plot_index = row['plot_index'].iloc[0]
-            return jsonify({'plot_index': int(plot_index)}), 200
+            lat = row['lat'].iloc[0] 
+            lon = row['lon'].iloc[0]
+            lat_val = float(lat) 
+            lon_val = float(lon) 
+
+            return jsonify({
+                'plot_index': int(plot_index),
+                'lat': lat_val,
+                'lon': lon_val
+            }), 200
         else:
-            return jsonify({'plot_index': -1}), 200 # Image not in msgs_synced, so no index
+            return jsonify({'plot_index': -1, 'lat': None, 'lon': None}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@plot_marking_bp.route('/get_gps_data', methods=['POST'])
+def get_gps_data():
+    data = request.get_json()
+    directory = data.get('directory')
+    data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
+    dir_path = os.path.join(data_root_dir_path, directory)
+    metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
+    csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+
+    if not directory:
+        return jsonify({'error': 'Missing directory'}), 400
+
+    if not os.path.exists(csv_path):
+        return jsonify({'error': 'msgs_synced.csv not found'}), 404
+
+    try:
+        df = pd.read_csv(csv_path)
+        
+        # NOTE: Removed the sort_values call to preserve the original path order from the CSV
+        
+        if 'lat' in df.columns and 'lon' in df.columns:
+            gps_data = df[['lat', 'lon']].to_dict('records')
+            return jsonify(gps_data)
+        else:
+            return jsonify({'error': "'lat' or 'lon' columns not found in csv"}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -215,7 +261,7 @@ def get_plot_data():
         start_plots_df = start_plots_df.rename(columns={image_col: 'image_name'})
 
         start_plots = start_plots_df[['plot_index', 'image_name']].to_dict('records')
-        
+
         return jsonify(start_plots)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -249,7 +295,7 @@ def filter_plot_borders():
             target_start_lon = border_row['start_lon']
             target_end_lat = border_row['end_lat']
             target_end_lon = border_row['end_lon']
-            
+
             min_start_distance = float('inf')
             min_end_distance = float('inf')
             start_image = None
@@ -258,13 +304,13 @@ def filter_plot_borders():
             for _, msg_row in msgs_df.iterrows():
                 curr_lat = msg_row['lat']
                 curr_lon = msg_row['lon']
-                
+
                 # Calculate distance from target start point
                 _, _, dist_start = geod.inv(target_start_lon, target_start_lat, curr_lon, curr_lat)
                 if dist_start < min_start_distance:
                     min_start_distance = dist_start
                     start_image = msg_row['/top/rgb_file']  # column expected in msgs_synced.csv
-                
+
                 # Calculate distance from target end point
                 _, _, dist_end = geod.inv(target_end_lon, target_end_lat, curr_lon, curr_lat)
                 if dist_end < min_end_distance:
@@ -286,8 +332,8 @@ def filter_plot_borders():
 def download_amiga_images():
     """
     Downloads images extracted from an Amiga binary.
-    
-    If a 'plot_index' column with marked plots (> -1) exists in the metadata, 
+
+    If a 'plot_index' column with marked plots (> -1) exists in the metadata,
     only those marked images are zipped. Otherwise, all images from the directory are zipped.
     """
     try:
@@ -331,7 +377,7 @@ def download_amiga_images():
                 marked_images_filenames = set(
                     Path(f).name for f in marked_plots_df[image_file_col].dropna()
                 )
-        
+
         if download_all:
             print("No marked plots found. Preparing to download all images.")
 
@@ -359,7 +405,7 @@ def download_amiga_images():
                         else:
                             # Use 'arcname' to keep the zip file flat (no parent directories)
                             zipf.write(file_path, arcname=file)
-        
+
         # Send the created zip file to the user for download
         return send_file(zip_path, as_attachment=True)
 
