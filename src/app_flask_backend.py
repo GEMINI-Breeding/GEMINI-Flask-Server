@@ -82,7 +82,7 @@ stitch_thread=None
 stitch_stop_event = threading.Event()
 
 def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_options, 
-                            save_path, image_calibration, stitch_stop_event, progress_callback):
+                            save_path, image_calibration, stitch_stop_event, progress_callback, monitoring_stop_event=None):
     """
     Complete workflow function that handles both stitching and mosaic creation
     """
@@ -102,28 +102,31 @@ def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_o
             mosaic_success = create_combined_mosaic_separate(
                 stitch_results['versioned_output_path'],
                 stitch_results['processed_plots'],
-                progress_callback
+                progress_callback,
+                monitoring_stop_event  # Pass the monitoring stop event to cancel monitoring
             )
             
             if mosaic_success:
                 print("=== COMPLETE WORKFLOW FINISHED SUCCESSFULLY ===")
-                if progress_callback:
-                    progress_callback(100)  # Mark as complete even if failed
             else:
-                print("=== WORKFLOW COMPLETED WITH MOSAIC WARNING ===")
-                if progress_callback:
-                    progress_callback(100)  # Mark as complete even if failed
+                print("=== WORKFLOW COMPLETED WITH MOSAIC WARNINGS ===")
         else:
-            print("=== STITCHING FAILED OR NO PLOTS PROCESSED ===")
-            if progress_callback:
-                progress_callback(100)  # Mark as complete even if failed
+            print("=== WORKFLOW COMPLETED WITH ERRORS ===")
                 
     except Exception as e:
         print(f"ERROR in complete_stitch_workflow: {str(e)}")
-        import traceback
         print(f"Traceback: {traceback.format_exc()}")
+    finally:
+        print("=== WORKFLOW FINALLY BLOCK - ENSURING COMPLETION ===")
+        
+        # Set final 100% progress - monitoring thread is already stopped by mosaic creation
         if progress_callback:
-            progress_callback(100)  # Mark as complete even on error
+            print("Setting final progress to 100%...")
+            progress_callback(100)
+            print("Final progress set to 100% - workflow complete!")
+        
+        print("=== WORKFLOW FULLY COMPLETED ===")
+
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -1590,6 +1593,9 @@ def run_stitch_endpoint():
         
         print(f"Found {len(unique_plots)} unique plots for stitching: {unique_plots}")
         
+        # Create a monitoring stop event to coordinate threads
+        monitoring_stop_event = threading.Event()
+        
         # Start multi-plot log monitoring thread
         final_mosaics_dir = os.path.join(os.path.dirname(image_path), "final_mosaics")
         
@@ -1598,7 +1604,7 @@ def run_stitch_endpoint():
         
         thread_prog = threading.Thread(
             target=monitor_stitch_updates_multi_plot, 
-            args=(final_mosaics_dir, unique_plots, progress_callback), 
+            args=(final_mosaics_dir, unique_plots, progress_callback, monitoring_stop_event), 
             daemon=True
         )
         thread_prog.start()
@@ -1607,7 +1613,7 @@ def run_stitch_endpoint():
         stitch_thread = threading.Thread(
             target=complete_stitch_workflow,
             args=(msgs_synced_path, image_path, config_path, custom_options, 
-                  save_path, image_calibration, stitch_stop_event, progress_callback),
+                  save_path, image_calibration, stitch_stop_event, progress_callback, monitoring_stop_event),
             daemon=True
         )
         stitch_thread.start()
@@ -2287,18 +2293,33 @@ def download_single_plot():
         
         print(f"Download debug - Original: {plot_filename}, Enhanced: {new_filename}")
         print(f"Plot data - plot_index: {plot_index}, plot_label: {plot_label}, accession: {accession}")
+
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        temp_file_path = os.path.join(temp_dir, new_filename)
         
-        # Create the response with explicit Content-Disposition header
-        response = make_response(send_file(
-            file_path,
-            as_attachment=True
-        ))
-        
-        # Explicitly set the Content-Disposition header
-        response.headers['Content-Disposition'] = f'attachment; filename="{new_filename}"'
-        print(f"Setting Content-Disposition header: attachment; filename=\"{new_filename}\"")
-        
-        return response
+        try:
+            # Copy original file to temp location with new name
+            shutil.copy2(file_path, temp_file_path)
+            print(f"Created temporary file: {temp_file_path}")
+            
+            # Send the temporary file with the enhanced filename
+            response = send_file(
+                temp_file_path,
+                as_attachment=True,
+                download_name=new_filename,
+                mimetype='image/png'
+            )
+            
+            # Clean up temp file after sending (Flask handles this automatically)
+            print(f"Sending file with enhanced name: {new_filename}")
+            return response
+            
+        except Exception as temp_error:
+            # Clean up temp directory if error occurs
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            raise temp_error
         
     except Exception as e:
         print(f"Error downloading single plot: {str(e)}")
@@ -2310,6 +2331,671 @@ def update_progress_file(progress_file, progress, debug=False):
         latest_data['ortho'] = progress
         if debug:
             print('Ortho progress updated:', progress)
+
+# Global variables for inference tracking
+inference_status = {
+    'running': False,
+    'progress': 0,
+    'message': '',
+    'error': None,
+    'results': None,
+    'completed': False
+}
+
+@file_app.route('/run_roboflow_inference', methods=['POST'])
+def run_roboflow_inference():
+    """
+    Run Roboflow inference on stitched plot images
+    """
+    global inference_status
+    
+    try:
+        data = request.json
+        api_url = data.get('apiUrl', 'https://infer.roboflow.com')
+        api_key = data.get('apiKey')
+        model_id = data.get('modelId')
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        sensor = data.get('sensor')
+        agrowstitch_dir = data.get('agrowstitchDir')
+        
+        if not all([api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+            
+        # Reset inference status
+        inference_status = {
+            'running': True,
+            'progress': 0,
+            'message': 'Initializing inference...',
+            'error': None,
+            'results': None,
+            'completed': False
+        }
+        
+        # Start inference in background thread
+        thread = threading.Thread(
+            target=run_roboflow_inference_worker,
+            args=(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir),
+            daemon=True
+        )
+        thread.start()
+        
+        return jsonify({'message': 'Inference started successfully'}), 200
+        
+    except Exception as e:
+        print(f"Error starting Roboflow inference: {e}")
+        inference_status['error'] = str(e)
+        return jsonify({'error': str(e)}), 500
+
+def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir):
+    """
+    Worker function to run Roboflow inference in background
+    """
+    global inference_status, data_root_dir
+    
+    try:
+        import requests
+        import os
+        import pandas as pd
+        import base64
+        import re
+        
+        inference_status['message'] = 'Loading plot images...'
+        inference_status['progress'] = 10
+        
+        # Build path to AgRowStitch plot images
+        plots_dir = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor, agrowstitch_dir
+        )
+        
+        if not os.path.exists(plots_dir):
+            inference_status['error'] = f'AgRowStitch directory not found: {plots_dir}'
+            inference_status['running'] = False
+            return
+            
+        # Find all plot image files
+        plot_files = [f for f in os.listdir(plots_dir) 
+                     if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+        
+        if not plot_files:
+            inference_status['error'] = 'No plot images found in AgRowStitch directory'
+            inference_status['running'] = False
+            return
+            
+        inference_status['message'] = f'Found {len(plot_files)} plot images'
+        inference_status['progress'] = 20
+        
+        # Load plot borders data for plot labels
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population, "plot_borders.csv"
+        )
+        
+        plot_data = {}
+        if os.path.exists(plot_borders_path):
+            try:
+                borders_df = pd.read_csv(plot_borders_path)
+                for _, row in borders_df.iterrows():
+                    plot_idx = row.get('plot_index')
+                    if pd.notna(plot_idx) and plot_idx > 0:
+                        plot_data[int(plot_idx)] = {
+                            'plot': row.get('Plot') if pd.notna(row.get('Plot')) else None,
+                            'accession': row.get('Accession') if pd.notna(row.get('Accession')) else None
+                        }
+            except Exception as e:
+                print(f"Warning: Could not load plot borders data: {e}")
+        
+        # Initialize results storage
+        all_predictions = []
+        label_counts = {}
+        
+        inference_status['message'] = 'Running inference on plots...'
+        inference_status['progress'] = 30
+        
+        for i, plot_file in enumerate(sorted(plot_files)):
+            try:
+                # Extract plot index from filename
+                plot_match = re.search(r'temp_plot_(\d+)', plot_file)
+                if not plot_match:
+                    continue
+                    
+                plot_index = int(plot_match.group(1))
+                plot_info = plot_data.get(plot_index, {})
+                
+                # Load and encode image
+                image_path = os.path.join(plots_dir, plot_file)
+                with open(image_path, 'rb') as img_file:
+                    img_data = img_file.read()
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+                
+                # Prepare Roboflow API request
+                roboflow_url = f"{api_url}/infer/image"
+                headers = {
+                    'Content-Type': 'application/json'
+                }
+                
+                payload = {
+                    'api_key': api_key,
+                    'model_id': model_id,
+                    'image': {
+                        'type': 'base64',
+                        'value': img_base64
+                    }
+                }
+                
+                # Make inference request
+                response = requests.post(roboflow_url, json=payload, headers=headers, timeout=60)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    predictions = result.get('predictions', [])
+                    
+                    # Process predictions
+                    for pred in predictions:
+                        prediction_data = {
+                            'plot_index': plot_index,
+                            'plot_label': plot_info.get('plot'),
+                            'accession': plot_info.get('accession'),
+                            'image_file': plot_file,
+                            'class': pred.get('class', ''),
+                            'confidence': pred.get('confidence', 0),
+                            'x': pred.get('x', 0),
+                            'y': pred.get('y', 0),
+                            'width': pred.get('width', 0),
+                            'height': pred.get('height', 0)
+                        }
+                        all_predictions.append(prediction_data)
+                        
+                        # Count labels
+                        class_name = pred.get('class', 'unknown')
+                        label_counts[class_name] = label_counts.get(class_name, 0) + 1
+                
+                else:
+                    print(f"Error in inference for {plot_file}: {response.status_code} - {response.text}")
+                
+                # Update progress
+                progress = 30 + int((i + 1) / len(plot_files) * 60)
+                inference_status['progress'] = progress
+                inference_status['message'] = f'Processed {i + 1}/{len(plot_files)} plots'
+                
+            except Exception as e:
+                print(f"Error processing {plot_file}: {e}")
+                continue
+        
+        # Save results to CSV
+        inference_status['message'] = 'Saving results...'
+        inference_status['progress'] = 95
+        
+        if all_predictions:
+            predictions_df = pd.DataFrame(all_predictions)
+            
+            # Create output directory
+            output_dir = os.path.join(
+                data_root_dir, 'Processed', year, experiment, location, population,
+                date, platform, sensor
+            )
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Save CSV
+            csv_filename = f"{date}_{platform}_{sensor}_{agrowstitch_dir}_roboflow_predictions.csv"
+            csv_path = os.path.join(output_dir, csv_filename)
+            predictions_df.to_csv(csv_path, index=False)
+            
+            # Prepare results summary
+            label_summary = [{'name': name, 'count': count} for name, count in label_counts.items()]
+            
+            inference_status['results'] = {
+                'csvPath': csv_path,
+                'totalPlots': len(plot_files),
+                'totalPredictions': len(all_predictions),
+                'labels': label_summary
+            }
+        else:
+            inference_status['results'] = {
+                'csvPath': None,
+                'totalPlots': len(plot_files),
+                'totalPredictions': 0,
+                'labels': []
+            }
+        
+        inference_status['message'] = 'Inference completed successfully!'
+        inference_status['progress'] = 100
+        inference_status['completed'] = True
+        inference_status['running'] = False
+        
+    except Exception as e:
+        print(f"Error in Roboflow inference worker: {e}")
+        inference_status['error'] = str(e)
+        inference_status['running'] = False
+
+@file_app.route('/get_inference_progress', methods=['GET'])
+def get_inference_progress():
+    """
+    Get current inference progress
+    """
+    return jsonify(inference_status)
+
+@file_app.route('/get_agrowstitch_versions', methods=['POST'])
+def get_agrowstitch_versions():
+    """
+    Get available AgRowStitch versions for a specific dataset
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        sensor = data.get('sensor')
+        
+        if not all([year, experiment, location, population, date, platform, sensor]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+            
+        # Build path to processed data
+        processed_dir = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor
+        )
+        
+        versions = []
+        if os.path.exists(processed_dir):
+            # Look for AgRowStitch directories (they typically start with 'AgRowStitch' or contain plot images)
+            for item in os.listdir(processed_dir):
+                item_path = os.path.join(processed_dir, item)
+                if os.path.isdir(item_path):
+                    # Check if directory contains plot images
+                    plot_files = [f for f in os.listdir(item_path) 
+                                 if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+                    if plot_files:
+                        versions.append(item)
+        
+        return jsonify({'versions': sorted(versions)}), 200
+        
+    except Exception as e:
+        print(f"Error getting AgRowStitch versions: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_inference_results', methods=['POST'])
+def get_inference_results():
+    """
+    Get available inference results for browsing and visualization
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        
+        if not all([year, experiment, location, population]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+            
+        results = []
+        
+        # Check processed directory for inference results
+        dates_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population)
+        
+        if not os.path.exists(dates_dir):
+            return jsonify({'results': results}), 200
+            
+        for date in os.listdir(dates_dir):
+            date_path = os.path.join(dates_dir, date)
+            if not os.path.isdir(date_path):
+                continue
+                
+            for platform in os.listdir(date_path):
+                platform_path = os.path.join(date_path, platform)
+                if not os.path.isdir(platform_path):
+                    continue
+                    
+                for sensor in os.listdir(platform_path):
+                    sensor_path = os.path.join(platform_path, sensor)
+                    if not os.path.isdir(sensor_path):
+                        continue
+                    
+                    # Look for inference CSV files
+                    for file in os.listdir(sensor_path):
+                        if file.endswith('_roboflow_predictions.csv'):
+                            csv_path = os.path.join(sensor_path, file)
+                            
+                            # Extract agrowstitch version from filename
+                            # Format: date_platform_sensor_agrowstitchversion_roboflow_predictions.csv
+                            parts = file.split('_')
+                            if len(parts) >= 5:
+                                agrowstitch_version = '_'.join(parts[3:-2])  # Everything between sensor and 'roboflow'
+                            else:
+                                agrowstitch_version = 'unknown'
+                            
+                            # Check if corresponding plot images exist
+                            agrowstitch_dir = os.path.join(sensor_path, agrowstitch_version)
+                            plot_images_exist = False
+                            plot_count = 0
+                            
+                            if os.path.exists(agrowstitch_dir):
+                                plot_files = [f for f in os.listdir(agrowstitch_dir) 
+                                            if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+                                plot_images_exist = len(plot_files) > 0
+                                plot_count = len(plot_files)
+                            
+                            # Get basic statistics from CSV
+                            total_predictions = 0
+                            classes_detected = []
+                            
+                            try:
+                                import pandas as pd
+                                df = pd.read_csv(csv_path)
+                                total_predictions = len(df)
+                                classes_detected = df['class'].value_counts().to_dict()
+                            except Exception as e:
+                                print(f"Error reading CSV {csv_path}: {e}")
+                            
+                            result_entry = {
+                                'id': f"{date}-{platform}-{sensor}-{agrowstitch_version}",
+                                'date': date,
+                                'platform': platform,
+                                'sensor': sensor,
+                                'agrowstitch_version': agrowstitch_version,
+                                'csv_path': csv_path,
+                                'total_predictions': total_predictions,
+                                'classes_detected': classes_detected,
+                                'plot_images_available': plot_images_exist,
+                                'plot_count': plot_count,
+                                'timestamp': os.path.getmtime(csv_path)
+                            }
+                            
+                            results.append(result_entry)
+        
+        # Sort results by timestamp (newest first)
+        results.sort(key=lambda x: x['timestamp'], reverse=True)
+        
+        return jsonify({'results': results}), 200
+        
+    except Exception as e:
+        print(f"Error getting inference results: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_plot_predictions', methods=['POST'])
+def get_plot_predictions():
+    """
+    Get predictions for a specific plot image to overlay bounding boxes
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        sensor = data.get('sensor')
+        agrowstitch_version = data.get('agrowstitch_version')
+        plot_filename = data.get('plot_filename')
+        
+        if not all([year, experiment, location, population, date, platform, sensor, agrowstitch_version, plot_filename]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+            
+        # Find the CSV file
+        csv_filename = f"{date}_{platform}_{sensor}_{agrowstitch_version}_roboflow_predictions.csv"
+        csv_path = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor, csv_filename
+        )
+        
+        if not os.path.exists(csv_path):
+            return jsonify({'error': 'Inference results not found'}), 404
+            
+        # Load predictions for this specific plot
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        
+        # Filter by image file
+        plot_predictions = df[df['image_file'] == plot_filename]
+        
+        # Convert to list of dictionaries
+        predictions = []
+        class_counts = {}
+        
+        for _, row in plot_predictions.iterrows():
+            prediction = {
+                'class': row['class'],
+                'confidence': float(row['confidence']),
+                'x': float(row['x']),
+                'y': float(row['y']),
+                'width': float(row['width']),
+                'height': float(row['height']),
+                'plot_index': int(row['plot_index']) if pd.notna(row['plot_index']) else None,
+                'plot_label': row['plot_label'] if pd.notna(row['plot_label']) else None,
+                'accession': row['accession'] if pd.notna(row['accession']) else None
+            }
+            predictions.append(prediction)
+            
+            # Count classes
+            class_name = row['class']
+            class_counts[class_name] = class_counts.get(class_name, 0) + 1
+        
+        return jsonify({
+            'predictions': predictions,
+            'class_counts': class_counts,
+            'total_detections': len(predictions)
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting plot predictions: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_data_options', methods=['GET'])
+def get_data_options():
+    """
+    Get all available years from the data directory
+    """
+    try:
+        years = []
+        raw_dir = os.path.join(data_root_dir, 'Raw')
+        
+        if os.path.exists(raw_dir):
+            years = [item for item in os.listdir(raw_dir) 
+                    if os.path.isdir(os.path.join(raw_dir, item)) and item.isdigit()]
+            years.sort()
+        
+        return jsonify({'years': years}), 200
+        
+    except Exception as e:
+        print(f"Error getting data options: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_experiments', methods=['POST'])
+def get_experiments():
+    """
+    Get available experiments for a given year
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        
+        if not year:
+            return jsonify({'error': 'Year is required'}), 400
+            
+        experiments = []
+        year_dir = os.path.join(data_root_dir, 'Raw', year)
+        
+        if os.path.exists(year_dir):
+            experiments = [item for item in os.listdir(year_dir) 
+                          if os.path.isdir(os.path.join(year_dir, item))]
+            experiments.sort()
+        
+        return jsonify({'experiments': experiments}), 200
+        
+    except Exception as e:
+        print(f"Error getting experiments: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_locations', methods=['POST'])
+def get_locations():
+    """
+    Get available locations for a given year and experiment
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        
+        if not all([year, experiment]):
+            return jsonify({'error': 'Year and experiment are required'}), 400
+            
+        locations = []
+        exp_dir = os.path.join(data_root_dir, 'Raw', year, experiment)
+        
+        if os.path.exists(exp_dir):
+            locations = [item for item in os.listdir(exp_dir) 
+                        if os.path.isdir(os.path.join(exp_dir, item))]
+            locations.sort()
+        
+        return jsonify({'locations': locations}), 200
+        
+    except Exception as e:
+        print(f"Error getting locations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_populations', methods=['POST'])
+def get_populations():
+    """
+    Get available populations for a given year, experiment, and location
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        
+        if not all([year, experiment, location]):
+            return jsonify({'error': 'Year, experiment, and location are required'}), 400
+            
+        populations = []
+        loc_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location)
+        
+        if os.path.exists(loc_dir):
+            populations = [item for item in os.listdir(loc_dir) 
+                          if os.path.isdir(os.path.join(loc_dir, item))]
+            populations.sort()
+        
+        return jsonify({'populations': populations}), 200
+        
+    except Exception as e:
+        print(f"Error getting populations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_dates', methods=['POST'])
+def get_dates():
+    """
+    Get available dates for a given year, experiment, location, and population
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        
+        if not all([year, experiment, location, population]):
+            return jsonify({'error': 'Year, experiment, location, and population are required'}), 400
+            
+        dates = []
+        # Check both Raw and Processed directories for dates
+        raw_pop_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location, population)
+        processed_pop_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population)
+        
+        date_set = set()
+        
+        # Check Raw directory
+        if os.path.exists(raw_pop_dir):
+            for item in os.listdir(raw_pop_dir):
+                item_path = os.path.join(raw_pop_dir, item)
+                if os.path.isdir(item_path) and item not in ['plot_borders.csv']:
+                    date_set.add(item)
+        
+        # Check Processed directory
+        if os.path.exists(processed_pop_dir):
+            for item in os.listdir(processed_pop_dir):
+                item_path = os.path.join(processed_pop_dir, item)
+                if os.path.isdir(item_path):
+                    date_set.add(item)
+        
+        dates = sorted(list(date_set))
+        
+        return jsonify({'dates': dates}), 200
+        
+    except Exception as e:
+        print(f"Error getting dates: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_platforms', methods=['POST'])
+def get_platforms():
+    """
+    Get available platforms for a given dataset
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        
+        if not all([year, experiment, location, population, date]):
+            return jsonify({'error': 'All parameters are required'}), 400
+            
+        platforms = []
+        # Check Processed directory for platforms
+        date_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+        
+        if os.path.exists(date_dir):
+            platforms = [item for item in os.listdir(date_dir) 
+                        if os.path.isdir(os.path.join(date_dir, item))]
+            platforms.sort()
+        
+        return jsonify({'platforms': platforms}), 200
+        
+    except Exception as e:
+        print(f"Error getting platforms: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_sensors', methods=['POST'])
+def get_sensors():
+    """
+    Get available sensors for a given dataset and platform
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        
+        if not all([year, experiment, location, population, date, platform]):
+            return jsonify({'error': 'All parameters are required'}), 400
+            
+        sensors = []
+        # Check Processed directory for sensors
+        platform_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform)
+        
+        if os.path.exists(platform_dir):
+            sensors = [item for item in os.listdir(platform_dir) 
+                      if os.path.isdir(os.path.join(platform_dir, item))]
+            sensors.sort()
+        
+        return jsonify({'sensors': sensors}), 200
+        
+    except Exception as e:
+        print(f"Error getting sensors: {e}")
+        return jsonify({'error': str(e)}), 500
                
 def monitor_log_updates(logs_path, progress_file):
     

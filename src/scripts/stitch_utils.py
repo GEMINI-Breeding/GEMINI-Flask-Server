@@ -409,7 +409,7 @@ def combine_utm_tiffs_to_mosaic(versioned_output_path: str, processed_plots: lis
             out_height = int((max_y - min_y) / output_pixel_size)
             
             # Safety check: prevent extremely large mosaics that could cause memory issues
-            max_dimension = 10000  # Maximum dimension in pixels
+            max_dimension = 5000  # Maximum dimension in pixels
             if out_width > max_dimension or out_height > max_dimension:
                 print(f"WARNING: Calculated output size {out_width}x{out_height} is too large!")
                 
@@ -433,15 +433,15 @@ def combine_utm_tiffs_to_mosaic(versioned_output_path: str, processed_plots: lis
             
             print(f"Output transform: {out_transform}")
             
-            # Create output array
-            mosaic = np.zeros((3, out_height, out_width), dtype=np.uint8)
+            # Create output array with white background (255 for all RGB channels)
+            mosaic = np.full((3, out_height, out_width), 255, dtype=np.uint8)
             
             # Reproject each source to the common grid
             for i, src in enumerate(srcs):
                 print(f"Reprojecting plot {processed_plots[i]}...")
                 
-                # Create temporary arrays for reprojection
-                temp_data = np.zeros((3, out_height, out_width), dtype=np.uint8)
+                # Create temporary arrays for reprojection with white background
+                temp_data = np.full((3, out_height, out_width), 255, dtype=np.uint8)
                 
                 # Reproject each band
                 for band_idx in range(3):
@@ -1124,7 +1124,7 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
                 
                 # DEBUG: Break after specified number of plots for testing
                 counter += 1
-                # if counter >= 3:
+                # if counter >= 6:
                 #     print(f"DEBUG: Breaking after {counter} plots to test combined mosaic creation")
                 #     break
                 
@@ -1172,9 +1172,7 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
             print(f"Successfully processed and georeferenced {len(processed_plots)} individual plots at full resolution")
             print("Individual georeferenced TIFF files created for maximum quality")
             print("Note: Combined mosaic will be created separately to avoid multiprocessing issues")
-                
-            if final_progress_callback:
-                final_progress_callback(90)  # Individual plots completed, mosaic creation pending
+            # Don't set progress here - let the finally block in complete_stitch_workflow handle it
         else:
             print("No plots were successfully processed")
             
@@ -1189,20 +1187,28 @@ def run_stitch_all_plots(msgs_synced_path, image_path, config_path, custom_optio
         print(f"Error in run_stitch_all_plots: {str(e)}")
 
 
-def create_combined_mosaic_separate(versioned_output_path: str, processed_plots: list, final_progress_callback=None):
+def create_combined_mosaic_separate(versioned_output_path: str, processed_plots: list, progress_callback=None, monitoring_stop_event=None):
     """
     Create combined mosaic separately from the main stitching process to avoid multiprocessing issues.
     This function is designed to be called after individual plot processing is complete.
     """
     try:
         print("=== STARTING SEPARATE MOSAIC CREATION ===")
+        
+        # Cancel monitoring thread since individual plot processing is done
+        if monitoring_stop_event:
+            print("Stopping monitoring thread - individual plot processing completed")
+            monitoring_stop_event.set()
+            time.sleep(1)  # Give monitoring thread a moment to stop cleanly
+            print("Monitoring thread stopped")
+        
         print(f"Creating combined mosaic from {len(processed_plots)} processed plots")
         print(f"Output directory: {versioned_output_path}")
         
         if not processed_plots:
             print("No processed plots provided for mosaic creation")
-            if final_progress_callback:
-                final_progress_callback(100)
+            if progress_callback:
+                progress_callback(100)
             return False
         
         # Create combined mosaic from all UTM files
@@ -1216,19 +1222,17 @@ def create_combined_mosaic_separate(versioned_output_path: str, processed_plots:
         else:
             print("WARNING: Failed to create combined mosaic")
             print("Individual georeferenced TIFF files still available for maximum quality")
-        
-        if final_progress_callback:
-            final_progress_callback(100)  # Completed everything
+        if progress_callback:
+            progress_callback(100)
         
         print("=== MOSAIC CREATION COMPLETED ===")
         return mosaic_success
         
     except Exception as e:
         print(f"ERROR in create_combined_mosaic_separate: {str(e)}")
-        import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        if final_progress_callback:
-            final_progress_callback(100)  # Mark as complete even on error
+        if progress_callback:
+            progress_callback(100)
         return False
 
 
@@ -1458,13 +1462,17 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
         raise
 
 
-def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest_data_callback=None):
+def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest_data_callback=None, stop_event=None):
     """Monitor multiple plot log files and aggregate progress"""
     try:
         # Wait for the final_mosaics directory to be created
         while not os.path.exists(final_mosaics_dir):
             print("Waiting for final_mosaics directory to be created...")
             time.sleep(5)
+            # Check if we should stop early
+            if stop_event and stop_event.is_set():
+                print("Monitoring stopped early - stop event set")
+                return
 
         print(f"Monitoring log files in: {final_mosaics_dir}")
         
@@ -1473,6 +1481,11 @@ def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest
         total_plots = len(processed_plots)
         
         while True:
+            # Check if we should stop
+            if stop_event and stop_event.is_set():
+                print("Monitoring stopped - stop event set")
+                break
+                
             # Check each plot's log file to see if it's completed
             for plot_index in processed_plots:
                 if plot_index not in completed_plots:
@@ -1484,8 +1497,11 @@ def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest
                             completed_plots.add(plot_index)
                             print(f"Plot {plot_index} completed!")
             
-            # Calculate progress based on completed plots (0-100% since no combined mosaic)
-            progress_percentage = int((len(completed_plots) / total_plots) * 100)
+            # Calculate progress based on completed plots (cap at 95% to let main workflow handle 100%)
+            if len(completed_plots) == total_plots:
+                progress_percentage = 95  # Cap at 95% when all individual plots done
+            else:
+                progress_percentage = int((len(completed_plots) / total_plots) * 95)  # Scale to 95% max
             
             # Update progress using callback if provided
             if latest_data_callback:
@@ -1494,14 +1510,17 @@ def monitor_stitch_updates_multi_plot(final_mosaics_dir, processed_plots, latest
             # Check if all plots are complete
             if len(completed_plots) == total_plots:
                 print("All individual plots completed and georeferenced!")
-                if latest_data_callback:
-                    latest_data_callback(100)
+                print("Monitoring thread stopping - main workflow will handle final completion")
+                # Don't set 100% here - let the main workflow handle final completion
+                # Stop the monitoring thread cleanly so it doesn't interfere with final progress
                 break
                 
             time.sleep(3)  # Check every 3 seconds
 
     except Exception as e:
         print(f"Error in log monitoring: {e}")
+    finally:
+        print("Monitoring thread terminated - no more progress updates from this thread")
 
 
 def is_plot_completed(log_file):
