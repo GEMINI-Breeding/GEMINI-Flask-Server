@@ -47,18 +47,14 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
     print(f"DEBUG: shift_amount: {shift_amount}, original_start_image_index: {original_start_image_index}")
     
-    # Handle shift_all logic for plot index adjustments
     if shift_all and shift_amount != 0 and original_plot_index is not None:
         print(f"DEBUG: Applying shift_all logic. Shift amount: {shift_amount}")
         
-        # Get all unique plot indices that are greater than the current plot
         unique_plots_to_shift = df[df['plot_index'] > current_plot_index]['plot_index'].unique()
         unique_plots_to_shift = unique_plots_to_shift[unique_plots_to_shift != -1]  # Exclude unassigned plots
         
         if len(unique_plots_to_shift) > 0:
             print(f"DEBUG: Found {len(unique_plots_to_shift)} plots to shift: {unique_plots_to_shift}")
-            
-            # Create a copy of the original plot assignments before clearing them
             plot_assignments = {}
             for plot_idx in unique_plots_to_shift:
                 plot_rows = df[df['plot_index'] == plot_idx].index.tolist()
@@ -66,22 +62,16 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
                     'rows': plot_rows,
                     'stitch_direction': df.loc[plot_rows[0], 'stitch_direction'] if plot_rows else None
                 }
-                # Clear the original assignments
                 df.loc[df['plot_index'] == plot_idx, 'plot_index'] = -1
                 df.loc[df['plot_index'] == plot_idx, 'stitch_direction'] = None
-            
-            # Now reassign each plot to its new shifted position
+        
             for plot_idx, assignment in plot_assignments.items():
                 old_rows = assignment['rows']
                 stitch_dir = assignment['stitch_direction']
                 
-                # Calculate new row positions by shifting
-                # If shift_amount is positive (original start was later), we moved earlier, so subsequent plots should also move earlier (subtract)
-                # If shift_amount is negative (original start was earlier), we moved later, so subsequent plots should also move later (add)
                 new_rows = []
                 for old_row in old_rows:
-                    new_row = old_row - shift_amount  # Reverse the direction
-                    # Ensure the new row is within bounds
+                    new_row = old_row - shift_amount  
                     if 0 <= new_row < len(df):
                         new_rows.append(new_row)
                 
@@ -96,7 +86,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     df.to_csv(csv_path, index=False)
 
     # Create or update plot_borders.csv
-    if not filter:
+    if not filter and plot_index not in df['plot_index'].values:
         try:
             start_lat = df.loc[start_row_index, 'lat']
             start_lon = df.loc[start_row_index, 'lon']
