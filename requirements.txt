@@ -73,3 +73,5 @@ utm
 requests
 piexif
 zipfile36
+inference-sdk
+inference

@@ -5,12 +5,15 @@ Handles all Roboflow API inference operations for plot analysis
 
 import os
 import threading
-import base64
 import re
+import tempfile
+import shutil
 import pandas as pd
-import requests
+import geopandas as gpd
+from PIL import Image
 from flask import jsonify, request
-
+from inference_sdk import InferenceHTTPClient
+from shapely.geometry import Polygon
 
 # Global variables for inference tracking
 inference_status = {
@@ -23,6 +26,379 @@ inference_status = {
 }
 
 
+def crop_image_with_overlap(image_path, crop_size=640, overlap=32):
+    """
+    Crop a large image into smaller patches with overlap
+    
+    Args:
+        image_path (str): Path to the image file
+        crop_size (int): Size of each crop (default 640x640)
+        overlap (int): Overlap between crops in pixels (default 32)
+    
+    Returns:
+        list: List of dictionaries containing crop info and file paths
+    """
+    try:
+        image = Image.open(image_path)
+        img_width, img_height = image.size
+        
+        crops = []
+        stride = crop_size - overlap
+        
+        y_positions = list(range(0, img_height - crop_size + 1, stride))
+        if y_positions and y_positions[-1] + crop_size < img_height:
+            y_positions.append(img_height - crop_size)
+        
+        x_positions = list(range(0, img_width - crop_size + 1, stride))
+        if x_positions and x_positions[-1] + crop_size < img_width:
+            x_positions.append(img_width - crop_size)
+        
+        # Handle cases where image is smaller than crop_size
+        if not y_positions:
+            y_positions = [0]
+        if not x_positions:
+            x_positions = [0]
+        
+        # Create temporary directory for crops
+        temp_dir = tempfile.mkdtemp()
+        
+        crop_id = 0
+        for y in y_positions:
+            for x in x_positions:
+                # Adjust coordinates if they would go beyond image boundaries
+                actual_x = min(x, img_width - crop_size) if img_width >= crop_size else 0
+                actual_y = min(y, img_height - crop_size) if img_height >= crop_size else 0
+                actual_width = min(crop_size, img_width - actual_x)
+                actual_height = min(crop_size, img_height - actual_y)
+                
+                # Crop the image
+                crop_box = (actual_x, actual_y, actual_x + actual_width, actual_y + actual_height)
+                crop = image.crop(crop_box)
+                
+                # If crop is smaller than desired size, pad with white background
+                if actual_width < crop_size or actual_height < crop_size:
+                    padded_crop = Image.new('RGB', (crop_size, crop_size), (255, 255, 255))
+                    padded_crop.paste(crop, (0, 0))
+                    crop = padded_crop
+                
+                # Save crop to temporary file
+                crop_filename = f"crop_{crop_id}.jpg"
+                crop_path = os.path.join(temp_dir, crop_filename)
+                crop.save(crop_path, format='JPEG', quality=85)
+                
+                crops.append({
+                    'crop_id': crop_id,
+                    'x_offset': actual_x,
+                    'y_offset': actual_y,
+                    'width': actual_width,
+                    'height': actual_height,
+                    'crop_path': crop_path,
+                    'temp_dir': temp_dir
+                })
+                
+                crop_id += 1
+        
+        return crops
+        
+    except Exception as e:
+        print(f"Error cropping image {image_path}: {e}")
+        return []
+
+
+def transform_predictions_to_plot_coordinates(predictions, crop_info):
+    """
+    Transform prediction coordinates from crop level to plot level
+    
+    Args:
+        predictions (list): List of predictions from a crop
+        crop_info (dict): Information about the crop (x_offset, y_offset, etc.)
+    
+    Returns:
+        list: Transformed predictions with plot-level coordinates
+    """
+    transformed = []
+    
+    for pred in predictions:
+        # Transform coordinates back to plot level
+        plot_x = pred.get('x', 0) + crop_info['x_offset']
+        plot_y = pred.get('y', 0) + crop_info['y_offset']
+        
+        transformed_pred = {
+            'class': pred.get('class', ''),
+            'confidence': pred.get('confidence', 0),
+            'x': plot_x,
+            'y': plot_y,
+            'width': pred.get('width', 0),
+            'height': pred.get('height', 0),
+            'crop_id': crop_info['crop_id']
+        }
+        
+        transformed.append(transformed_pred)
+    
+    return transformed
+
+
+def calculate_iou(box1, box2):
+    """
+    Calculate Intersection over Union (IoU) for two bounding boxes
+    
+    Args:
+        box1, box2: Dictionaries with keys 'x', 'y', 'width', 'height'
+    
+    Returns:
+        float: IoU value between 0 and 1
+    """
+    # Convert center coordinates to corner coordinates
+    x1_min = box1['x'] - box1['width'] / 2
+    y1_min = box1['y'] - box1['height'] / 2
+    x1_max = box1['x'] + box1['width'] / 2
+    y1_max = box1['y'] + box1['height'] / 2
+    
+    x2_min = box2['x'] - box2['width'] / 2
+    y2_min = box2['y'] - box2['height'] / 2
+    x2_max = box2['x'] + box2['width'] / 2
+    y2_max = box2['y'] + box2['height'] / 2
+    
+    # Calculate intersection
+    intersection_x_min = max(x1_min, x2_min)
+    intersection_y_min = max(y1_min, y2_min)
+    intersection_x_max = min(x1_max, x2_max)
+    intersection_y_max = min(y1_max, y2_max)
+    
+    if intersection_x_max <= intersection_x_min or intersection_y_max <= intersection_y_min:
+        return 0.0
+    
+    intersection_area = (intersection_x_max - intersection_x_min) * (intersection_y_max - intersection_y_min)
+    
+    # Calculate union
+    box1_area = box1['width'] * box1['height']
+    box2_area = box2['width'] * box2['height']
+    union_area = box1_area + box2_area - intersection_area
+    
+    if union_area == 0:
+        return 0.0
+    
+    return intersection_area / union_area
+
+
+def apply_nms(predictions, iou_threshold=0.5):
+    """
+    Apply Non-Maximum Suppression to remove duplicate detections
+    
+    Args:
+        predictions (list): List of predictions with coordinates and confidence
+        iou_threshold (float): IoU threshold for considering boxes as duplicates
+    
+    Returns:
+        list: Filtered predictions after NMS
+    """
+    if not predictions:
+        return []
+    
+    # Group predictions by class
+    class_groups = {}
+    for pred in predictions:
+        class_name = pred['class']
+        if class_name not in class_groups:
+            class_groups[class_name] = []
+        class_groups[class_name].append(pred)
+    
+    final_predictions = []
+    
+    # Apply NMS for each class separately
+    for class_name, class_predictions in class_groups.items():
+        # Sort by confidence (highest first)
+        class_predictions.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        keep = []
+        while class_predictions:
+            # Take the prediction with highest confidence
+            current = class_predictions.pop(0)
+            keep.append(current)
+            
+            # Remove predictions with high IoU overlap
+            remaining = []
+            for pred in class_predictions:
+                iou = calculate_iou(current, pred)
+                if iou < iou_threshold:
+                    remaining.append(pred)
+            
+            class_predictions = remaining
+        
+        final_predictions.extend(keep)
+    
+    return final_predictions
+
+
+def create_traits_geojson(predictions_df, data_root_dir, year, experiment, location, population, date, platform, sensor, agrowstitch_dir):
+    """
+    Create a GeoJSON file with detection counts per plot for integration with the stats/map tabs
+    
+    Args:
+        predictions_df (pd.DataFrame): DataFrame with all predictions
+        data_root_dir (str): Root data directory
+        year, experiment, location, population, date, platform, sensor, agrowstitch_dir: Dataset parameters
+    
+    Returns:
+        str: Path to created GeoJSON file
+    """
+    try:
+        # Look for existing plot boundary GeoJSON first
+        plot_boundary_geojson = os.path.join(
+            data_root_dir, 'Intermediate', year, experiment, location, population, 'Plot-Boundary-WGS84.geojson'
+        )
+        
+        # If no plot boundary GeoJSON, try to create from plot_borders.csv
+        if not os.path.exists(plot_boundary_geojson):
+            plot_borders_csv = os.path.join(
+                data_root_dir, "Raw", year, experiment, location, population, "plot_borders.csv"
+            )
+            
+            if not os.path.exists(plot_borders_csv):
+                print("Warning: No plot boundaries found for traits export")
+                return None
+            
+            # Create simple plot boundaries from CSV (this is a simplified approach)
+            borders_df = pd.read_csv(plot_borders_csv)
+            
+            # Create simple rectangular geometries from start/end coordinates
+            geometries = []
+            for _, row in borders_df.iterrows():
+                # Create a simple rectangular polygon from start/end coordinates
+                # This is a simplified approach - in reality you'd want proper plot boundaries
+                start_lat, start_lon = row['start_lat'], row['start_lon']
+                end_lat, end_lon = row['end_lat'], row['end_lon']
+                
+                # Create a small buffer around the line to make a polygon
+                buffer_size = 0.00001  # Small buffer in degrees
+                coords = [
+                    (start_lon - buffer_size, start_lat - buffer_size),
+                    (start_lon + buffer_size, start_lat + buffer_size),
+                    (end_lon + buffer_size, end_lat + buffer_size),
+                    (end_lon - buffer_size, end_lat - buffer_size),
+                    (start_lon - buffer_size, start_lat - buffer_size)
+                ]
+                geometries.append(Polygon(coords))
+            
+            # Create GeoDataFrame with plot info
+            plot_gdf = gpd.GeoDataFrame({
+                'plot_index': borders_df['plot_index'],
+                'Plot': borders_df.get('Plot', borders_df['plot_index']),
+                'Bed': borders_df.get('Bed', 1),
+                'Tier': borders_df.get('Tier', 1),
+                'accession': borders_df.get('Accession', 'Unknown'),
+                'population': population,
+                'geometry': geometries
+            }, crs='EPSG:4326')
+        else:
+            # Load existing plot boundary GeoJSON
+            plot_gdf = gpd.read_file(plot_boundary_geojson)
+        
+        # Aggregate predictions by plot
+        if not predictions_df.empty:
+            # Calculate total detections per plot
+            total_detections = predictions_df.groupby('plot_index').size()
+            
+            # Create summary columns for each detected class
+            class_columns = {}
+            for class_name in predictions_df['class'].unique():
+                if pd.notna(class_name):
+                    class_counts = predictions_df[predictions_df['class'] == class_name].groupby('plot_index').size()
+                    class_columns[f'Total {class_name.title()}'] = class_counts
+            
+            # Merge with plot boundaries
+            traits_gdf = plot_gdf.copy()
+            
+            # Add detection counts to the GeoDataFrame
+            for plot_idx in traits_gdf['plot_index']:
+                if plot_idx in total_detections.index:
+                    traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, 'Total Detections'] = int(total_detections[plot_idx])
+                else:
+                    traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, 'Total Detections'] = 0
+                
+                # Add individual class counts
+                for class_col, class_series in class_columns.items():
+                    if plot_idx in class_series.index:
+                        traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, class_col] = int(class_series[plot_idx])
+                    else:
+                        traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, class_col] = 0
+        else:
+            # No predictions found, just add zero counts
+            traits_gdf = plot_gdf.copy()
+            traits_gdf['Total Detections'] = 0
+        
+        # Ensure standard columns exist
+        required_columns = ['Bed', 'Tier', 'Plot', 'accession', 'population']
+        for col in required_columns:
+            if col not in traits_gdf.columns:
+                if col == 'Plot':
+                    traits_gdf[col] = traits_gdf['plot_index']
+                elif col == 'Bed':
+                    traits_gdf[col] = 1
+                elif col == 'Tier':
+                    traits_gdf[col] = 1
+                elif col == 'accession':
+                    traits_gdf[col] = 'Unknown'
+                elif col == 'population':
+                    traits_gdf[col] = population
+        
+        # Convert data types
+        traits_gdf['Bed'] = traits_gdf['Bed'].astype(int)
+        traits_gdf['Tier'] = traits_gdf['Tier'].astype(int)
+        traits_gdf['Total Detections'] = traits_gdf['Total Detections'].astype(int)
+        
+        # Save the traits GeoJSON file
+        output_dir = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        
+        geojson_filename = f"{date}-{platform}-{sensor}-Traits-WGS84.geojson"
+        geojson_path = os.path.join(output_dir, geojson_filename)
+        
+        # Check if traits file already exists and merge if so
+        if os.path.exists(geojson_path):
+            try:
+                existing_gdf = gpd.read_file(geojson_path)
+                
+                # Merge on common columns, keeping all existing traits and adding new detection data
+                merge_columns = ['Bed', 'Tier', 'Plot', 'accession', 'population', 'geometry']
+                
+                # Only merge on columns that exist in both dataframes
+                available_merge_cols = [col for col in merge_columns if col in existing_gdf.columns and col in traits_gdf.columns]
+                
+                if available_merge_cols:
+                    # Update existing records with new detection data
+                    for idx, row in traits_gdf.iterrows():
+                        # Find matching row in existing data
+                        plot_idx = row.get('plot_index', row.get('Plot'))
+                        mask = existing_gdf['Plot'] == plot_idx
+                        
+                        if mask.any():
+                            # Update existing row with new detection data
+                            for col in traits_gdf.columns:
+                                if col.startswith('Total ') and col not in existing_gdf.columns:
+                                    existing_gdf.loc[mask, col] = row[col]
+                                elif col.startswith('Total '):
+                                    existing_gdf.loc[mask, col] = row[col]
+                    
+                    traits_gdf = existing_gdf
+                
+            except Exception as e:
+                print(f"Warning: Could not merge with existing traits file: {e}")
+        
+        # Save the final GeoJSON
+        traits_gdf.to_file(geojson_path, driver='GeoJSON')
+        print(f"Saved traits GeoJSON: {geojson_path}")
+        
+        return geojson_path
+        
+    except Exception as e:
+        print(f"Error creating traits GeoJSON: {e}")
+        return None
+
+
 def run_roboflow_inference_endpoint(file_app, data_root_dir):
     """
     Run Roboflow inference on stitched plot images
@@ -33,7 +409,7 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
         
         try:
             data = request.json
-            api_url = data.get('apiUrl', 'https://infer.roboflow.com')
+            api_url = data.get('apiUrl', 'https://detect.roboflow.com')
             api_key = data.get('apiKey')
             model_id = data.get('modelId')
             year = data.get('year')
@@ -130,6 +506,20 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
         all_predictions = []
         label_counts = {}
         
+        # Initialize Roboflow client
+        inference_status['message'] = 'Initializing Roboflow client...'
+        inference_status['progress'] = 25
+        
+        try:
+            client = InferenceHTTPClient(
+                api_url=api_url,
+                api_key=api_key
+            )
+        except Exception as e:
+            inference_status['error'] = f'Failed to initialize Roboflow client: {e}'
+            inference_status['running'] = False
+            return
+        
         inference_status['message'] = 'Running inference on plots...'
         inference_status['progress'] = 30
         
@@ -143,61 +533,86 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                 plot_index = int(plot_match.group(1))
                 plot_info = plot_data.get(plot_index, {})
                 
-                # Load and encode image
+                # Get full image path
                 image_path = os.path.join(plots_dir, plot_file)
-                with open(image_path, 'rb') as img_file:
-                    img_data = img_file.read()
-                    img_base64 = base64.b64encode(img_data).decode('utf-8')
                 
-                # Prepare Roboflow API request
-                roboflow_url = f"{api_url}/infer/image"
-                headers = {
-                    'Content-Type': 'application/json'
-                }
+                inference_status['message'] = f'Processing plot {plot_index} ({i + 1}/{len(plot_files)}) - cropping image...'
                 
-                payload = {
-                    'api_key': api_key,
-                    'model_id': model_id,
-                    'image': {
-                        'type': 'base64',
-                        'value': img_base64
-                    }
-                }
+                # Crop the image into patches with overlap
+                crops = crop_image_with_overlap(image_path, crop_size=640, overlap=32)
+
+                if not crops:
+                    print(f"Warning: No crops generated for {plot_file}")
+                    continue
                 
-                # Make inference request
-                response = requests.post(roboflow_url, json=payload, headers=headers, timeout=60)
+                plot_predictions = []
+                temp_dirs_to_cleanup = set()
                 
-                if response.status_code == 200:
-                    result = response.json()
-                    predictions = result.get('predictions', [])
-                    
-                    # Process predictions
-                    for pred in predictions:
-                        prediction_data = {
-                            'plot_index': plot_index,
-                            'plot_label': plot_info.get('plot'),
-                            'accession': plot_info.get('accession'),
-                            'image_file': plot_file,
-                            'class': pred.get('class', ''),
-                            'confidence': pred.get('confidence', 0),
-                            'x': pred.get('x', 0),
-                            'y': pred.get('y', 0),
-                            'width': pred.get('width', 0),
-                            'height': pred.get('height', 0)
-                        }
-                        all_predictions.append(prediction_data)
+                # Process each crop
+                for j, crop_info in enumerate(crops):
+                    try:
+                        inference_status['message'] = f'Processing plot {plot_index} crop {j + 1}/{len(crops)}'
                         
-                        # Count labels
-                        class_name = pred.get('class', 'unknown')
-                        label_counts[class_name] = label_counts.get(class_name, 0) + 1
+                        # Track temp directory for cleanup
+                        temp_dirs_to_cleanup.add(crop_info['temp_dir'])
+                        
+                        # Use Roboflow SDK for inference
+                        result = client.infer(crop_info['crop_path'], model_id=model_id)
+                        
+                        if 'predictions' in result:
+                            crop_predictions = result['predictions']
+                            
+                            # Transform predictions to plot coordinates
+                            transformed_predictions = transform_predictions_to_plot_coordinates(
+                                crop_predictions, crop_info
+                            )
+                            
+                            plot_predictions.extend(transformed_predictions)
+                            
+                        else:
+                            print(f"No predictions found for {plot_file} crop {j}")
+                    
+                    except Exception as e:
+                        print(f"Error processing crop {j} of {plot_file}: {e}")
+                        continue
                 
-                else:
-                    print(f"Error in inference for {plot_file}: {response.status_code} - {response.text}")
+                # Clean up temporary crop files
+                for temp_dir in temp_dirs_to_cleanup:
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except Exception as e:
+                        print(f"Warning: Could not clean up temp directory {temp_dir}: {e}")
+                
+                # Apply Non-Maximum Suppression to remove duplicate detections
+                inference_status['message'] = f'Applying NMS to plot {plot_index} predictions...'
+                final_predictions = apply_nms(plot_predictions, iou_threshold=0.5)
+                
+                # Process final predictions for this plot
+                for pred in final_predictions:
+                    prediction_data = {
+                        'plot_index': plot_index,
+                        'plot_label': plot_info.get('plot'),
+                        'accession': plot_info.get('accession'),
+                        'image_file': plot_file,
+                        'class': pred.get('class', ''),
+                        'confidence': pred.get('confidence', 0),
+                        'x': pred.get('x', 0),
+                        'y': pred.get('y', 0),
+                        'width': pred.get('width', 0),
+                        'height': pred.get('height', 0)
+                    }
+                    all_predictions.append(prediction_data)
+                    
+                    # Count labels
+                    class_name = pred.get('class', 'unknown')
+                    label_counts[class_name] = label_counts.get(class_name, 0) + 1
+                
+                print(f"Processed plot {plot_index}: {len(crops)} crops -> {len(plot_predictions)} raw predictions -> {len(final_predictions)} final predictions")
                 
                 # Update progress
                 progress = 30 + int((i + 1) / len(plot_files) * 60)
                 inference_status['progress'] = progress
-                inference_status['message'] = f'Processed {i + 1}/{len(plot_files)} plots'
+                inference_status['message'] = f'Completed plot {plot_index} ({i + 1}/{len(plot_files)})'
                 
             except Exception as e:
                 print(f"Error processing {plot_file}: {e}")
@@ -222,11 +637,19 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
             csv_path = os.path.join(output_dir, csv_filename)
             predictions_df.to_csv(csv_path, index=False)
             
+            # Create traits GeoJSON for integration with stats/map tabs
+            inference_status['message'] = 'Creating traits GeoJSON...'
+            geojson_path = create_traits_geojson(
+                predictions_df, data_root_dir, year, experiment, location, 
+                population, date, platform, sensor, agrowstitch_dir
+            )
+            
             # Prepare results summary
             label_summary = [{'name': name, 'count': count} for name, count in label_counts.items()]
             
             inference_status['results'] = {
                 'csvPath': csv_path,
+                'geojsonPath': geojson_path,
                 'totalPlots': len(plot_files),
                 'totalPredictions': len(all_predictions),
                 'labels': label_summary
@@ -234,6 +657,7 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
         else:
             inference_status['results'] = {
                 'csvPath': None,
+                'geojsonPath': None,
                 'totalPlots': len(plot_files),
                 'totalPredictions': 0,
                 'labels': []
