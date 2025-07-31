@@ -130,7 +130,9 @@ def transform_predictions_to_plot_coordinates(predictions, crop_info):
             'y': plot_y,
             'width': pred.get('width', 0),
             'height': pred.get('height', 0),
-            'crop_id': crop_info['crop_id']
+            'crop_id': crop_info['crop_id'],
+            'model_id': pred.get('model_id'),
+            'model_version': pred.get('model_version')
         }
         
         transformed.append(transformed_pred)
@@ -243,23 +245,41 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         str: Path to created GeoJSON file
     """
     try:
+        print(f"DEBUG: Starting create_traits_geojson with parameters:")
+        print(f"  data_root_dir: {data_root_dir}")
+        print(f"  year: {year}, experiment: {experiment}, location: {location}")
+        print(f"  population: {population}, date: {date}, platform: {platform}, sensor: {sensor}")
+        print(f"  agrowstitch_dir: {agrowstitch_dir}")
+        print(f"  predictions_df shape: {predictions_df.shape}")
+        
         # Look for existing plot boundary GeoJSON first
         plot_boundary_geojson = os.path.join(
             data_root_dir, 'Intermediate', year, experiment, location, population, 'Plot-Boundary-WGS84.geojson'
         )
         
+        print(f"DEBUG: Looking for plot boundary GeoJSON at: {plot_boundary_geojson}")
+        
         # If no plot boundary GeoJSON, try to create from plot_borders.csv
         if not os.path.exists(plot_boundary_geojson):
+            print(f"DEBUG: Plot boundary GeoJSON not found, looking for plot_borders.csv")
             plot_borders_csv = os.path.join(
                 data_root_dir, "Raw", year, experiment, location, population, "plot_borders.csv"
             )
             
+            print(f"DEBUG: Looking for plot borders CSV at: {plot_borders_csv}")
+            
             if not os.path.exists(plot_borders_csv):
-                print("Warning: No plot boundaries found for traits export")
+                print(f"ERROR: No plot boundaries found for traits export!")
+                print(f"  Missing: {plot_boundary_geojson}")
+                print(f"  Missing: {plot_borders_csv}")
+                print(f"  Cannot create traits GeoJSON without plot boundaries")
                 return None
             
             # Create simple plot boundaries from CSV (this is a simplified approach)
             borders_df = pd.read_csv(plot_borders_csv)
+            print(f"DEBUG: Plot borders CSV columns: {list(borders_df.columns)}")
+            print("DEBUG: First few rows of borders CSV:")
+            print(borders_df.head())
             
             # Create simple rectangular geometries from start/end coordinates
             geometries = []
@@ -284,78 +304,147 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
             plot_gdf = gpd.GeoDataFrame({
                 'plot_index': borders_df['plot_index'],
                 'Plot': borders_df.get('Plot', borders_df['plot_index']),
-                'Bed': borders_df.get('Bed', 1),
-                'Tier': borders_df.get('Tier', 1),
-                'accession': borders_df.get('Accession', 'Unknown'),
+                'accession': borders_df.get('Accession', 'Unknown'),  # Map Accession to accession for consistency
                 'population': population,
                 'geometry': geometries
             }, crs='EPSG:4326')
         else:
             # Load existing plot boundary GeoJSON
             plot_gdf = gpd.read_file(plot_boundary_geojson)
+            print(f"DEBUG: Loaded plot boundary GeoJSON with columns: {list(plot_gdf.columns)}")
+            print("DEBUG: First few rows of plot GeoJSON:")
+            print(plot_gdf[['plot_index'] if 'plot_index' in plot_gdf.columns else plot_gdf.columns[:3]].head())
+            
+        # Also ensure we have a 'Plot' column for the final output (Stats/Map tabs expect this)
+        if 'Plot' not in plot_gdf.columns or plot_gdf['Plot'].isna().all():
+            if 'plot' in plot_gdf.columns:
+                print("DEBUG: Using 'plot' column to populate 'Plot' column")
+                plot_gdf['Plot'] = plot_gdf['plot']
+            else:
+                plot_gdf['Plot'] = plot_gdf['plot_index']
+        
+        print(f"DEBUG: Plot GeoDataFrame shape: {plot_gdf.shape}")
+        
+        # Filter to only include plots with labeled accessions (non-null, non-'Unknown')
+        if 'accession' in plot_gdf.columns:
+            # Convert to string and handle various empty representations
+            plot_gdf['accession'] = plot_gdf['accession'].astype(str)
+            labeled_plots = plot_gdf[
+                (plot_gdf['accession'].notna()) & 
+                (plot_gdf['accession'] != 'Unknown') & 
+                (plot_gdf['accession'] != '') &
+                (plot_gdf['accession'] != 'NaN') &
+                (plot_gdf['accession'] != 'nan') &
+                (plot_gdf['accession'].str.strip() != '')  # Handle whitespace-only strings
+            ].copy()
+            
+            print(f"DEBUG: Original plots: {len(plot_gdf)}, Labeled plots: {len(labeled_plots)}")
+            print(f"DEBUG: Labeled plot accessions: {labeled_plots['accession'].tolist()}")
+            
+            if len(labeled_plots) > 0:
+                plot_gdf = labeled_plots
+                # Create mapping from AgRowStitch plot_index to whether it should be included
+                # The predictions use sequential plot_index (0,1,2,3...) from AgRowStitch
+                # But plot_gdf has the actual field plot numbers in plot_index
+                # We need to map based on position/sequence instead
+                # print(f"DEBUG: Plot boundaries plot_index range: {plot_gdf['plot_index'].tolist()}")
+            else:
+                print("WARNING: No labeled plots found, using all plots")
+        else:
+            print("WARNING: No accession column found, using all plots")
         
         # Aggregate predictions by plot
         if not predictions_df.empty:
-            # Calculate total detections per plot
-            total_detections = predictions_df.groupby('plot_index').size()
+            # print(f"DEBUG: Predictions plot_index values: {sorted(predictions_df['plot_index'].unique())}")
+            # print(f"DEBUG: Plot boundaries plot_index values: {sorted(plot_gdf['plot_index'].unique())}")
             
-            # Create summary columns for each detected class
+            # Map AgRowStitch sequential plot_index to field plot number (Plot column)
+            plot_mapping = {}
+            for _, row in plot_gdf.iterrows():
+                seq_idx = row['plot_label']
+                plot_mapping[seq_idx] = {
+                    'Plot': row['Plot'],
+                    'accession': row.get('Accession', row.get('accession', 'Unknown'))
+                }
+            print(f"DEBUG: Plot mapping created: {plot_mapping}")
+
+            # Update predictions to use the correct field plot number and accession
+            predictions_df['field_plot_number'] = predictions_df['plot_label'].map(
+                lambda x: plot_mapping.get(x, {}).get('Plot', None)
+            )
+            predictions_df['accession'] = predictions_df['plot_label'].map(
+                lambda x: plot_mapping.get(x, {}).get('accession', None)
+            )
+            # Only keep predictions that map to a valid field plot number
+            predictions_df = predictions_df[predictions_df['field_plot_number'].notnull()]
+            predictions_df['accession'] = predictions_df['field_plot_number'].map(
+                lambda x: plot_mapping.get(x, {}).get('accession', '')
+            )
+            
+            # Use field_plot_number for grouping and output
+            predictions_df['plot_label'] = predictions_df['field_plot_number']
+
+            # Calculate total detections per field plot
+            total_detections = predictions_df.groupby('plot_label').size()
+
+            # Get model_id from predictions (should be consistent across all predictions)
+            model_id = predictions_df['model_id'].iloc[0] if 'model_id' in predictions_df.columns and not predictions_df['model_id'].isna().all() else 'unknown'
+
+            # Create summary columns for each detected class using model_id/class format
             class_columns = {}
             for class_name in predictions_df['class'].unique():
                 if pd.notna(class_name):
-                    class_counts = predictions_df[predictions_df['class'] == class_name].groupby('plot_index').size()
-                    class_columns[f'Total {class_name.title()}'] = class_counts
-            
+                    class_counts = predictions_df[predictions_df['class'] == class_name].groupby('plot_label').size()
+                    # Use model_id/class_label format for trait names
+                    trait_name = f"{model_id}/{class_name}" if model_id != 'unknown' else class_name
+                    class_columns[trait_name] = class_counts
+
+            print(f"DEBUG: Created class columns: {list(class_columns.keys())}")
+            print(f"DEBUG: Total detections by plot: {dict(total_detections)}")
+
             # Merge with plot boundaries
             traits_gdf = plot_gdf.copy()
-            
-            # Add detection counts to the GeoDataFrame
-            for plot_idx in traits_gdf['plot_index']:
-                if plot_idx in total_detections.index:
-                    traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, 'Total Detections'] = int(total_detections[plot_idx])
-                else:
-                    traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, 'Total Detections'] = 0
-                
-                # Add individual class counts
-                for class_col, class_series in class_columns.items():
-                    if plot_idx in class_series.index:
-                        traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, class_col] = int(class_series[plot_idx])
-                    else:
-                        traits_gdf.loc[traits_gdf['plot_index'] == plot_idx, class_col] = 0
-        else:
-            # No predictions found, just add zero counts
-            traits_gdf = plot_gdf.copy()
-            traits_gdf['Total Detections'] = 0
+
+            # Add detection counts to the GeoDataFrame (only individual class counts, no total column)
+            for idx, row in traits_gdf.iterrows():
+                field_plot_number = row['Plot']
+                for trait_name in class_columns.keys():
+                    # Always add trait columns, even if zero
+                    traits_gdf.at[idx, trait_name] = class_columns[trait_name].get(field_plot_number, 0)
+
+            # Add plot_label and accession columns to output
+            traits_gdf['plot_label'] = traits_gdf['Plot']
+            if 'Accession' in traits_gdf.columns:
+                traits_gdf['accession'] = traits_gdf['Accession']
+            elif 'accession' in traits_gdf.columns:
+                traits_gdf['accession'] = traits_gdf['accession']
         
-        # Ensure standard columns exist
-        required_columns = ['Bed', 'Tier', 'Plot', 'accession', 'population']
-        for col in required_columns:
-            if col not in traits_gdf.columns:
-                if col == 'Plot':
-                    traits_gdf[col] = traits_gdf['plot_index']
-                elif col == 'Bed':
-                    traits_gdf[col] = 1
-                elif col == 'Tier':
-                    traits_gdf[col] = 1
-                elif col == 'accession':
-                    traits_gdf[col] = 'Unknown'
-                elif col == 'population':
-                    traits_gdf[col] = population
+        # Convert detection count columns to int
+        detection_columns = [col for col in traits_gdf.columns if 'Total_Detections' in col or '/' in col]
+        for col in detection_columns:
+            traits_gdf[col] = traits_gdf[col].astype(int)
         
-        # Convert data types
-        traits_gdf['Bed'] = traits_gdf['Bed'].astype(int)
-        traits_gdf['Tier'] = traits_gdf['Tier'].astype(int)
-        traits_gdf['Total Detections'] = traits_gdf['Total Detections'].astype(int)
-        
-        # Save the traits GeoJSON file
+        # Save the traits GeoJSON file at the ORTHOMOSAIC VERSION level (not sensor level)
+        # This allows multiple orthomosaic versions to have separate trait files
         output_dir = os.path.join(
             data_root_dir, 'Processed', year, experiment, location, population,
-            date, platform, sensor
+            date, platform, sensor, agrowstitch_dir
         )
+        
+        print(f"DEBUG: Creating output directory at orthomosaic level: {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
         
-        geojson_filename = f"{date}-{platform}-{sensor}-Traits-WGS84.geojson"
+        # Verify directory was created
+        if os.path.exists(output_dir):
+            print(f"Output directory exists: {output_dir}")
+        else:
+            print(f"ERROR: Failed to create output directory: {output_dir}")
+        
+        # Include agrowstitch_dir in the filename to make it unique per version
+        geojson_filename = f"{date}-{platform}-{sensor}-{agrowstitch_dir}-Traits-WGS84.geojson"
         geojson_path = os.path.join(output_dir, geojson_filename)
+        
+        print(f"DEBUG: Full GeoJSON path will be: {geojson_path}")
         
         # Check if traits file already exists and merge if so
         if os.path.exists(geojson_path):
@@ -363,7 +452,7 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
                 existing_gdf = gpd.read_file(geojson_path)
                 
                 # Merge on common columns, keeping all existing traits and adding new detection data
-                merge_columns = ['Bed', 'Tier', 'Plot', 'accession', 'population', 'geometry']
+                merge_columns = ['Plot', 'accession', 'population', 'geometry']
                 
                 # Only merge on columns that exist in both dataframes
                 available_merge_cols = [col for col in merge_columns if col in existing_gdf.columns and col in traits_gdf.columns]
@@ -372,15 +461,18 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
                     # Update existing records with new detection data
                     for idx, row in traits_gdf.iterrows():
                         # Find matching row in existing data
-                        plot_idx = row.get('plot_index', row.get('Plot'))
-                        mask = existing_gdf['Plot'] == plot_idx
+                        plot_val = row.get('Plot')
+                        mask = existing_gdf['Plot'] == plot_val
                         
                         if mask.any():
                             # Update existing row with new detection data
                             for col in traits_gdf.columns:
-                                if col.startswith('Total ') and col not in existing_gdf.columns:
+                                # Add new detection columns (model_id/class or Total_Detections_*)
+                                if (('/' in col and col not in existing_gdf.columns) or 
+                                    ('Total_Detections_' in col and col not in existing_gdf.columns)):
                                     existing_gdf.loc[mask, col] = row[col]
-                                elif col.startswith('Total '):
+                                # Update existing detection columns
+                                elif ('/' in col or 'Total_Detections_' in col):
                                     existing_gdf.loc[mask, col] = row[col]
                     
                     traits_gdf = existing_gdf
@@ -391,6 +483,13 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         # Save the final GeoJSON
         traits_gdf.to_file(geojson_path, driver='GeoJSON')
         print(f"Saved traits GeoJSON: {geojson_path}")
+        
+        # Verify the file was actually created
+        if os.path.exists(geojson_path):
+            print(f"GeoJSON file successfully created and verified at: {geojson_path}")
+            print(f"File size: {os.path.getsize(geojson_path)} bytes")
+        else:
+            print(f"ERROR: GeoJSON file was not created at: {geojson_path}")
         
         return geojson_path
         
@@ -562,6 +661,20 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                         if 'predictions' in result:
                             crop_predictions = result['predictions']
                             
+                            # Extract model version from result if available
+                            model_version = None
+                            if hasattr(result, 'model') and hasattr(result.model, 'version'):
+                                model_version = result.model.version
+                            elif isinstance(result, dict) and 'model' in result:
+                                model_info = result['model']
+                                if isinstance(model_info, dict) and 'version' in model_info:
+                                    model_version = model_info['version']
+                            
+                            # Add model information to each prediction
+                            for pred in crop_predictions:
+                                pred['model_id'] = model_id
+                                pred['model_version'] = model_version
+                            
                             # Transform predictions to plot coordinates
                             transformed_predictions = transform_predictions_to_plot_coordinates(
                                 crop_predictions, crop_info
@@ -599,7 +712,9 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                         'x': pred.get('x', 0),
                         'y': pred.get('y', 0),
                         'width': pred.get('width', 0),
-                        'height': pred.get('height', 0)
+                        'height': pred.get('height', 0),
+                        'model_id': pred.get('model_id'),
+                        'model_version': pred.get('model_version')
                     }
                     all_predictions.append(prediction_data)
                     
@@ -775,12 +890,12 @@ def get_inference_results_endpoint(file_app, data_root_dir):
                                 # Format: date_platform_sensor_agrowstitchversion_roboflow_predictions.csv
                                 parts = file.split('_')
                                 if len(parts) >= 5:
-                                    agrowstitch_version = '_'.join(parts[3:-2])  # Everything between sensor and 'roboflow'
+                                    orthomosaic_version = '_'.join(parts[3:-2])  # Everything between sensor and 'roboflow'
                                 else:
-                                    agrowstitch_version = 'unknown'
+                                    orthomosaic_version = 'unknown'
                                 
                                 # Check if corresponding plot images exist
-                                agrowstitch_dir = os.path.join(sensor_path, agrowstitch_version)
+                                agrowstitch_dir = os.path.join(sensor_path, orthomosaic_version)
                                 plot_images_exist = False
                                 plot_count = 0
                                 
@@ -790,23 +905,34 @@ def get_inference_results_endpoint(file_app, data_root_dir):
                                     plot_images_exist = len(plot_files) > 0
                                     plot_count = len(plot_files)
                                 
-                                # Get basic statistics from CSV
+                                # Get basic statistics from CSV including model information
                                 total_predictions = 0
                                 classes_detected = []
+                                model_id_used = None
+                                model_version_used = None
                                 
                                 try:
                                     df = pd.read_csv(csv_path)
                                     total_predictions = len(df)
                                     classes_detected = df['class'].value_counts().to_dict()
+                                    
+                                    # Extract model information from first prediction if available
+                                    if not df.empty:
+                                        if 'model_id' in df.columns:
+                                            model_id_used = df['model_id'].iloc[0] if pd.notna(df['model_id'].iloc[0]) else None
+                                        if 'model_version' in df.columns:
+                                            model_version_used = df['model_version'].iloc[0] if pd.notna(df['model_version'].iloc[0]) else None
                                 except Exception as e:
                                     print(f"Error reading CSV {csv_path}: {e}")
                                 
                                 result_entry = {
-                                    'id': f"{date}-{platform}-{sensor}-{agrowstitch_version}",
+                                    'id': f"{date}-{platform}-{sensor}-{orthomosaic_version}",
                                     'date': date,
                                     'platform': platform,
                                     'sensor': sensor,
-                                    'agrowstitch_version': agrowstitch_version,
+                                    'orthomosaic': orthomosaic_version,
+                                    'model_id': model_id_used,
+                                    'model_version': model_version_used,
                                     'csv_path': csv_path,
                                     'total_predictions': total_predictions,
                                     'classes_detected': classes_detected,
@@ -842,14 +968,19 @@ def get_plot_predictions_endpoint(file_app, data_root_dir):
             date = data.get('date')
             platform = data.get('platform')
             sensor = data.get('sensor')
-            agrowstitch_version = data.get('agrowstitch_version')
+            agrowstitch_version = data.get('agrowstitch_version')  # Keep for backward compatibility
+            orthomosaic = data.get('orthomosaic')  # New parameter name
+            
+            # Use orthomosaic if provided, otherwise fall back to agrowstitch_version
+            version_identifier = orthomosaic if orthomosaic else agrowstitch_version
+            
             plot_filename = data.get('plot_filename')
             
-            if not all([year, experiment, location, population, date, platform, sensor, agrowstitch_version, plot_filename]):
+            if not all([year, experiment, location, population, date, platform, sensor, version_identifier, plot_filename]):
                 return jsonify({'error': 'Missing required parameters'}), 400
                 
             # Find the CSV file
-            csv_filename = f"{date}_{platform}_{sensor}_{agrowstitch_version}_roboflow_predictions.csv"
+            csv_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions.csv"
             csv_path = os.path.join(
                 data_root_dir, 'Processed', year, experiment, location, population,
                 date, platform, sensor, csv_filename
@@ -878,7 +1009,9 @@ def get_plot_predictions_endpoint(file_app, data_root_dir):
                     'height': float(row['height']),
                     'plot_index': int(row['plot_index']) if pd.notna(row['plot_index']) else None,
                     'plot_label': row['plot_label'] if pd.notna(row['plot_label']) else None,
-                    'accession': row['accession'] if pd.notna(row['accession']) else None
+                    'accession': row['accession'] if pd.notna(row['accession']) else None,
+                    'model_id': row.get('model_id') if pd.notna(row.get('model_id')) else None,
+                    'model_version': row.get('model_version') if pd.notna(row.get('model_version')) else None
                 }
                 predictions.append(prediction)
                 
@@ -897,6 +1030,97 @@ def get_plot_predictions_endpoint(file_app, data_root_dir):
             return jsonify({'error': str(e)}), 500
 
 
+def delete_inference_results_endpoint(file_app, data_root_dir):
+    """
+    Delete inference results including CSV file and optionally the GeoJSON traits file
+    """
+    @file_app.route('/delete_inference_results', methods=['POST'])
+    def delete_inference_results():
+        try:
+            data = request.json
+            year = data.get('year')
+            experiment = data.get('experiment')
+            location = data.get('location')
+            population = data.get('population')
+            date = data.get('date')
+            platform = data.get('platform')
+            sensor = data.get('sensor')
+            orthomosaic = data.get('orthomosaic')
+            delete_traits = data.get('delete_traits', False)  # Optional: also delete traits GeoJSON
+            
+            if not all([year, experiment, location, population, date, platform, sensor, orthomosaic]):
+                return jsonify({'error': 'Missing required parameters'}), 400
+            
+            # Build paths
+            output_dir = os.path.join(
+                data_root_dir, 'Processed', year, experiment, location, population,
+                date, platform, sensor
+            )
+            
+            csv_filename = f"{date}_{platform}_{sensor}_{orthomosaic}_roboflow_predictions.csv"
+            csv_path = os.path.join(output_dir, csv_filename)
+            
+            deleted_files = []
+            
+            # Delete CSV file
+            if os.path.exists(csv_path):
+                os.remove(csv_path)
+                deleted_files.append(csv_filename)
+                print(f"Deleted inference CSV: {csv_path}")
+            else:
+                return jsonify({'error': 'Inference results file not found'}), 404
+            
+            # Optionally delete traits GeoJSON file
+            if delete_traits:
+                # Look for GeoJSON in the orthomosaic version directory with updated filename
+                geojson_filename = f"{date}-{platform}-{sensor}-{orthomosaic}-Traits-WGS84.geojson"
+                geojson_dir = os.path.join(output_dir, orthomosaic)
+                geojson_path = os.path.join(geojson_dir, geojson_filename)
+                
+                if os.path.exists(geojson_path):
+                    # Check if the GeoJSON file contains inference data (detection counts)
+                    try:
+                        gdf = gpd.read_file(geojson_path)
+                        
+                        # Check if it has detection-related columns (new naming scheme)
+                        detection_columns = [col for col in gdf.columns if 
+                                           'Total_Detections_' in col or '/' in col]
+                        
+                        if detection_columns:
+                            # Remove only the detection columns, keep other traits
+                            gdf_cleaned = gdf.drop(columns=detection_columns)
+                            
+                            # If there are still other trait columns, save the cleaned version
+                            trait_columns = [col for col in gdf_cleaned.columns 
+                                           if col not in ['geometry', 'plot_index', 'Plot', 'Bed', 'Tier', 'accession', 'population']]
+                            
+                            if trait_columns:
+                                gdf_cleaned.to_file(geojson_path, driver='GeoJSON')
+                                deleted_files.append(f"Detection data ({len(detection_columns)} columns) from {geojson_filename}")
+                            else:
+                                # No other traits, delete the entire file
+                                os.remove(geojson_path)
+                                deleted_files.append(geojson_filename)
+                                deleted_files.append(geojson_filename)
+                        else:
+                            print(f"GeoJSON file {geojson_path} does not contain detection data")
+                            
+                    except Exception as e:
+                        print(f"Error processing GeoJSON file: {e}")
+                        # If we can't process it, just delete it if explicitly requested
+                        os.remove(geojson_path)
+                        deleted_files.append(geojson_filename)
+            
+            return jsonify({
+                'message': 'Inference results deleted successfully',
+                'deleted_files': deleted_files
+            }), 200
+            
+        except Exception as e:
+            print(f"Error deleting inference results: {e}")
+            return jsonify({'error': str(e)}), 500
+
+
 def register_inference_routes(file_app, data_root_dir):
     """
     Register all inference-related routes with the Flask app
@@ -906,3 +1130,4 @@ def register_inference_routes(file_app, data_root_dir):
     get_agrowstitch_versions_endpoint(file_app, data_root_dir)
     get_inference_results_endpoint(file_app, data_root_dir)
     get_plot_predictions_endpoint(file_app, data_root_dir)
+    delete_inference_results_endpoint(file_app, data_root_dir)

@@ -1253,10 +1253,18 @@ def query_traits():
     sensor = request.json['sensor']
     year = request.json['year']
     experiment = request.json['experiment']
+    orthomosaic_version = request.json.get('orthomosaic_version')  # Optional parameter for specific version
 
     prefix = data_root_dir+'/Processed'
-    traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
-                          '-'.join([date, sensor, 'Traits-WGS84.geojson']))
+    
+    # If orthomosaic_version is provided, look in the version-specific directory
+    if orthomosaic_version:
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', orthomosaic_version,
+                              f"{date}-{sensor}-{orthomosaic_version}-Traits-WGS84.geojson")
+    else:
+        # Default behavior - look in the Results directory (for aerial/drone traits)
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
+                              '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
     if not os.path.isfile(traitpth):
         return jsonify({'message': []}), 404
@@ -1267,6 +1275,68 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+
+@file_app.route('/get_orthomosaic_versions', methods=['POST'])
+def get_orthomosaic_versions():
+    """
+    Get available orthomosaic versions for a specific dataset
+    Returns both aerial/drone traits (sensor level) and roboflow inference traits (version level)
+    """
+    try:
+        data = request.json
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        platform = data['platform']
+        sensor = data['sensor']
+
+        prefix = data_root_dir + '/Processed'
+        sensor_dir = os.path.join(prefix, year, experiment, location, population, date, platform, sensor)
+        
+        versions = []
+        
+        if os.path.exists(sensor_dir):
+            # Check for aerial/drone traits at sensor level
+            aerial_trait_file = f"{date}-{platform}-{sensor}-Traits-WGS84.geojson"
+            aerial_trait_path = os.path.join(sensor_dir, aerial_trait_file)
+            
+            if os.path.exists(aerial_trait_path):
+                # Convert to relative path for Flask file server
+                relative_path = os.path.relpath(aerial_trait_path, data_root_dir)
+                versions.append({
+                    'type': 'aerial',
+                    'version': 'main',
+                    'versionName': f'{platform}',
+                    'versionType': 'aerial',
+                    'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                })
+            
+            # Check for roboflow inference traits in subdirectories
+            for item in os.listdir(sensor_dir):
+                item_path = os.path.join(sensor_dir, item)
+                if os.path.isdir(item_path):
+                    # Look for traits file with version-specific naming
+                    trait_file = f"{date}-{platform}-{sensor}-{item}-Traits-WGS84.geojson"
+                    trait_path = os.path.join(item_path, trait_file)
+                    
+                    if os.path.exists(trait_path):
+                        # Convert to relative path for Flask file server
+                        relative_path = os.path.relpath(trait_path, data_root_dir)
+                        versions.append({
+                            'type': 'roboflow',
+                            'version': item,
+                            'versionName': f'{item}',
+                            'versionType': 'roboflow',
+                            'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                        })
+        
+        return jsonify(versions), 200
+        
+    except Exception as e:
+        print(f"Error getting orthomosaic versions: {e}")
+        return jsonify({'error': str(e)}), 500
     
 def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
