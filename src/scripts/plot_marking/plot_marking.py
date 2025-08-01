@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 from flask import Blueprint, request, jsonify, current_app, send_file
 from pyproj import Geod
+import json
 
 plot_marking_bp = Blueprint('plot_marking', __name__)
 
@@ -461,8 +462,48 @@ def download_amiga_images():
         return jsonify({"error": "An internal server error occurred."}), 500
 
 
-# @plot_marking_bp.route('/save_stitch_boundary', methods=['POST'])
-# def save_stitch_boundary():
-#     data = request.get_json()
-#     mask = data.get('mask')
+@plot_marking_bp.route('/save_stitch_mask', methods=['POST'])
+def save_stitch_mask():
+    data = request.get_json()
+    mask = data.get('mask')
+    directory = data.get('directory')
+    mask_file = os.path.join(current_app.config['DATA_ROOT_DIR'], directory, '../../../../..', 'stitch_mask.json')
+    print(f"DEBUG: Saving stitch mask to {mask_file}")
+    mask_data = {
+        "mask": mask
+    }
+    # write mask_data to mask_file
+    with open(mask_file, 'w') as f:
+        json.dump(mask_data, f)
+    return jsonify({"status": "success", "message": "Mask saved successfully."}), 200
+
+@plot_marking_bp.route('/check_mask', methods=['POST'])
+def check_mask():
+    data = request.get_json()
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
     
+    # Validate required parameters
+    if not all([year, experiment, location, population]):
+        return jsonify({"error": "Missing required parameters"}), 400
+    
+    try:
+        directory = os.path.join(current_app.config['DATA_ROOT_DIR'], 'Raw', year, experiment, location, population)
+        mask_file = os.path.join(directory, 'stitch_mask.json')
+        
+        if not os.path.exists(mask_file):
+            # Return success with null mask instead of error
+            return jsonify({"mask": None}), 200
+            
+        with open(mask_file, 'r') as f:
+            mask_data = json.load(f)
+            mask = mask_data.get('mask')
+            
+        return jsonify({"mask": mask}), 200
+        
+    except Exception as e:
+        print(f"Error checking mask: {e}")
+        return jsonify({"error": f"Error reading mask file: {str(e)}"}), 500
+
