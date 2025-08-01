@@ -8,6 +8,7 @@ import threading
 import re
 import tempfile
 import shutil
+import time
 import pandas as pd
 import geopandas as gpd
 from PIL import Image
@@ -353,71 +354,85 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         else:
             print("WARNING: No accession column found, using all plots")
         
-        # Aggregate predictions by plot
+        # Aggregate predictions by plot, skipping rows with missing plot_label or accession
         if not predictions_df.empty:
-            # print(f"DEBUG: Predictions plot_index values: {sorted(predictions_df['plot_index'].unique())}")
-            # print(f"DEBUG: Plot boundaries plot_index values: {sorted(plot_gdf['plot_index'].unique())}")
-            
-            # Map AgRowStitch sequential plot_index to field plot number (Plot column)
-            plot_mapping = {}
-            for _, row in plot_gdf.iterrows():
-                seq_idx = row['plot_label']
-                plot_mapping[seq_idx] = {
-                    'Plot': row['Plot'],
-                    'accession': row.get('Accession', row.get('accession', 'Unknown'))
-                }
-            print(f"DEBUG: Plot mapping created: {plot_mapping}")
+            # Remove rows with missing plot_label or accession
+            filtered_preds = predictions_df.dropna(subset=['plot_label', 'accession'])
+            if filtered_preds.empty:
+                print("WARNING: All predictions missing plot_label or accession. No stats will be generated.")
+            else:
+                # Normalize plot_label and Plot to string and strip trailing .0 for matching
+                def normalize_plot_label(val):
+                    if pd.isna(val):
+                        return None
+                    sval = str(val).strip()
+                    if sval.endswith('.0'):
+                        sval = sval[:-2]
+                    return sval
 
-            # Update predictions to use the correct field plot number and accession
-            predictions_df['field_plot_number'] = predictions_df['plot_label'].map(
-                lambda x: plot_mapping.get(x, {}).get('Plot', None)
-            )
-            predictions_df['accession'] = predictions_df['plot_label'].map(
-                lambda x: plot_mapping.get(x, {}).get('accession', None)
-            )
-            # Only keep predictions that map to a valid field plot number
-            predictions_df = predictions_df[predictions_df['field_plot_number'].notnull()]
-            predictions_df['accession'] = predictions_df['field_plot_number'].map(
-                lambda x: plot_mapping.get(x, {}).get('accession', '')
-            )
-            
-            # Use field_plot_number for grouping and output
-            predictions_df['plot_label'] = predictions_df['field_plot_number']
+                filtered_preds['plot_label_norm'] = filtered_preds['plot_label'].apply(normalize_plot_label)
+                plot_gdf['Plot_norm'] = plot_gdf['plot'].apply(normalize_plot_label) if 'plot' in plot_gdf.columns else plot_gdf['Plot'].apply(normalize_plot_label)
 
-            # Calculate total detections per field plot
-            total_detections = predictions_df.groupby('plot_label').size()
+                # Map AgRowStitch sequential plot_index to field plot number (Plot column)
+                plot_mapping = {}
+                for _, row in plot_gdf.iterrows():
+                    seq_idx = row['Plot_norm']
+                    plot_mapping[seq_idx] = {
+                        'Plot': row['plot'],
+                        'accession': row.get('Accession', row.get('accession', 'Unknown'))
+                    }
+                print(f"DEBUG: Plot mapping created: {plot_mapping}")
 
-            # Get model_id from predictions (should be consistent across all predictions)
-            model_id = predictions_df['model_id'].iloc[0] if 'model_id' in predictions_df.columns and not predictions_df['model_id'].isna().all() else 'unknown'
+                # Update predictions to use the correct field plot number and accession
+                filtered_preds['field_plot_number'] = filtered_preds['plot_label_norm'].map(
+                    lambda x: plot_mapping.get(x, {}).get('Plot', None)
+                )
+                filtered_preds['accession'] = filtered_preds['plot_label_norm'].map(
+                    lambda x: plot_mapping.get(x, {}).get('accession', None)
+                )
+                # Only keep predictions that map to a valid field plot number
+                filtered_preds = filtered_preds[filtered_preds['field_plot_number'].notnull()]
+                filtered_preds['accession'] = filtered_preds['field_plot_number'].map(
+                    lambda x: plot_mapping.get(normalize_plot_label(x), {}).get('accession', '')
+                )
 
-            # Create summary columns for each detected class using model_id/class format
-            class_columns = {}
-            for class_name in predictions_df['class'].unique():
-                if pd.notna(class_name):
-                    class_counts = predictions_df[predictions_df['class'] == class_name].groupby('plot_label').size()
-                    # Use model_id/class_label format for trait names
-                    trait_name = f"{model_id}/{class_name}" if model_id != 'unknown' else class_name
-                    class_columns[trait_name] = class_counts
+                # Use field_plot_number for grouping and output
+                filtered_preds['plot_label'] = filtered_preds['field_plot_number']
 
-            print(f"DEBUG: Created class columns: {list(class_columns.keys())}")
-            print(f"DEBUG: Total detections by plot: {dict(total_detections)}")
+                # Calculate total detections per field plot
+                total_detections = filtered_preds.groupby('plot_label').size()
 
-            # Merge with plot boundaries
-            traits_gdf = plot_gdf.copy()
+                # Get model_id from predictions (should be consistent across all predictions)
+                model_id = filtered_preds['model_id'].iloc[0] if 'model_id' in filtered_preds.columns and not filtered_preds['model_id'].isna().all() else 'unknown'
 
-            # Add detection counts to the GeoDataFrame (only individual class counts, no total column)
-            for idx, row in traits_gdf.iterrows():
-                field_plot_number = row['Plot']
-                for trait_name in class_columns.keys():
-                    # Always add trait columns, even if zero
-                    traits_gdf.at[idx, trait_name] = class_columns[trait_name].get(field_plot_number, 0)
+                # Create summary columns for each detected class using model_id/class format
+                class_columns = {}
+                for class_name in filtered_preds['class'].unique():
+                    if pd.notna(class_name):
+                        class_counts = filtered_preds[filtered_preds['class'] == class_name].groupby('plot_label').size()
+                        # Use model_id/class_label format for trait names
+                        trait_name = f"{model_id}/{class_name}" if model_id != 'unknown' else class_name
+                        class_columns[trait_name] = class_counts
 
-            # Add plot_label and accession columns to output
-            traits_gdf['plot_label'] = traits_gdf['Plot']
-            if 'Accession' in traits_gdf.columns:
-                traits_gdf['accession'] = traits_gdf['Accession']
-            elif 'accession' in traits_gdf.columns:
-                traits_gdf['accession'] = traits_gdf['accession']
+                print(f"DEBUG: Created class columns: {list(class_columns.keys())}")
+                print(f"DEBUG: Total detections by plot: {dict(total_detections)}")
+
+                # Merge with plot boundaries
+                traits_gdf = plot_gdf.copy()
+
+                # Add detection counts to the GeoDataFrame (only individual class counts, no total column)
+                for idx, row in traits_gdf.iterrows():
+                    field_plot_number = row['plot']
+                    for trait_name in class_columns.keys():
+                        # Always add trait columns, even if zero
+                        traits_gdf.at[idx, trait_name] = class_columns[trait_name].get(field_plot_number, 0)
+
+                # Add plot_label and accession columns to output
+                traits_gdf['plot_label'] = traits_gdf['plot']
+                if 'Accession' in traits_gdf.columns:
+                    traits_gdf['accession'] = traits_gdf['Accession']
+                elif 'accession' in traits_gdf.columns:
+                    traits_gdf['accession'] = traits_gdf['accession']
         
         # Convert detection count columns to int
         detection_columns = [col for col in traits_gdf.columns if 'Total_Detections' in col or '/' in col]
@@ -452,7 +467,7 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
                 existing_gdf = gpd.read_file(geojson_path)
                 
                 # Merge on common columns, keeping all existing traits and adding new detection data
-                merge_columns = ['Plot', 'accession', 'population', 'geometry']
+                merge_columns = ['plot', 'accession', 'population', 'geometry']
                 
                 # Only merge on columns that exist in both dataframes
                 available_merge_cols = [col for col in merge_columns if col in existing_gdf.columns and col in traits_gdf.columns]
@@ -461,9 +476,9 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
                     # Update existing records with new detection data
                     for idx, row in traits_gdf.iterrows():
                         # Find matching row in existing data
-                        plot_val = row.get('Plot')
-                        mask = existing_gdf['Plot'] == plot_val
-                        
+                        plot_val = row.get('plot')
+                        mask = existing_gdf['plot'] == plot_val
+
                         if mask.any():
                             # Update existing row with new detection data
                             for col in traits_gdf.columns:
@@ -480,6 +495,22 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
             except Exception as e:
                 print(f"Warning: Could not merge with existing traits file: {e}")
         
+        # Remove 'Plot' and 'plot_label' columns and reorder for stats table
+        stats_columns = ['column', 'row', 'location', 'population', 'accession', 'plot']
+        # Remove if present
+        for col in ['Plot', 'plot_label', 'Plot_norm']:
+            if col in traits_gdf.columns:
+                traits_gdf = traits_gdf.drop(columns=[col])
+        # Reorder columns: stats columns, then detection columns, then the rest
+        available_stats_cols = [col for col in stats_columns if col in traits_gdf.columns]
+        detection_cols = [col for col in traits_gdf.columns if ('/' in col or 'Total_Detections' in col) and col not in available_stats_cols]
+        other_cols = [col for col in traits_gdf.columns if col not in available_stats_cols + detection_cols]
+        traits_gdf = traits_gdf[available_stats_cols + detection_cols + other_cols]
+
+        # Sort by 'column' if it exists
+        if 'column' in traits_gdf.columns:
+            traits_gdf = traits_gdf.sort_values(by='column').reset_index(drop=True)
+
         # Save the final GeoJSON
         traits_gdf.to_file(geojson_path, driver='GeoJSON')
         print(f"Saved traits GeoJSON: {geojson_path}")
@@ -508,7 +539,38 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
         
         try:
             data = request.json
-            api_url = data.get('apiUrl', 'https://detect.roboflow.com')
+            # Support for local or cloud inference
+            inference_mode = data.get('inferenceMode', 'cloud')  # 'cloud' or 'local'
+            import subprocess
+            import socket
+            def is_local_inference_running(host='localhost', port=9001):
+                try:
+                    with socket.create_connection((host, port), timeout=2):
+                        return True
+                except Exception:
+                    return False
+
+            if inference_mode == 'local':
+                api_url = data.get('apiUrl', 'http://localhost:9001')
+                # Check if local inference server is running, if not, start it
+                if not is_local_inference_running():
+                    try:
+                        # Start the inference server in the background (verbose output)
+                        subprocess.Popen([
+                            'inference', 'server', 'start'
+                        ])
+                        # Wait for the server to be ready
+                        max_wait = 120
+                        waited = 0
+                        while not is_local_inference_running() and waited < max_wait:
+                            time.sleep(1)
+                            waited += 1
+                        if not is_local_inference_running():
+                            return jsonify({'error': 'Local inference server failed to start within 2 minutes.'}), 500
+                    except Exception as e:
+                        return jsonify({'error': f'Failed to start local inference server: {e}'}), 500
+            else:
+                api_url = data.get('apiUrl', 'https://detect.roboflow.com')
             api_key = data.get('apiKey')
             model_id = data.get('modelId')
             year = data.get('year')

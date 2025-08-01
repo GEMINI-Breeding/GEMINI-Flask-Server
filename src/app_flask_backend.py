@@ -697,7 +697,21 @@ def upload_files():
     data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Original dir_path: {repr(dir_path)}")
+    print(f"Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     os.makedirs(full_dir_path, exist_ok=True)
     
     # Read msgs_synced.csv once if it's an image upload
@@ -879,7 +893,21 @@ def upload_chunk():
     total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Chunk upload - Original dir_path: {repr(dir_path)}")
+    print(f"Chunk upload - Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -1628,6 +1656,13 @@ def run_stitch_endpoint():
         config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
         temp_output = os.path.join(os.path.dirname(image_path), "top_output")
+        
+        # Check if image_path exists
+        if not os.path.exists(image_path):
+            return jsonify({
+                "status": "error", 
+                "message": f"Error: Image path not found at {image_path}\n\nThe selected images may not be compatible with AgRowStitch yet."
+            }), 404
         
         # remove stitched_path and temp_output if it exists
         if os.path.exists(stitched_path):
