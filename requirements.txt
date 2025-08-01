@@ -75,3 +75,4 @@ piexif
 zipfile36
 inference-sdk
 inference
+inference-cli
