@@ -38,19 +38,23 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
         return False
     current_plot_index = int(plot_index)
     # Create or update plot_borders.csv
-    if not filter and plot_index not in df['plot_index'].values:
+    plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
+    # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
+    if os.path.exists(plot_borders_path):
+        borders_df = pd.read_csv(plot_borders_path)
+        if plot_index not in borders_df['plot_index'].values:
+            update_pb = True
+        else:
+            update_pb = False
+    else:
+        borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon", "stitch_direction"])
+        update_pb = True
+    if not filter and update_pb:
         try:
             start_lat = df.loc[start_row_index, 'lat']
             start_lon = df.loc[start_row_index, 'lon']
             end_lat = df.loc[end_row_index, 'lat']
             end_lon = df.loc[end_row_index, 'lon']
-
-            plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
-            # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
-            if os.path.exists(plot_borders_path):
-                borders_df = pd.read_csv(plot_borders_path)
-            else:
-                borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon", "stitch_direction"])
 
             new_border_data = {
                 "plot_index": current_plot_index,
@@ -59,9 +63,7 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
                 "end_lat": end_lat,
                 "end_lon": end_lon,
                 "stitch_direction": stitch_direction
-
             }
-
             # Check if plot_index already exists and update it, otherwise append
             if current_plot_index in borders_df['plot_index'].values:
                 idx = borders_df.index[borders_df['plot_index'] == current_plot_index].tolist()[0]
