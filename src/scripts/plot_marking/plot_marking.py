@@ -25,13 +25,6 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     df = pd.read_csv(csv_path)
     if 'plot_index' not in df.columns:
         df['plot_index'] = -1
-
-    # If this is an update, clear the old plot index entries first
-    if original_plot_index is not None:
-        print(f"DEBUG: Clearing old plot index: {original_plot_index}")
-        df.loc[df['plot_index'] == original_plot_index, 'plot_index'] = -1
-        df.loc[df['plot_index'] == original_plot_index, 'stitch_direction'] = None
-
     image_column = f'/{camera}/rgb_file'
     if image_column not in df.columns:
         print(f"ERROR: Image column '{image_column}' not found in CSV")
@@ -44,9 +37,52 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
         print("ERROR: Start or end image not found in metadata")
         return False
     current_plot_index = int(plot_index)
+    # Create or update plot_borders.csv
+    if not filter and plot_index not in df['plot_index'].values:
+        try:
+            start_lat = df.loc[start_row_index, 'lat']
+            start_lon = df.loc[start_row_index, 'lon']
+            end_lat = df.loc[end_row_index, 'lat']
+            end_lon = df.loc[end_row_index, 'lon']
+
+            plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
+            # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
+            if os.path.exists(plot_borders_path):
+                borders_df = pd.read_csv(plot_borders_path)
+            else:
+                borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon", "stitch_direction"])
+
+            new_border_data = {
+                "plot_index": current_plot_index,
+                "start_lat": start_lat,
+                "start_lon": start_lon,
+                "end_lat": end_lat,
+                "end_lon": end_lon,
+                "stitch_direction": stitch_direction
+
+            }
+
+            # Check if plot_index already exists and update it, otherwise append
+            if current_plot_index in borders_df['plot_index'].values:
+                idx = borders_df.index[borders_df['plot_index'] == current_plot_index].tolist()[0]
+                borders_df.loc[idx] = new_border_data
+            else:
+                borders_df = pd.concat([borders_df, pd.DataFrame([new_border_data])], ignore_index=True)
+
+            borders_df.to_csv(plot_borders_path, index=False)
+            print(f"DEBUG: Successfully updated {plot_borders_path}")
+
+        except Exception as e:
+            print(f"ERROR: Could not update plot_borders.csv: {e}")
+    # If this is an update, clear the old plot index entries first
+    if original_plot_index is not None:
+        print(f"DEBUG: Clearing old plot index: {original_plot_index}")
+        df.loc[df['plot_index'] == original_plot_index, 'plot_index'] = -1
+        df.loc[df['plot_index'] == original_plot_index, 'stitch_direction'] = None
+    
+    # Assign plot index and stitch dir to msgs_synced.csv
     df.loc[start_row_index:end_row_index, 'plot_index'] = current_plot_index
     df.loc[start_row_index:end_row_index, 'stitch_direction'] = stitch_direction
-    print(f"DEBUG: shift_amount: {shift_amount}, original_start_image_index: {original_start_image_index}")
     
     if shift_all and shift_amount != 0 and original_plot_index is not None:
         print(f"DEBUG: Applying shift_all logic. Shift amount: {shift_amount}")
@@ -85,44 +121,6 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
                     print(f"WARNING: Plot {plot_idx} could not be shifted - new position out of bounds")
     
     df.to_csv(csv_path, index=False)
-
-    # Create or update plot_borders.csv
-    if not filter and plot_index not in df['plot_index'].values:
-        try:
-            start_lat = df.loc[start_row_index, 'lat']
-            start_lon = df.loc[start_row_index, 'lon']
-            end_lat = df.loc[end_row_index, 'lat']
-            end_lon = df.loc[end_row_index, 'lon']
-
-            plot_borders_path = os.path.abspath(os.path.join(image_dir_path, '../../../../..', 'plot_borders.csv'))
-            # puts plot_borders.csv in $data_root_dir$/Raw/$year$/$experiment$/$location$/$population$/ {image_dir_path is Raw/$year$/$experiment$/$location$/$population$/$platform$/$sensor$/Images/top}
-            if os.path.exists(plot_borders_path):
-                borders_df = pd.read_csv(plot_borders_path)
-            else:
-                borders_df = pd.DataFrame(columns=["plot_index", "start_lat", "start_lon", "end_lat", "end_lon", "stitch_direction"])
-
-            new_border_data = {
-                "plot_index": current_plot_index,
-                "start_lat": start_lat,
-                "start_lon": start_lon,
-                "end_lat": end_lat,
-                "end_lon": end_lon,
-                "stitch_direction": stitch_direction
-
-            }
-
-            # Check if plot_index already exists and update it, otherwise append
-            if current_plot_index in borders_df['plot_index'].values:
-                idx = borders_df.index[borders_df['plot_index'] == current_plot_index].tolist()[0]
-                borders_df.loc[idx] = new_border_data
-            else:
-                borders_df = pd.concat([borders_df, pd.DataFrame([new_border_data])], ignore_index=True)
-
-            borders_df.to_csv(plot_borders_path, index=False)
-            print(f"DEBUG: Successfully updated {plot_borders_path}")
-
-        except Exception as e:
-            print(f"ERROR: Could not update plot_borders.csv: {e}")
     return True
 
 @plot_marking_bp.route('/mark_plot', methods=['POST'])
