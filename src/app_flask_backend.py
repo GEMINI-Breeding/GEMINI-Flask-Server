@@ -28,6 +28,9 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 from flask import Flask, make_response, send_from_directory, jsonify, request, send_file
+
+# Import inference module
+from scripts.roboflow_inference import register_inference_routes
 from fastapi import FastAPI
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,16 +54,10 @@ AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../A
 print(AGROWSTITCH_PATH)
 sys.path.append(AGROWSTITCH_PATH)
 from scripts.stitch_utils import (
-    georeference_plot,
     run_stitch_all_plots,
-    run_stitch_process_for_plot,
     monitor_stitch_updates_multi_plot,
-    monitor_stitch_updates,
-    is_plot_completed
+    create_combined_mosaic_separate
 )
-from rasterio.transform import from_bounds
-from rasterio.crs import CRS
-from PIL import ImageFile
 
 # stitch pipeline
 import sys
@@ -86,6 +83,53 @@ extraction_error_message = None  # Stores detailed error message if extraction f
 odm_method = None
 stitch_thread=None
 stitch_stop_event = threading.Event()
+
+def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_options, 
+                            save_path, image_calibration, stitch_stop_event, progress_callback, monitoring_stop_event=None):
+    """
+    Complete workflow function that handles both stitching and mosaic creation
+    """
+    try:
+        # Run the main stitching process
+        print("=== STARTING MAIN STITCHING PROCESS ===")
+        stitch_results = run_stitch_all_plots(
+            msgs_synced_path, image_path, config_path, custom_options, 
+            save_path, image_calibration, stitch_stop_event, progress_callback
+        )
+        
+        # Check if stitching was successful and we have results
+        if stitch_results and stitch_results.get('processed_plots'):
+            print("=== MAIN STITCHING COMPLETED, STARTING MOSAIC CREATION ===")
+            
+            # Create the combined mosaic separately to avoid multiprocessing issues
+            mosaic_success = create_combined_mosaic_separate(
+                stitch_results['versioned_output_path'],
+                stitch_results['processed_plots'],
+                progress_callback,
+                monitoring_stop_event  # Pass the monitoring stop event to cancel monitoring
+            )
+            
+            if mosaic_success:
+                print("=== COMPLETE WORKFLOW FINISHED SUCCESSFULLY ===")
+            else:
+                print("=== WORKFLOW COMPLETED WITH MOSAIC WARNINGS ===")
+        else:
+            print("=== WORKFLOW COMPLETED WITH ERRORS ===")
+                
+    except Exception as e:
+        print(f"ERROR in complete_stitch_workflow: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+    finally:
+        print("=== WORKFLOW FINALLY BLOCK - ENSURING COMPLETION ===")
+        
+        # Set final 100% progress - monitoring thread is already stopped by mosaic creation
+        if progress_callback:
+            print("Setting final progress to 100%...")
+            progress_callback(100)
+            print("Final progress set to 100% - workflow complete!")
+        
+        print("=== WORKFLOW FULLY COMPLETED ===")
+
 
 def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     exif_data_list = []
@@ -161,6 +205,24 @@ def serve_files(filename):
 def serve_image(filename):
     global image_dict
     return image_dict[filename]
+
+# endpoint to serve PNG files directly
+@file_app.route('/get_png_file', methods=['POST'])
+def get_png_file():
+    data = request.json
+    png_path = data['filePath']
+    
+    # Construct the full file path
+    png_full_path = os.path.join(data_root_dir, png_path)
+    
+    if not os.path.exists(png_full_path):
+        return jsonify({'error': 'PNG file not found'}), 404
+    
+    try:
+        # Send the PNG file directly
+        return send_file(png_full_path, mimetype='image/png')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @file_app.route('/fetch_data_root_dir', methods=['GET'])
 def fetch_data_root_dir():
@@ -635,7 +697,21 @@ def upload_files():
     data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Original dir_path: {repr(dir_path)}")
+    print(f"Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     os.makedirs(full_dir_path, exist_ok=True)
     
     # Read msgs_synced.csv once if it's an image upload
@@ -817,7 +893,21 @@ def upload_chunk():
     total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Chunk upload - Original dir_path: {repr(dir_path)}")
+    print(f"Chunk upload - Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -1191,10 +1281,18 @@ def query_traits():
     sensor = request.json['sensor']
     year = request.json['year']
     experiment = request.json['experiment']
+    orthomosaic_version = request.json.get('orthomosaic_version')  # Optional parameter for specific version
 
     prefix = data_root_dir+'/Processed'
-    traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
-                          '-'.join([date, sensor, 'Traits-WGS84.geojson']))
+    
+    # If orthomosaic_version is provided, look in the version-specific directory
+    if orthomosaic_version:
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', orthomosaic_version,
+                              f"{date}-{sensor}-{orthomosaic_version}-Traits-WGS84.geojson")
+    else:
+        # Default behavior - look in the Results directory (for aerial/drone traits)
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
+                              '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
     if not os.path.isfile(traitpth):
         return jsonify({'message': []}), 404
@@ -1205,6 +1303,68 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+
+@file_app.route('/get_orthomosaic_versions', methods=['POST'])
+def get_orthomosaic_versions():
+    """
+    Get available orthomosaic versions for a specific dataset
+    Returns both aerial/drone traits (sensor level) and roboflow inference traits (version level)
+    """
+    try:
+        data = request.json
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        platform = data['platform']
+        sensor = data['sensor']
+
+        prefix = data_root_dir + '/Processed'
+        sensor_dir = os.path.join(prefix, year, experiment, location, population, date, platform, sensor)
+        
+        versions = []
+        
+        if os.path.exists(sensor_dir):
+            # Check for aerial/drone traits at sensor level
+            aerial_trait_file = f"{date}-{platform}-{sensor}-Traits-WGS84.geojson"
+            aerial_trait_path = os.path.join(sensor_dir, aerial_trait_file)
+            
+            if os.path.exists(aerial_trait_path):
+                # Convert to relative path for Flask file server
+                relative_path = os.path.relpath(aerial_trait_path, data_root_dir)
+                versions.append({
+                    'type': 'aerial',
+                    'version': 'main',
+                    'versionName': f'{platform}',
+                    'versionType': 'aerial',
+                    'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                })
+            
+            # Check for roboflow inference traits in subdirectories
+            for item in os.listdir(sensor_dir):
+                item_path = os.path.join(sensor_dir, item)
+                if os.path.isdir(item_path):
+                    # Look for traits file with version-specific naming
+                    trait_file = f"{date}-{platform}-{sensor}-{item}-Traits-WGS84.geojson"
+                    trait_path = os.path.join(item_path, trait_file)
+                    
+                    if os.path.exists(trait_path):
+                        # Convert to relative path for Flask file server
+                        relative_path = os.path.relpath(trait_path, data_root_dir)
+                        versions.append({
+                            'type': 'roboflow',
+                            'version': item,
+                            'versionName': f'{item}',
+                            'versionType': 'roboflow',
+                            'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                        })
+        
+        return jsonify(versions), 200
+        
+    except Exception as e:
+        print(f"Error getting orthomosaic versions: {e}")
+        return jsonify({'error': str(e)}), 500
     
 def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
@@ -1497,6 +1657,13 @@ def run_stitch_endpoint():
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
         temp_output = os.path.join(os.path.dirname(image_path), "top_output")
         
+        # Check if image_path exists
+        if not os.path.exists(image_path):
+            return jsonify({
+                "status": "error", 
+                "message": f"Error: Image path not found at {image_path}\n\nThe selected images may not be compatible with AgRowStitch yet."
+            }), 404
+        
         # remove stitched_path and temp_output if it exists
         if os.path.exists(stitched_path):
             shutil.rmtree(stitched_path)
@@ -1512,10 +1679,30 @@ def run_stitch_endpoint():
         if not os.path.exists(msgs_synced_path):
             return jsonify({"status": "error", "message": f"msgs_synced.csv not found at {msgs_synced_path}"}), 404
         
-        # Get processed plots for monitoring
+        # Load and validate plot indices
         import pandas as pd
         msgs_df = pd.read_csv(msgs_synced_path)
-        unique_plots = [pid for pid in msgs_df['plot_id'].unique() if pid != 0]  # Exclude plot 0
+        
+        # Check if plot_index column exists
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({
+                "status": "error", 
+                "message": "Plot index column not found in msgs_synced.csv. Please perform plot marking in File Management first."
+            }), 400
+        
+        # Check if any plot indices are defined (excluding plot 0 which is usually background/unassigned)
+        unique_plots = [pid for pid in msgs_df['plot_index'].unique() if pid != 0 and not pd.isna(pid)]
+        
+        if len(unique_plots) == 0:
+            return jsonify({
+                "status": "error", 
+                "message": "No plot indices are defined in the dataset. Please perform plot marking in File Management to assign images to plots before running AgRowStitch."
+            }), 400
+        
+        print(f"Found {len(unique_plots)} unique plots for stitching: {unique_plots}")
+        
+        # Create a monitoring stop event to coordinate threads
+        monitoring_stop_event = threading.Event()
         
         # Start multi-plot log monitoring thread
         final_mosaics_dir = os.path.join(os.path.dirname(image_path), "final_mosaics")
@@ -1525,15 +1712,16 @@ def run_stitch_endpoint():
         
         thread_prog = threading.Thread(
             target=monitor_stitch_updates_multi_plot, 
-            args=(final_mosaics_dir, unique_plots, progress_callback), 
+            args=(final_mosaics_dir, unique_plots, progress_callback, monitoring_stop_event), 
             daemon=True
         )
         thread_prog.start()
         
         # Start the stitching process for all plots in background
         stitch_thread = threading.Thread(
-            target=run_stitch_all_plots, 
-            args=(msgs_synced_path, image_path, config_path, custom_options, save_path, image_calibration, stitch_stop_event, progress_callback),
+            target=complete_stitch_workflow,
+            args=(msgs_synced_path, image_path, config_path, custom_options, 
+                  save_path, image_calibration, stitch_stop_event, progress_callback, monitoring_stop_event),
             daemon=True
         )
         stitch_thread.start()
@@ -1760,6 +1948,60 @@ def download_ortho():
     except Exception as e:
         print(f"An error occurred while downloading the ortho: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@file_app.route('/download_plot_ortho', methods=['POST'])
+def download_plot_ortho():
+    data = request.get_json()
+    try:
+        # Build the path to the plot images directory
+        plot_dir = os.path.join(
+            data_root_dir,
+            'Processed',
+            data['year'],
+            data['experiment'],
+            data['location'],
+            data['population'],
+            data['date'],
+            data['platform'],
+            data['sensor'],
+            data['agrowstitchDir']
+        )
+        
+        if not os.path.exists(plot_dir):
+            return jsonify({'error': 'Plot directory not found'}), 404
+        
+        # Find all plot PNG files
+        plot_files = [f for f in os.listdir(plot_dir) 
+                     if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+        
+        if not plot_files:
+            return jsonify({'error': 'No plot files found'}), 404
+        
+        # Create a temporary zip file
+        import tempfile
+        import zipfile
+        
+        temp_dir = tempfile.mkdtemp()
+        zip_filename = f"{data['date']}-{data['platform']}-{data['sensor']}-{data['agrowstitchDir']}-plots.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for plot_file in sorted(plot_files):
+                file_path = os.path.join(plot_dir, plot_file)
+                # Add file to zip with just the filename (no directory structure)
+                zipf.write(file_path, plot_file)
+        
+        print(f"Sending zip file: {zip_path}")
+        return send_file(
+            zip_path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=zip_filename
+        )
+    
+    except Exception as e:
+        print(f"An error occurred while downloading plot ortho: {str(e)}")
+        return jsonify({'error': str(e)}), 500
         
 
 @file_app.route('/delete_ortho', methods=['POST'])
@@ -1773,17 +2015,423 @@ def delete_ortho():
     date = data.get('date')
     platform = data.get('platform')
     sensor = data.get('sensor')
-    # modify when allowing for creation of orthos with same date and different quality
-    ortho_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+    delete_type = data.get('deleteType', 'ortho')  # 'ortho' or 'agrowstitch'
+    
+    base_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+    
     try:
-        shutil.rmtree(ortho_path)
+        if delete_type == 'agrowstitch':
+            # Delete specific AgRowStitch version directory
+            agrowstitch_dir = data.get('agrowstitchDir')
+            if agrowstitch_dir:
+                agrowstitch_path = os.path.join(base_path, agrowstitch_dir)
+                if os.path.exists(agrowstitch_path):
+                    shutil.rmtree(agrowstitch_path)
+                    print(f"Deleted AgRowStitch directory: {agrowstitch_path}")
+                else:
+                    print(f"AgRowStitch directory not found: {agrowstitch_path}")
+            else:
+                return jsonify({"error": "AgRowStitch directory name not provided"}), 400
+        else:
+            # Delete specific orthomosaic file
+            file_name = data.get('fileName')
+            if file_name:
+                file_path = os.path.join(base_path, file_name)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"Deleted file: {file_path}")
+                else:
+                    print(f"File not found: {file_path}")
+            else:
+                # For backward compatibility, try to find and delete standard orthomosaic files
+                # Look for common orthomosaic file patterns
+                ortho_patterns = [
+                    f"{date}-RGB-Pyramid.tif",
+                    f"{date}-RGB.tif", 
+                    f"{date}-RGB.png",
+                    f"{date}-DEM-Pyramid.tif",
+                    f"{date}-DEM.tif"
+                ]
+                
+                deleted_files = []
+                for pattern in ortho_patterns:
+                    file_path = os.path.join(base_path, pattern)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        deleted_files.append(pattern)
+                        print(f"Deleted file: {file_path}")
+                
+                if not deleted_files:
+                    return jsonify({"error": "No orthomosaic files found to delete"}), 404
+                
     except FileNotFoundError:
-        print(f"Directory not found: {ortho_path}")
+        print("Path not found during deletion")
+        return jsonify({"error": "File or directory not found"}), 404
     except PermissionError:
-        print(f"Permission denied: Unable to delete {ortho_path}")
+        print("Permission denied during deletion")
+        return jsonify({"error": "Permission denied"}), 403
     except Exception as e:
-        print(f"An error occurred while deleting {ortho_path}: {str(e)}")
-    return jsonify({"message": "Ortho file deleted successfully"}), 200
+        print(f"An error occurred during deletion: {str(e)}")
+        return jsonify({"error": f"Deletion failed: {str(e)}"}), 500
+        
+    return jsonify({"message": "Ortho deleted successfully"}), 200
+
+@file_app.route('/associate_plots_with_boundaries', methods=['POST'])
+def associate_plots_with_boundaries():
+    """
+    Associate AgRowStitch plots with boundary polygons and update plot_borders.csv with plot labels
+    """
+    import geopandas as gpd
+    from shapely.geometry import Point
+    import pandas as pd
+    
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    agrowstitch_dir = data.get('agrowstitchDir')
+    boundaries = data.get('boundaries')  # GeoJSON FeatureCollection
+    
+    if not all([year, experiment, location, population, date, platform, sensor, agrowstitch_dir, boundaries]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+    
+    try:
+        # Paths
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        agrowstitch_path = os.path.join(
+            data_root_dir, "Processed", year, experiment, location, population,
+            date, platform, sensor, agrowstitch_dir
+        )
+        
+        # Check if msgs_synced.csv exists
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({'error': f'msgs_synced.csv not found at {msgs_synced_path}'}), 404
+            
+        # Check if plot_borders.csv exists
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': f'plot_borders.csv not found at {plot_borders_path}'}), 404
+            
+        # Check if AgRowStitch directory exists
+        if not os.path.exists(agrowstitch_path):
+            return jsonify({'error': f'AgRowStitch directory not found at {agrowstitch_path}'}), 404
+            
+        # Load msgs_synced.csv
+        msgs_df = pd.read_csv(msgs_synced_path)
+        
+        # Load plot_borders.csv
+        borders_df = pd.read_csv(plot_borders_path)
+        
+        # Check if plot_index column exists
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({'error': 'plot_index column not found in msgs_synced.csv'}), 400
+            
+        if 'plot_index' not in borders_df.columns:
+            return jsonify({'error': 'plot_index column not found in plot_borders.csv'}), 400
+            
+        # Get unique plot indices (excluding unassigned)
+        plot_indices = [idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]
+        
+        if len(plot_indices) == 0:
+            return jsonify({'error': 'No plot indices found in msgs_synced.csv'}), 400
+            
+        # Create GeoDataFrame from boundaries
+        boundaries_gdf = gpd.GeoDataFrame.from_features(boundaries['features'])
+        boundaries_gdf.set_crs(epsg=4326, inplace=True)
+        
+        # Initialize Plot and Accession columns if they don't exist
+        if 'Plot' not in borders_df.columns:
+            borders_df['Plot'] = None
+        if 'Accession' not in borders_df.columns:
+            borders_df['Accession'] = None
+            
+        # Track associations to prevent duplicates
+        plot_associations = {}
+        
+        # For each plot index, find its center point and associate with boundary
+        for plot_idx in plot_indices:
+            plot_data = msgs_df[msgs_df['plot_index'] == plot_idx]
+            
+            if plot_data.empty:
+                continue
+                
+            # Calculate center point of plot based on GPS coordinates
+            center_lat = plot_data['lat'].mean()
+            center_lon = plot_data['lon'].mean()
+            center_point = Point(center_lon, center_lat)
+            
+            # Find which boundary contains this point
+            for _, boundary in boundaries_gdf.iterrows():
+                if boundary.geometry.contains(center_point):
+                    # Get plot and accession from boundary properties
+                    boundary_plot = boundary.get('plot', boundary.get('Plot'))
+                    boundary_accession = boundary.get('accession', boundary.get('Accession'))
+                    
+                    # Check if this boundary is already associated with another plot
+                    boundary_key = f"{boundary_plot}_{boundary_accession}"
+                    if boundary_key in plot_associations:
+                        print(f"Warning: Boundary {boundary_key} already associated with plot {plot_associations[boundary_key]}")
+                        continue
+                        
+                    # Update plot_borders.csv with Plot and Accession
+                    borders_df.loc[borders_df['plot_index'] == plot_idx, 'Plot'] = boundary_plot
+                    borders_df.loc[borders_df['plot_index'] == plot_idx, 'Accession'] = boundary_accession
+                    
+                    # Track association
+                    plot_associations[boundary_key] = int(plot_idx)
+                    
+                    print(f"Associated plot index {plot_idx} with boundary {boundary_key} -> Plot: {boundary_plot}, Accession: {boundary_accession}")
+                    break
+                    
+        # Save updated plot_borders.csv
+        borders_df.to_csv(plot_borders_path, index=False)
+        
+        # Return association summary
+        return jsonify({
+            'message': 'Plot associations completed successfully',
+            'associations': int(len(plot_associations)),
+            'plot_associations': plot_associations
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in plot association: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_agrowstitch_plot_associations', methods=['POST'])
+def get_agrowstitch_plot_associations():
+    """
+    Get current plot associations for AgRowStitch plots from plot_borders.csv
+    """
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment')
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    
+    if not all([year, experiment, location, population, date, platform, sensor]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+        
+    try:
+        # Path to msgs_synced.csv (for plot indices)
+        msgs_synced_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            date, platform, sensor, "Metadata", "msgs_synced.csv"
+        )
+        
+        # Path to plot_borders.csv (for plot labels)
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
+        if not os.path.exists(msgs_synced_path):
+            return jsonify({'error': 'msgs_synced.csv not found'}), 404
+            
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': 'plot_borders.csv not found'}), 404
+            
+        # Load both files
+        msgs_df = pd.read_csv(msgs_synced_path)
+        borders_df = pd.read_csv(plot_borders_path)
+        
+        # Check required columns
+        if 'plot_index' not in msgs_df.columns:
+            return jsonify({'error': 'plot_index column not found in msgs_synced.csv'}), 400
+            
+        if 'plot_index' not in borders_df.columns:
+            return jsonify({'error': 'plot_index column not found in plot_borders.csv'}), 400
+            
+        # Get plot associations from plot_borders.csv
+        associations = {}
+        for _, row in borders_df.iterrows():
+            plot_idx = row['plot_index']
+            if plot_idx > 0 and (pd.notna(row.get('Plot')) or pd.notna(row.get('Accession'))):
+                # Get center coordinates from msgs_synced.csv
+                plot_data = msgs_df[msgs_df['plot_index'] == plot_idx]
+                if not plot_data.empty:
+                    center_lat = plot_data['lat'].mean()
+                    center_lon = plot_data['lon'].mean()
+                    
+                    # Create plot label
+                    plot_value = row.get('Plot')
+                    accession_value = row.get('Accession')
+                    
+                    plot_label = f"Plot_{plot_value if pd.notna(plot_value) else 'Unknown'}"
+                    if pd.notna(accession_value):
+                        plot_label += f"_Acc_{accession_value}"
+                    
+                    associations[str(int(plot_idx))] = {
+                        'plot_label': plot_label,
+                        'center_lat': float(center_lat) if pd.notna(center_lat) else None,
+                        'center_lon': float(center_lon) if pd.notna(center_lon) else None
+                    }
+                    
+        return jsonify({
+            'associations': associations,
+            'total_plots': int(len([idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]))
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting plot associations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_plot_borders_data', methods=['POST'])
+def get_plot_borders_data():
+    """
+    Get plot borders data with plot labels and accessions
+    """
+    data = request.json
+    year = data.get('year')
+    experiment = data.get('experiment') 
+    location = data.get('location')
+    population = data.get('population')
+    
+    if not all([year, experiment, location, population]):
+        return jsonify({'error': 'Missing required parameters'}), 400
+        
+    try:
+        # Path to plot_borders.csv
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
+        if not os.path.exists(plot_borders_path):
+            return jsonify({'error': 'plot_borders.csv not found'}), 404
+            
+        # Load plot_borders.csv
+        borders_df = pd.read_csv(plot_borders_path)
+        
+        # Create a dictionary mapping plot_index to plot labels and accessions
+        plot_data = {}
+        for _, row in borders_df.iterrows():
+            plot_idx = row.get('plot_index')
+            if pd.notna(plot_idx) and plot_idx > 0:
+                plot_data[int(plot_idx)] = {
+                    'plot': row.get('Plot') if pd.notna(row.get('Plot')) else None,
+                    'accession': row.get('Accession') if pd.notna(row.get('Accession')) else None
+                }
+                
+        return jsonify({'plot_data': plot_data}), 200
+        
+    except Exception as e:
+        print(f"Error getting plot borders data: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/download_single_plot', methods=['POST'])
+def download_single_plot():
+    """
+    Download a single plot image with plot label and accession in filename
+    """
+    data = request.get_json()
+    try:
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        platform = data['platform']
+        sensor = data['sensor']
+        agrowstitch_dir = data['agrowstitchDir']
+        plot_filename = data['plotFilename']
+        
+        # Extract plot index from filename
+        plot_match = re.search(r'temp_plot_(\d+)', plot_filename)
+        if not plot_match:
+            return jsonify({'error': 'Could not extract plot index from filename'}), 400
+        
+        plot_index = int(plot_match.group(1))
+        
+        # Get plot borders data
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", year, experiment, location, population,
+            "plot_borders.csv"
+        )
+        
+        plot_label = None
+        accession = None
+        
+        if os.path.exists(plot_borders_path):
+            try:
+                borders_df = pd.read_csv(plot_borders_path)
+                plot_row = borders_df[borders_df['plot_index'] == plot_index]
+                if not plot_row.empty:
+                    plot_label = plot_row.iloc[0].get('Plot')
+                    accession = plot_row.iloc[0].get('Accession')
+                    if pd.isna(plot_label):
+                        plot_label = None
+                    if pd.isna(accession):
+                        accession = None
+            except Exception as e:
+                print(f"Error reading plot borders: {e}")
+        
+        # Build original file path
+        file_path = os.path.join(
+            data_root_dir, 'Processed', year, experiment, location, population,
+            date, platform, sensor, agrowstitch_dir, plot_filename
+        )
+        
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'Plot file not found'}), 404
+        
+        # Create new filename with plot label and accession
+        base_name = os.path.splitext(plot_filename)[0]
+        extension = os.path.splitext(plot_filename)[1]
+        
+        new_filename_parts = [base_name]
+        if plot_label:
+            new_filename_parts.append(f"Plot_{plot_label}")
+        if accession:
+            new_filename_parts.append(f"Acc_{accession}")
+        
+        new_filename = "_".join(new_filename_parts) + extension
+        
+        print(f"Download debug - Original: {plot_filename}, Enhanced: {new_filename}")
+        print(f"Plot data - plot_index: {plot_index}, plot_label: {plot_label}, accession: {accession}")
+
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        temp_file_path = os.path.join(temp_dir, new_filename)
+        
+        try:
+            # Copy original file to temp location with new name
+            shutil.copy2(file_path, temp_file_path)
+            print(f"Created temporary file: {temp_file_path}")
+            
+            # Send the temporary file with the enhanced filename
+            response = send_file(
+                temp_file_path,
+                as_attachment=True,
+                download_name=new_filename,
+                mimetype='image/png'
+            )
+            
+            # Clean up temp file after sending (Flask handles this automatically)
+            print(f"Sending file with enhanced name: {new_filename}")
+            return response
+            
+        except Exception as temp_error:
+            # Clean up temp directory if error occurs
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            raise temp_error
+        
+    except Exception as e:
+        print(f"Error downloading single plot: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 def update_progress_file(progress_file, progress, debug=False):
     with open(progress_file, 'w') as pf:
@@ -1791,6 +2439,226 @@ def update_progress_file(progress_file, progress, debug=False):
         latest_data['ortho'] = progress
         if debug:
             print('Ortho progress updated:', progress)
+
+
+
+
+
+
+
+
+
+
+
+
+
+@file_app.route('/get_data_options', methods=['GET'])
+def get_data_options():
+    """
+    Get all available years from the data directory
+    """
+    try:
+        years = []
+        raw_dir = os.path.join(data_root_dir, 'Raw')
+        
+        if os.path.exists(raw_dir):
+            years = [item for item in os.listdir(raw_dir) 
+                    if os.path.isdir(os.path.join(raw_dir, item)) and item.isdigit()]
+            years.sort()
+        
+        return jsonify({'years': years}), 200
+        
+    except Exception as e:
+        print(f"Error getting data options: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_experiments', methods=['POST'])
+def get_experiments():
+    """
+    Get available experiments for a given year
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        
+        if not year:
+            return jsonify({'error': 'Year is required'}), 400
+            
+        experiments = []
+        year_dir = os.path.join(data_root_dir, 'Raw', year)
+        
+        if os.path.exists(year_dir):
+            experiments = [item for item in os.listdir(year_dir) 
+                          if os.path.isdir(os.path.join(year_dir, item))]
+            experiments.sort()
+        
+        return jsonify({'experiments': experiments}), 200
+        
+    except Exception as e:
+        print(f"Error getting experiments: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_locations', methods=['POST'])
+def get_locations():
+    """
+    Get available locations for a given year and experiment
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        
+        if not all([year, experiment]):
+            return jsonify({'error': 'Year and experiment are required'}), 400
+            
+        locations = []
+        exp_dir = os.path.join(data_root_dir, 'Raw', year, experiment)
+        
+        if os.path.exists(exp_dir):
+            locations = [item for item in os.listdir(exp_dir) 
+                        if os.path.isdir(os.path.join(exp_dir, item))]
+            locations.sort()
+        
+        return jsonify({'locations': locations}), 200
+        
+    except Exception as e:
+        print(f"Error getting locations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_populations', methods=['POST'])
+def get_populations():
+    """
+    Get available populations for a given year, experiment, and location
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        
+        if not all([year, experiment, location]):
+            return jsonify({'error': 'Year, experiment, and location are required'}), 400
+            
+        populations = []
+        loc_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location)
+        
+        if os.path.exists(loc_dir):
+            populations = [item for item in os.listdir(loc_dir) 
+                          if os.path.isdir(os.path.join(loc_dir, item))]
+            populations.sort()
+        
+        return jsonify({'populations': populations}), 200
+        
+    except Exception as e:
+        print(f"Error getting populations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_dates', methods=['POST'])
+def get_dates():
+    """
+    Get available dates for a given year, experiment, location, and population
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        
+        if not all([year, experiment, location, population]):
+            return jsonify({'error': 'Year, experiment, location, and population are required'}), 400
+            
+        dates = []
+        # Check both Raw and Processed directories for dates
+        raw_pop_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location, population)
+        processed_pop_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population)
+        
+        date_set = set()
+        
+        # Check Raw directory
+        if os.path.exists(raw_pop_dir):
+            for item in os.listdir(raw_pop_dir):
+                item_path = os.path.join(raw_pop_dir, item)
+                if os.path.isdir(item_path) and item not in ['plot_borders.csv']:
+                    date_set.add(item)
+        
+        # Check Processed directory
+        if os.path.exists(processed_pop_dir):
+            for item in os.listdir(processed_pop_dir):
+                item_path = os.path.join(processed_pop_dir, item)
+                if os.path.isdir(item_path):
+                    date_set.add(item)
+        
+        dates = sorted(list(date_set))
+        
+        return jsonify({'dates': dates}), 200
+        
+    except Exception as e:
+        print(f"Error getting dates: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_platforms', methods=['POST'])
+def get_platforms():
+    """
+    Get available platforms for a given dataset
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        
+        if not all([year, experiment, location, population, date]):
+            return jsonify({'error': 'All parameters are required'}), 400
+            
+        platforms = []
+        # Check Processed directory for platforms
+        date_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+        
+        if os.path.exists(date_dir):
+            platforms = [item for item in os.listdir(date_dir) 
+                        if os.path.isdir(os.path.join(date_dir, item))]
+            platforms.sort()
+        
+        return jsonify({'platforms': platforms}), 200
+        
+    except Exception as e:
+        print(f"Error getting platforms: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_sensors', methods=['POST'])
+def get_sensors():
+    """
+    Get available sensors for a given dataset and platform
+    """
+    try:
+        data = request.json
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        
+        if not all([year, experiment, location, population, date, platform]):
+            return jsonify({'error': 'All parameters are required'}), 400
+            
+        sensors = []
+        # Check Processed directory for sensors
+        platform_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform)
+        
+        if os.path.exists(platform_dir):
+            sensors = [item for item in os.listdir(platform_dir) 
+                      if os.path.isdir(os.path.join(platform_dir, item))]
+            sensors.sort()
+        
+        return jsonify({'sensors': sensors}), 200
+        
+    except Exception as e:
+        print(f"Error getting sensors: {e}")
+        return jsonify({'error': str(e)}), 500
                
 def monitor_log_updates(logs_path, progress_file):
     
@@ -2708,6 +3576,9 @@ if __name__ == "__main__":
     file_app.config['DATA_ROOT_DIR'] = data_root_dir
     global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
+
+    # Register inference routes
+    register_inference_routes(file_app, data_root_dir)
 
     global now_drone_processing
     now_drone_processing = False

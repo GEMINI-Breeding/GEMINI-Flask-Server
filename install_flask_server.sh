@@ -58,7 +58,6 @@ fi
 # Check if the script is running on macOS
 if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Running on macOS."
-    export CXXFLAGS="-std=c++11"
     
     # Check if Xcode is installed
     if ! xcode-select -p &> /dev/null; then
@@ -102,15 +101,30 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate ./.conda
 
+# Remove existing clones if they exist
+echo "Checking for existing directories..."
+
+for dir in farm-ng-core AgRowStitch LightGlue; do
+    if [ -d "$dir" ]; then
+        echo "Directory '$dir' exists. Deleting..."
+        rm -rf "$dir"
+    else
+        echo "Directory '$dir' not found. Skipping deletion."
+    fi
+done
+
 # Install farm-ng packages
 if [[ "$OSTYPE" == "darwin"* ]]; then
+
+
     # Clone the farm-ng-core repo
     git clone https://github.com/farm-ng/farm-ng-core.git
 
     # Checkout the correct release and update submodules
     cd farm-ng-core/
-    # git checkout v2.3.0
+    git checkout v2.3.0
     git submodule update --init --recursive
+    sed -i '' 's/"-Werror",//g' setup.py
     cd ../
 
     # Upgrade pip and setuptools using conda's pip
@@ -121,7 +135,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Installing farm-ng-core with Conda pip..."
     cd farm-ng-core/
     ../.conda/bin/pip install .
-    cd ../
+    cd ../ 
 
     # Install farm-ng-amiga using farm-ng-core
     echo "Installing farm-ng-amiga with Conda pip..."
