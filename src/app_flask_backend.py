@@ -697,7 +697,21 @@ def upload_files():
     data_type = request.form.get('dataType')
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Original dir_path: {repr(dir_path)}")
+    print(f"Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     os.makedirs(full_dir_path, exist_ok=True)
     
     # Read msgs_synced.csv once if it's an image upload
@@ -879,7 +893,21 @@ def upload_chunk():
     total_chunks = int(request.form['totalChunks'])
     file_name = secure_filename(request.form['fileIdentifier'])
     dir_path = request.form['dirPath']
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
+    
+    # Sanitize the directory path to remove any hidden Unicode characters
+    import unicodedata
+    import re
+    
+    # Normalize Unicode and remove control characters
+    dir_path_clean = unicodedata.normalize('NFKD', dir_path)
+    dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
+    dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
+    dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
+    
+    print(f"Chunk upload - Original dir_path: {repr(dir_path)}")
+    print(f"Chunk upload - Cleaned dir_path: {repr(dir_path_clean)}")
+    
+    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -1253,10 +1281,18 @@ def query_traits():
     sensor = request.json['sensor']
     year = request.json['year']
     experiment = request.json['experiment']
+    orthomosaic_version = request.json.get('orthomosaic_version')  # Optional parameter for specific version
 
     prefix = data_root_dir+'/Processed'
-    traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
-                          '-'.join([date, sensor, 'Traits-WGS84.geojson']))
+    
+    # If orthomosaic_version is provided, look in the version-specific directory
+    if orthomosaic_version:
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', orthomosaic_version,
+                              f"{date}-{sensor}-{orthomosaic_version}-Traits-WGS84.geojson")
+    else:
+        # Default behavior - look in the Results directory (for aerial/drone traits)
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
+                              '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
     if not os.path.isfile(traitpth):
         return jsonify({'message': []}), 404
@@ -1267,6 +1303,68 @@ def query_traits():
         traits = [x for x in traits if x not in extraneous_columns]
         print(traits, flush=True)
         return jsonify(traits), 200
+
+@file_app.route('/get_orthomosaic_versions', methods=['POST'])
+def get_orthomosaic_versions():
+    """
+    Get available orthomosaic versions for a specific dataset
+    Returns both aerial/drone traits (sensor level) and roboflow inference traits (version level)
+    """
+    try:
+        data = request.json
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        platform = data['platform']
+        sensor = data['sensor']
+
+        prefix = data_root_dir + '/Processed'
+        sensor_dir = os.path.join(prefix, year, experiment, location, population, date, platform, sensor)
+        
+        versions = []
+        
+        if os.path.exists(sensor_dir):
+            # Check for aerial/drone traits at sensor level
+            aerial_trait_file = f"{date}-{platform}-{sensor}-Traits-WGS84.geojson"
+            aerial_trait_path = os.path.join(sensor_dir, aerial_trait_file)
+            
+            if os.path.exists(aerial_trait_path):
+                # Convert to relative path for Flask file server
+                relative_path = os.path.relpath(aerial_trait_path, data_root_dir)
+                versions.append({
+                    'type': 'aerial',
+                    'version': 'main',
+                    'versionName': f'{platform}',
+                    'versionType': 'aerial',
+                    'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                })
+            
+            # Check for roboflow inference traits in subdirectories
+            for item in os.listdir(sensor_dir):
+                item_path = os.path.join(sensor_dir, item)
+                if os.path.isdir(item_path):
+                    # Look for traits file with version-specific naming
+                    trait_file = f"{date}-{platform}-{sensor}-{item}-Traits-WGS84.geojson"
+                    trait_path = os.path.join(item_path, trait_file)
+                    
+                    if os.path.exists(trait_path):
+                        # Convert to relative path for Flask file server
+                        relative_path = os.path.relpath(trait_path, data_root_dir)
+                        versions.append({
+                            'type': 'roboflow',
+                            'version': item,
+                            'versionName': f'{item}',
+                            'versionType': 'roboflow',
+                            'path': f'/files/{relative_path.replace(os.sep, "/")}'
+                        })
+        
+        return jsonify(versions), 200
+        
+    except Exception as e:
+        print(f"Error getting orthomosaic versions: {e}")
+        return jsonify({'error': str(e)}), 500
     
 def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
@@ -1558,6 +1656,13 @@ def run_stitch_endpoint():
         config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
         temp_output = os.path.join(os.path.dirname(image_path), "top_output")
+        
+        # Check if image_path exists
+        if not os.path.exists(image_path):
+            return jsonify({
+                "status": "error", 
+                "message": f"Error: Image path not found at {image_path}\n\nThe selected images may not be compatible with AgRowStitch yet."
+            }), 404
         
         # remove stitched_path and temp_output if it exists
         if os.path.exists(stitched_path):
