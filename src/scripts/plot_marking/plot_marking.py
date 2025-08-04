@@ -319,6 +319,8 @@ def filter_plot_borders():
     data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
     population_path = os.path.join(data_root_dir_path, 'Raw', year, experiment, location, population)
     metadata_dir = os.path.abspath(os.path.join(population_path, date, 'rover', 'RGB', 'Metadata'))
+    if not os.path.exists(metadata_dir):
+        metadata_dir = os.path.join(population_path, date, 'Amiga', 'RGB', 'Metadata')
     msgs_synced_path = os.path.join(metadata_dir, 'msgs_synced.csv')
     plot_borders_path = os.path.join(population_path, 'plot_borders.csv')
     if not os.path.exists(plot_borders_path):
@@ -357,6 +359,11 @@ def filter_plot_borders():
                 if dist_end < min_end_distance:
                     min_end_distance = dist_end
                     end_image = msg_row['/top/rgb_file']
+
+            # check if start_image and end_image don't make sense to avoid incorrect filtering
+            # 0.25 threshold should be modified if filtering isn't working as intended due to gps drift
+            if min_start_distance > 0.25 or min_end_distance > 0.25:
+                continue
 
             # Assume camera is 'top' and construct a relative directory as used in update_plot_index
             directory = os.path.join('Raw', year, experiment, location, population, date, 'rover', 'RGB', 'Images', 'top')
