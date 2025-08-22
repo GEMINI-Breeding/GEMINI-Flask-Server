@@ -14,7 +14,6 @@ import traceback
 import tempfile
 import torch
 import argparse
-import select
 import multiprocessing
 import requests
 import zipfile
@@ -43,8 +42,8 @@ import io
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
-from scripts.utils import process_directories_in_parallel
-from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
+from scripts.utils import process_directories_in_parallel, stream_output
+from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
 from scripts.bin_to_images.bin_to_images import extract_binary
 from scripts.plot_marking.plot_marking import plot_marking_bp
 
@@ -58,13 +57,11 @@ from scripts.stitch_utils import (
     monitor_stitch_updates_multi_plot,
     create_combined_mosaic_separate
 )
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
+from PIL import ImageFile
+from scripts.directory_index import DirectoryIndex, get_cached_dirs
 
-# stitch pipeline
-import sys
-AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
-print(AGROWSTITCH_PATH)
-sys.path.append(AGROWSTITCH_PATH)
-from panorama_maker.AgRowStitch import run as run_agrowstitch
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -130,42 +127,8 @@ def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_o
         
         print("=== WORKFLOW FULLY COMPLETED ===")
 
-
-def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
-    exif_data_list = []
-    
-    # Extract EXIF Data Extraction
-    for file_path in file_paths:
-        if data_type.lower() == 'image':
-            if file_path not in existing_paths:
-                msg = get_image_exif(file_path)
-                if msg and msg['image_path'] not in existing_paths:
-                    exif_data_list.append(msg)
-                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
-    
-    if data_type.lower() == 'image' and exif_data_list:
-        if existing_df is not None and not existing_df.empty:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-        else:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
-
-# def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
-#     exif_data_list = []
-    
-#     # Extract EXIF Data Extraction
-#     for file_path in file_paths:
-#         if data_type.lower() == 'image':
-#             if file_path not in existing_paths:
-#                 msg = get_image_exif(file_path)
-#                 if msg and msg['image_path'] not in existing_paths:
-#                     exif_data_list.append(msg)
-#                     existing_paths.add(msg['image_path'])  # Prevent duplicated process
-    
-#     if data_type.lower() == 'image' and exif_data_list:
-#         if existing_df is not None and not existing_df.empty:
-#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-#         else:
-#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+# Initialize directory index as None - will be set when data_root_dir is available
+dir_index = None
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -232,62 +195,129 @@ def fetch_data_root_dir():
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
-    # global data_root_dir
-    dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
-    if os.path.exists(dir_path):
-        dirs = (entry.name for entry in os.scandir(dir_path) if entry.is_dir())
-        return jsonify(list(dirs)), 200
-    else:
-        return jsonify({'message': 'Directory not found'}), 404
+    """Fast directory listing using index"""
+    global data_root_dir, dir_index
     
-def stream_output(process):
-    """Function to read the process output and errors in real-time."""
-    while True:
-        reads = [process.stdout.fileno(), process.stderr.fileno()]
-        ret = select.select(reads, [], [])
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_index is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_index = DirectoryIndex(db_path=db_path)
+    
+    full_path = os.path.join(data_root_dir, dir_path)
 
-        for fd in ret[0]:
-            if fd == process.stdout.fileno():
-                output = process.stdout.readline()
-                if output:
-                    print("Output:", output.decode('utf-8').strip())
-            if fd == process.stderr.fileno():
-                error_output = process.stderr.readline()
-                if error_output:
-                    print("Error:", error_output.decode('utf-8').strip())
+    # Try index first
+    dirs = dir_index.get_children(full_path)
+    
+    # Fallback to filesystem if index is empty
+    if not dirs and os.path.exists(full_path):
+        dirs = os.listdir(full_path)
+        # Update index in background
+        threading.Thread(target=dir_index.update_paths, args=(dirs,), daemon=True).start()
+    
+    return jsonify(dirs), 200
 
-        if process.poll() is not None:
-            break  # Break loop if process ends
-
-    # Close stdout and stderr after reading
-    process.stdout.close()
-    process.stderr.close()
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
+    global data_root_dir, dir_index
+    
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_index is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_index = DirectoryIndex(db_path=db_path)
+    
     base_dir = Path(data_root_dir) / 'Raw'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-    return jsonify(combined_structure), 200
+    
+    # Since DirectoryIndex doesn't have nested structure methods,
+    # use the original process_directories_in_parallel method
+    try:
+        print(f"Getting nested structure for Raw directory: {base_dir}")
+        nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+        return jsonify(nested_structure), 200
+        
+    except Exception as e:
+        print(f"Error getting nested structure for Raw: {e}")
+        return jsonify({'error': 'Failed to get directory structure'}), 500
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
+    global data_root_dir, dir_index
+    
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_index is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_index = DirectoryIndex(db_path=db_path)
+    
     base_dir = Path(data_root_dir) / 'Processed'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-    return jsonify(combined_structure), 200
+    
+    # Since DirectoryIndex doesn't have nested structure methods,
+    # use the original process_directories_in_parallel method
+    try:
+        print(f"Getting nested structure for Processed directory: {base_dir}")
+        nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+        return jsonify(nested_structure), 200
+        
+    except Exception as e:
+        print(f"Error getting nested structure for Processed: {e}")
+        return jsonify({'error': 'Failed to get directory structure'}), 500
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
-    # global data_root_dir
-    dir_path = os.path.join(data_root_dir, dir_path)
-    if os.path.exists(dir_path):
-        files = os.listdir(dir_path)
-        files = [x for x in files if not x.startswith('.')]
-        files = [x for x in files if not os.path.isdir(os.path.join(dir_path, x))]
-        files.sort()
-        return jsonify(files), 200
-    else:
+    """Fast file listing using directory index"""
+    global data_root_dir, dir_index
+    
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_index is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_index = DirectoryIndex(db_path=db_path)
+    
+    full_path = os.path.join(data_root_dir, dir_path)
+    
+    # Try to get files from directory index (both files and directories, then filter)
+    try:
+        all_items = dir_index.get_children(full_path, directories_only=False, refresh_async=True)
+        
+        # Filter to get only files (not directories)
+        if all_items and isinstance(all_items[0], dict):
+            # If items have type information
+            files = [item['name'] for item in all_items if not item.get('is_directory', True)]
+        else:
+            # If no items returned from index, use fallback
+            files = []
+    except Exception as e:
+        print(f"Error using directory index for files: {e}")
+        files = []
+    
+    # Enhanced fallback with error handling
+    if not files and os.path.exists(full_path):
+        try:
+            # Direct filesystem read as fallback
+            all_entries = os.listdir(full_path)
+            files = []
+            for entry in all_entries:
+                if not entry.startswith('.'):  # Skip hidden files
+                    entry_path = os.path.join(full_path, entry)
+                    if os.path.isfile(entry_path):  # Only include files
+                        files.append(entry)
+            
+            files.sort()
+            
+            # Queue for background processing to update the database
+            if hasattr(dir_index, 'refresh_queue'):
+                dir_index.refresh_queue.put(full_path)
+            
+        except PermissionError:
+            print(f"Permission denied accessing: {full_path}")
+            return jsonify({'error': 'Permission denied'}), 403
+        except Exception as e:
+            print(f"Error reading directory {full_path}: {e}")
+            return jsonify({'error': 'Directory read failed'}), 500
+    
+    if not os.path.exists(full_path):
         return jsonify({'message': 'Directory not found'}), 404
+    
+    return jsonify(files), 200
 
 @file_app.route('/view_synced_data', methods=['POST'])
 def view_synced_data():
@@ -453,16 +483,6 @@ def update_data():
         #                 old_dir = os.path.dirname(old_dir)
         #             except OSError:
         #                 break
-        npy_path = new_path_raw + "/image_names_final.npy"
-
-        if not os.path.isfile(npy_path):
-            print(f"The file {npy_path} does not exist. Skipping this block.")
-        else:
-            loaded_npy = np.load(npy_path, allow_pickle=True).item()
-            new_path_npy = f"/Raw/{new_data['year']}/{new_data['experiment']}/{new_data['location']}/{new_data['population']}/{new_data['date']}/{new_data['platform']}/{new_data['sensor']}/Images/"
-            for entry in loaded_npy['selected_images']:
-                entry['image_path'] = new_path_npy + entry['image_path'].split('/')[-1]
-            np.save(npy_path, loaded_npy)
 
         for file in os.listdir(new_path_processed):
             file_path = os.path.join(new_path_processed, file)
@@ -708,8 +728,9 @@ def upload_files():
     dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
     dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
     
-    print(f"Original dir_path: {repr(dir_path)}")
-    print(f"Cleaned dir_path: {repr(dir_path_clean)}")
+    if dir_path != dir_path_clean:
+        print(f"Original dir_path: {repr(dir_path)}")
+        print(f"Cleaned dir_path: {repr(dir_path_clean)}")
     
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     os.makedirs(full_dir_path, exist_ok=True)
@@ -2440,18 +2461,6 @@ def update_progress_file(progress_file, progress, debug=False):
         if debug:
             print('Ortho progress updated:', progress)
 
-
-
-
-
-
-
-
-
-
-
-
-
 @file_app.route('/get_data_options', methods=['GET'])
 def get_data_options():
     """
@@ -3559,8 +3568,8 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
-    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
+    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8095,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
@@ -3588,7 +3597,7 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
+    uvicorn.run(app, port=args.flask_port)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()

@@ -4,6 +4,7 @@ import subprocess
 import os
 import shutil
 import platform
+import select
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -71,3 +72,27 @@ def dms_to_decimal(dms_str):
     if direction in ['S', 'W']:
         decimal = -decimal
     return decimal
+
+
+def stream_output(process):
+    """Function to read the process output and errors in real-time."""
+    while True:
+        reads = [process.stdout.fileno(), process.stderr.fileno()]
+        ret = select.select(reads, [], [])
+
+        for fd in ret[0]:
+            if fd == process.stdout.fileno():
+                output = process.stdout.readline()
+                if output:
+                    print("Output:", output.decode('utf-8').strip())
+            if fd == process.stderr.fileno():
+                error_output = process.stderr.readline()
+                if error_output:
+                    print("Error:", error_output.decode('utf-8').strip())
+
+        if process.poll() is not None:
+            break  # Break loop if process ends
+
+    # Close stdout and stderr after reading
+    process.stdout.close()
+    process.stderr.close()

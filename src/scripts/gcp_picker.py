@@ -184,6 +184,25 @@ def get_image_exif(image_path):
 
     return msg
 
+
+def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
+    exif_data_list = []
+    
+    # Extract EXIF Data Extraction
+    for file_path in file_paths:
+        if data_type.lower() == 'image':
+            if file_path not in existing_paths:
+                msg = get_image_exif(file_path)
+                if msg and msg['image_path'] not in existing_paths:
+                    exif_data_list.append(msg)
+                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
+    
+    if data_type.lower() == 'image' and exif_data_list:
+        if existing_df is not None and not existing_df.empty:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
+        else:
+            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+
 def natural_sort_key(s):
     """
     A key function for sorting strings containing numbers in a natural order
@@ -609,3 +628,63 @@ def update_gps_with_projection_matrix(df_msgs_synced, gcp_list_image_names, df_l
     return df_msgs_synced
 
 
+def gcp_picker_save_array(data_root_dir, data, debug=False):
+    # Extracting the directory path based on the first element in the array 
+    base_image_path = data['array'][0]['image_path']
+    platform = data['platform']
+    sensor = data['sensor']
+    processed_path = os.path.join(base_image_path.replace('/Raw/', 'Intermediate/').split(f'/{platform}')[0], platform, sensor)
+    save_directory = os.path.join(data_root_dir, processed_path)
+    if debug:
+        print(save_directory, flush=True)
+
+    # Creating the directory if it doesn't exist
+    os.makedirs(save_directory, exist_ok=True)
+
+    filename = os.path.join(save_directory, "gcp_list.txt")
+
+    # Load existing data from file
+    existing_data = {}
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+            for line in lines[1:]:
+                parts = line.strip().split()
+                # Use image name as a key for easy lookup
+                image_name = parts[5]
+                existing_data[image_name] = {
+                    'gcp_lon': parts[0],
+                    'gcp_lat': parts[1],
+                    'pointX': parts[3],
+                    'pointY': parts[4],
+                    'image_path': os.path.join(processed_path, image_name),
+                    'gcp_label': parts[6],
+                    'naturalWidth': parts[7],
+                    'naturalHeight': parts[8]
+                }
+
+    # Merge new data with existing data
+    for item in data['array']:
+        if 'pointX' in item and 'pointY' in item:
+            if debug:
+                print(item, flush=True)
+            image_name = item['image_path'].split("/")[-1]
+            existing_data[image_name] = {
+                'gcp_lon': item['gcp_lon'],
+                'gcp_lat': item['gcp_lat'],
+                'pointX': item['pointX'],
+                'pointY': item['pointY'],
+                'image_path': os.path.join(processed_path, image_name),
+                'gcp_label': item['gcp_label'],
+                'naturalWidth': item['naturalWidth'],
+                'naturalHeight': item['naturalHeight']
+            }
+
+    # Write merged data to file
+    with open(filename, "w") as f:
+        f.write('EPSG:4326\n')
+        for image_name, item in existing_data.items():
+            formatted_data = f"{item['gcp_lon']} {item['gcp_lat']} 0 {item['pointX']} {item['pointY']} {image_name} {item['gcp_label']} {item['naturalWidth']} {item['naturalHeight']} \n"
+            f.write(formatted_data)
+
+    return filename
