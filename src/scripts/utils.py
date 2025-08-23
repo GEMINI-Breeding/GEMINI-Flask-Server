@@ -107,7 +107,7 @@ def build_nested_structure_sync_from_db(dir_index, path, current_depth=0, max_de
     structure = {}
     
     # Get children directories from database
-    children = dir_index.get_children(str(path), directories_only=True, refresh_async=True)
+    children = dir_index.get_children(str(path), directories_only=True)
     
     for child_name in children:
         child_path = path / child_name
@@ -125,7 +125,7 @@ async def process_directories_in_parallel_from_db(dir_index, base_dir, max_depth
     """Process directories using DirectoryIndex database"""
 
     # Get top-level directories from database
-    top_level_dirs = dir_index.get_children(str(base_dir), directories_only=True, refresh_async=True)
+    top_level_dirs = dir_index.get_children(str(base_dir), directories_only=True)
     
     # Convert to Path objects
     directories = [base_dir / dir_name for dir_name in top_level_dirs]

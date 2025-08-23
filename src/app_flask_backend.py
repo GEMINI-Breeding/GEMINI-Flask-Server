@@ -20,6 +20,9 @@ import zipfile
 from multiprocessing import active_children, Process
 from pathlib import Path
 
+import unicodedata
+import re
+
 # Third-party library imports
 import uvicorn
 import json
@@ -199,7 +202,7 @@ def list_dirs(dir_path):
     full_path = os.path.join(data_root_dir, dir_path)
 
     # Try index first
-    dirs = dir_db.get_children_wait_if_needed(full_path)
+    dirs = dir_db.get_children(full_path, directories_only=True, wait_if_needed=True)
 
     return jsonify(dirs), 200
 
@@ -272,7 +275,7 @@ def list_files(dir_path):
     
     # Try to get files from directory index (both files and directories, then filter)
     try:
-        all_items = dir_db.get_children(full_path, directories_only=False, refresh_async=True)
+        all_items = dir_db.get_children(full_path, directories_only=False, wait_if_needed=True)
         
         # Filter to get only files (not directories)
         if all_items and isinstance(all_items[0], dict):
@@ -714,10 +717,7 @@ def upload_files():
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     
-    # Sanitize the directory path to remove any hidden Unicode characters
-    import unicodedata
-    import re
-    
+    # Sanitize the directory path to remove any hidden Unicode characters    
     # Normalize Unicode and remove control characters
     dir_path_clean = unicodedata.normalize('NFKD', dir_path)
     dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
@@ -912,8 +912,7 @@ def upload_chunk():
     dir_path = request.form['dirPath']
     
     # Sanitize the directory path to remove any hidden Unicode characters
-    import unicodedata
-    import re
+
     
     # Normalize Unicode and remove control characters
     dir_path_clean = unicodedata.normalize('NFKD', dir_path)
@@ -3588,7 +3587,7 @@ if __name__ == "__main__":
     # Initialize dir_index if it hasn't been initialized yet
     if dir_db is None:
         db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_db = DirectoryIndex(db_path=db_path)
+        dir_db = DirectoryIndex(db_path=db_path, verbose=True)
     
         # Print some records to check data
         print("=== DirectoryIndex Initialization Check ===")
@@ -3605,7 +3604,7 @@ if __name__ == "__main__":
         for test_path in test_paths:
             if os.path.exists(test_path):
                 try:
-                    children = dir_db.get_children(test_path, directories_only=True, refresh_async=False)
+                    children = dir_db.get_children(test_path, directories_only=True)
                     print(f"Path: {test_path}")
                     print(f"  Exists: True")
                     print(f"  Children count: {len(children)}")

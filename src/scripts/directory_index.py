@@ -7,8 +7,9 @@ from queue import Queue, Empty
 from threading import Thread, Event
 
 class DirectoryIndex:
-    def __init__(self, db_path="directory_index.db"):
+    def __init__(self, db_path="directory_index.db", verbose=True):
         self.db_path = db_path
+        self.verbose = verbose  # Add verbose class variable
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dir_index")
         self.refresh_queue = Queue()
@@ -18,6 +19,11 @@ class DirectoryIndex:
         self.completion_events = {}  # Events to signal when specific paths are processed
         self._init_db()
         self._start_queue_worker()
+    
+    def _log(self, message):
+        """Print message only if verbose is enabled"""
+        if self.verbose:
+            print(message)
     
     def _normalize_path(self, path):
         """Normalize path by removing trailing slash and converting to absolute path"""
@@ -65,13 +71,13 @@ class DirectoryIndex:
                 cursor = conn.execute('SELECT parent, name, is_directory FROM files LIMIT 5')
                 sample_records = cursor.fetchall()
             
-                print("Database initialized successfully")
-                print(f"  Table existed: {table_exists}")
-                print(f"  Total records: {total_records}")
-                print(f"  Sample records: {sample_records}")
+                self._log("Database initialized successfully")
+                self._log(f"  Table existed: {table_exists}")
+                self._log(f"  Total records: {total_records}")
+                self._log(f"  Sample records: {sample_records}")
             
         except Exception as e:
-            print(f"Error initializing database: {e}")
+            self._log(f"Error initializing database: {e}")
     
     def _start_queue_worker(self):
         """Start background queue worker"""
@@ -79,16 +85,16 @@ class DirectoryIndex:
             self.queue_worker_running = True
             worker_thread = Thread(target=self._queue_worker, daemon=True)
             worker_thread.start()
-            print("Directory index queue worker started")
+            self._log("Directory index queue worker started")
     
     def _queue_worker(self):
         """Background worker that processes refresh tasks sequentially"""
-        print("Queue worker thread started")
+        self._log("Queue worker thread started")
         while self.queue_worker_running:
             try:
                 task = self.refresh_queue.get(timeout=1)
                 if task is None:  # Poison pill to stop worker
-                    print("Queue worker received stop signal")
+                    self._log("Queue worker received stop signal")
                     break
                 
                 # Normalize the path
@@ -109,7 +115,9 @@ class DirectoryIndex:
                             self.completion_events[parent_path].set()
                         continue
             
-                print(f"Processing queued refresh for: {parent_path}")
+                # Print queue size when processing queued refresh
+                queue_size = self.refresh_queue.qsize()
+                self._log(f"Processing queued refresh for: {parent_path} (Queue size: {queue_size})")
                 
                 # Mark as currently processing
                 self.processing_paths.add(parent_path)
@@ -119,9 +127,9 @@ class DirectoryIndex:
                     if success:
                         # Mark as successfully processed
                         self.processed_paths[parent_path] = now
-                        print(f"Successfully processed: {parent_path}")
+                        self._log(f"Successfully processed: {parent_path}")
                     else:
-                        print(f"Failed to process: {parent_path}")
+                        self._log(f"Failed to process: {parent_path}")
                         
                     # Signal completion regardless of success/failure
                     if parent_path in self.completion_events:
@@ -143,8 +151,8 @@ class DirectoryIndex:
                 continue
             except Exception as e:
                 import traceback
-                print(f"Queue worker error: {type(e).__name__}: {str(e)}")
-                print(f"Traceback: {traceback.format_exc()}")
+                self._log(f"Queue worker error: {type(e).__name__}: {str(e)}")
+                self._log(f"Traceback: {traceback.format_exc()}")
                 
                 # Signal completion even on error
                 if 'parent_path' in locals() and parent_path in self.completion_events:
@@ -155,7 +163,7 @@ class DirectoryIndex:
                 except ValueError:
                     pass
     
-        print("Queue worker thread stopped")
+        self._log("Queue worker thread stopped")
     
     def _get_db_connection(self, timeout=10):
         """Get database connection with timeout and WAL mode"""
@@ -184,7 +192,7 @@ class DirectoryIndex:
             ''', (path, parent, name, is_directory, last_modified))
             return True
         except Exception as e:
-            print(f"Error inserting file record for {path}: {e}")
+            self._log(f"Error inserting file record for {path}: {e}")
             return False
     
     def _query_children(self, parent_path, directories_only=True):
@@ -212,12 +220,12 @@ class DirectoryIndex:
                     
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e):
-                print(f"Database locked for {parent_path}, returning empty result")
+                self._log(f"Database locked for {parent_path}, returning empty result")
                 return []
             else:
-                print(f"Database error for {parent_path}: {e}")
+                self._log(f"Database error for {parent_path}: {e}")
         except Exception as e:
-            print(f"Query error for {parent_path}: {e}")
+            self._log(f"Query error for {parent_path}: {e}")
         
         return children
     
@@ -235,10 +243,10 @@ class DirectoryIndex:
                             success_count += 1
                     
                     conn.commit()
-                    print(f"Updated {success_count}/{len(paths)} entries in database")
+                    self._log(f"Updated {success_count}/{len(paths)} entries in database")
                     
             except Exception as e:
-                print(f"Error updating database: {e}")
+                self._log(f"Error updating database: {e}")
     
     def _refresh_directory_sync(self, parent_path):
         """Synchronous directory refresh (called by queue worker)"""
@@ -247,11 +255,11 @@ class DirectoryIndex:
         
         try:
             if not os.path.exists(parent_path):
-                print(f"Path does not exist: {parent_path}")
+                self._log(f"Path does not exist: {parent_path}")
                 return False
                 
             if not os.path.isdir(parent_path):
-                print(f"Path is not directory: {parent_path}")
+                self._log(f"Path is not directory: {parent_path}")
                 return False
                 
             # Get current directory contents
@@ -262,10 +270,10 @@ class DirectoryIndex:
                         item_path = os.path.join(parent_path, item)
                         current_items.append(item_path)
             except PermissionError:
-                print(f"Permission denied accessing: {parent_path}")
+                self._log(f"Permission denied accessing: {parent_path}")
                 return False
             except Exception as e:
-                print(f"Error reading directory {parent_path}: {e}")
+                self._log(f"Error reading directory {parent_path}: {e}")
                 return False
             
             # Update database
@@ -282,7 +290,7 @@ class DirectoryIndex:
                                 success_count += 1
                         
                         conn.commit()
-                        print(f"Background refresh: updated {success_count}/{len(current_items)} items for {parent_path}")
+                        self._log(f"Background refresh: updated {success_count}/{len(current_items)} items for {parent_path}")
                         
                         # Verify the data was saved
                         verification = conn.execute(
@@ -291,62 +299,46 @@ class DirectoryIndex:
                         ).fetchone()[0]
                         
                         if verification > 0:
-                            print(f"Verification: {verification} entries saved for {parent_path}")
+                            self._log(f"Verification: {verification} entries saved for {parent_path}")
                             return True
                         else:
-                            print(f"Warning: No entries found after saving for {parent_path}")
+                            self._log(f"Warning: No entries found after saving for {parent_path}")
                             return False
                             
                 except sqlite3.OperationalError as e:
                     if "database is locked" in str(e):
-                        print(f"Database locked during refresh of {parent_path}")
+                        self._log(f"Database locked during refresh of {parent_path}")
                         return False
                     else:
-                        print(f"Database error during refresh of {parent_path}: {e}")
+                        self._log(f"Database error during refresh of {parent_path}: {e}")
                         return False
                         
         except Exception as e:
-            print(f"Error in background refresh for {parent_path}: {e}")
+            self._log(f"Error in background refresh for {parent_path}: {e}")
             return False
     
-    def get_children(self, parent_path, directories_only=True, refresh_async=True):
-        """Get children from database, optionally refresh in background"""
+    def get_children(self, parent_path, directories_only=True, wait_if_needed=False, timeout=300):
+        """
+        Get children from database with flexible refresh and waiting options
+        
+        Args:
+            parent_path: Directory path to get children from
+            directories_only: If True, return only directories
+            wait_if_needed: If True, wait for queue processing when no data found but path exists
+            timeout: Maximum seconds to wait for queue processing (only used when wait_if_needed=True)
+        
+        Returns:
+            List of child names (directories_only=True) or list of dicts with name and is_directory
+        """
+        # Normalize path first
+        parent_path = self._normalize_path(parent_path)
         
         # First: Quick database lookup
         children = self._query_children(parent_path, directories_only)
         
-        if refresh_async:
-            should_refresh = False
-            
-            if not children:
-                # No data found - need to refresh
-                should_refresh = True
-                reason = "no data found"
-            else:
-                # Data found - check if we should refresh in background
-                now = time.time()
-                if parent_path not in self.processed_paths:
-                    should_refresh = True
-                    reason = "never processed"
-                elif now - self.processed_paths[parent_path] > 300:  # 5 minutes
-                    should_refresh = True
-                    reason = "data is old"
-            
-            if should_refresh and parent_path not in self.processing_paths:
-                print(f"Queuing refresh for {parent_path} ({reason})")
-                self.refresh_queue.put(parent_path)
-        
-        return children
-    
-    def get_children_wait_if_needed(self, parent_path, directories_only=True, timeout=300):
-        """Get children, wait for queue processing if directory is empty but exists"""
-        
-        # First: Quick database lookup
-        children = self._query_children(parent_path, directories_only)
-        
-        # If no children found but path exists, queue for processing and wait
-        if not children and os.path.exists(parent_path):
-            print(f"No data found for existing path {parent_path}, queuing and waiting...")
+        # If wait_if_needed is True and no children found but path exists, wait for processing
+        if wait_if_needed and not children and os.path.exists(parent_path):
+            self._log(f"No data found for existing path {parent_path}, queuing and waiting...")
             
             # Create completion event for this path
             completion_event = Event()
@@ -359,15 +351,37 @@ class DirectoryIndex:
                 
                 # Wait for processing to complete
                 if completion_event.wait(timeout=timeout):
-                    print(f"Queue processing completed for {parent_path}, retrying query...")
+                    self._log(f"Queue processing completed for {parent_path}, retrying query...")
                     # Re-query the database after processing is complete
                     children = self._query_children(parent_path, directories_only)
                 else:
-                    print(f"Timeout waiting for queue processing of {parent_path}")
+                    self._log(f"Timeout waiting for queue processing of {parent_path}")
                     
             finally:
                 # Clean up the completion event
                 self.completion_events.pop(parent_path, None)
+        
+        # Handle async refresh logic (only if not already handled by wait_if_needed)
+        else:
+            should_refresh = False
+            
+            if not children:
+                # No data found - need to refresh
+                should_refresh = True
+                reason = "no data found"
+            else:
+                # Data found - check if we should refresh in background
+                now = time.time()
+                if parent_path not in self.processed_paths:
+                    should_refresh = True
+                    reason = "initial refreshing"
+                elif now - self.processed_paths[parent_path] > 300:  # 5 minutes
+                    should_refresh = True
+                    reason = "data is old"
+            
+            if should_refresh and parent_path not in self.processing_paths:
+                self._log(f"Queuing refresh for {parent_path} ({reason})")
+                self.refresh_queue.put(parent_path)
         
         return children
     
@@ -414,11 +428,11 @@ class DirectoryIndex:
         for event in self.completion_events.values():
             event.set()
         self.completion_events.clear()
-        print("Queue cleared and processed paths reset")
+        self._log("Queue cleared and processed paths reset")
     
     def close(self):
         """Clean shutdown"""
-        print("Shutting down DirectoryIndex...")
+        self._log("Shutting down DirectoryIndex...")
         
         # Stop queue worker
         self.queue_worker_running = False
@@ -432,12 +446,15 @@ class DirectoryIndex:
         try:
             self.refresh_queue.join()
         except Exception as e:
-            print(f"Error joining queue: {e}")
+            self._log(f"Error joining queue: {e}")
         
         # Shutdown executor
         self.executor.shutdown(wait=True)
-        print("DirectoryIndex shutdown complete")
+        self._log("DirectoryIndex shutdown complete")
 
+    def set_verbose(self, verbose):
+        """Enable or disable verbose logging"""
+        self.verbose = verbose
 
 # Rest of the file remains the same...
 _dir_cache = {}
