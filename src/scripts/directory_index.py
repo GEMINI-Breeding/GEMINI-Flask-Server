@@ -329,10 +329,7 @@ class DirectoryIndex:
         
         Returns:
             List of child names (directories_only=True) or list of dicts with name and is_directory
-        """
-        # Normalize path first
-        parent_path = self._normalize_path(parent_path)
-        
+        """        
         # First: Quick database lookup
         children = self._query_children(parent_path, directories_only)
         
