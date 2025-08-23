@@ -47,6 +47,7 @@ from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_ti
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
 from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
 from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
+from scripts.mavlink import process_mavlink_log_for_webapp
 from scripts.bin_to_images.bin_to_images import extract_binary
 from scripts.plot_marking.plot_marking import plot_marking_bp
 
@@ -765,8 +766,17 @@ def upload_files():
             target=process_exif_data_async, 
             args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
         )
-        thread.daemon = True  # Stop the main thread
+        thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
+
+    if data_type.lower() == "platformlogs":
+        thread = threading.Thread(
+            target=process_mavlink_log_for_webapp, 
+            args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
+        )
+        thread.daemon = True  # Set as daemon thread to terminate with main thread
+        thread.start()
+
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
