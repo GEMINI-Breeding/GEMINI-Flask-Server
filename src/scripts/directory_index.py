@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Empty
-from threading import Thread
+from threading import Thread, Event
 
 class DirectoryIndex:
     def __init__(self, db_path="directory_index.db"):
@@ -15,8 +15,23 @@ class DirectoryIndex:
         self.queue_worker_running = False
         self.processing_paths = set()  # Paths currently being processed
         self.processed_paths = {}  # Paths with their last processed timestamp
+        self.completion_events = {}  # Events to signal when specific paths are processed
         self._init_db()
         self._start_queue_worker()
+    
+    def _normalize_path(self, path):
+        """Normalize path by removing trailing slash and converting to absolute path"""
+        if not path:
+            return path
+        
+        # Convert to absolute path and normalize
+        normalized = os.path.abspath(path)
+        
+        # Remove trailing slash except for root directory
+        if len(normalized) > 1 and normalized.endswith(os.sep):
+            normalized = normalized.rstrip(os.sep)
+            
+        return normalized
     
     def _init_db(self):
         """Initialize simple database structure"""
@@ -26,6 +41,10 @@ class DirectoryIndex:
                 conn.execute('PRAGMA synchronous=NORMAL')
                 conn.execute('PRAGMA cache_size=10000')
                 
+                # Check if table exists and get record count
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files'")
+                table_exists = cursor.fetchone() is not None
+            
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS files (
                         path TEXT PRIMARY KEY,
@@ -37,7 +56,20 @@ class DirectoryIndex:
                 ''')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_parent ON files(parent)')
                 conn.commit()
+            
+                # Get total record count
+                cursor = conn.execute('SELECT COUNT(*) FROM files')
+                total_records = cursor.fetchone()[0]
+            
+                # Get sample records
+                cursor = conn.execute('SELECT parent, name, is_directory FROM files LIMIT 5')
+                sample_records = cursor.fetchall()
+            
                 print("Database initialized successfully")
+                print(f"  Table existed: {table_exists}")
+                print(f"  Total records: {total_records}")
+                print(f"  Sample records: {sample_records}")
+            
         except Exception as e:
             print(f"Error initializing database: {e}")
     
@@ -59,7 +91,8 @@ class DirectoryIndex:
                     print("Queue worker received stop signal")
                     break
                 
-                parent_path = task
+                # Normalize the path
+                parent_path = self._normalize_path(task)
                 
                 # Skip if currently being processed
                 if parent_path in self.processing_paths:
@@ -71,8 +104,11 @@ class DirectoryIndex:
                 if parent_path in self.processed_paths:
                     if now - self.processed_paths[parent_path] < 30:
                         self.refresh_queue.task_done()
+                        # Signal completion even if skipped
+                        if parent_path in self.completion_events:
+                            self.completion_events[parent_path].set()
                         continue
-                
+            
                 print(f"Processing queued refresh for: {parent_path}")
                 
                 # Mark as currently processing
@@ -86,16 +122,21 @@ class DirectoryIndex:
                         print(f"Successfully processed: {parent_path}")
                     else:
                         print(f"Failed to process: {parent_path}")
+                        
+                    # Signal completion regardless of success/failure
+                    if parent_path in self.completion_events:
+                        self.completion_events[parent_path].set()
+                        
                 finally:
                     # Remove from processing set
                     self.processing_paths.discard(parent_path)
-                
+            
                 # Clean up old processed paths (keep only last hour)
                 old_paths = [path for path, timestamp in self.processed_paths.items() 
                            if now - timestamp > 3600]
                 for path in old_paths:
                     del self.processed_paths[path]
-                
+            
                 self.refresh_queue.task_done()
                 
             except Empty:
@@ -105,11 +146,15 @@ class DirectoryIndex:
                 print(f"Queue worker error: {type(e).__name__}: {str(e)}")
                 print(f"Traceback: {traceback.format_exc()}")
                 
+                # Signal completion even on error
+                if 'parent_path' in locals() and parent_path in self.completion_events:
+                    self.completion_events[parent_path].set()
+                
                 try:
                     self.refresh_queue.task_done()
                 except ValueError:
                     pass
-        
+    
         print("Queue worker thread stopped")
     
     def _get_db_connection(self, timeout=10):
@@ -120,11 +165,14 @@ class DirectoryIndex:
     
     def _insert_file_record(self, conn, path, parent=None):
         """Insert a single file record into database"""
+        # Normalize paths before storing
+        path = self._normalize_path(path)
+        parent = self._normalize_path(parent) if parent else self._normalize_path(os.path.dirname(path))
+        
         if not os.path.exists(path):
             return False
             
         try:
-            parent = parent or os.path.dirname(path)
             name = os.path.basename(path)
             is_directory = 1 if os.path.isdir(path) else 0
             last_modified = os.path.getmtime(path)
@@ -141,6 +189,9 @@ class DirectoryIndex:
     
     def _query_children(self, parent_path, directories_only=True):
         """Query children from database with connection timeout"""
+        # Normalize parent_path before querying
+        parent_path = self._normalize_path(parent_path)
+        
         children = []
         try:
             with self._get_db_connection(timeout=5) as conn:
@@ -149,13 +200,15 @@ class DirectoryIndex:
                         'SELECT name FROM files WHERE parent = ? AND is_directory = 1 ORDER BY name',
                         (parent_path,)
                     )
-                    children = [row[0] for row in cursor.fetchall()]
+                    result = cursor.fetchall()
+                    children = [row[0] for row in result]
                 else:
                     cursor = conn.execute(
                         'SELECT name, is_directory FROM files WHERE parent = ? ORDER BY name',
                         (parent_path,)
                     )
-                    children = [{'name': row[0], 'is_directory': bool(row[1])} for row in cursor.fetchall()]
+                    result = cursor.fetchall()
+                    children = [{'name': row[0], 'is_directory': bool(row[1])} for row in result]
                     
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e):
@@ -189,6 +242,9 @@ class DirectoryIndex:
     
     def _refresh_directory_sync(self, parent_path):
         """Synchronous directory refresh (called by queue worker)"""
+        # Normalize path
+        parent_path = self._normalize_path(parent_path)
+        
         try:
             if not os.path.exists(parent_path):
                 print(f"Path does not exist: {parent_path}")
@@ -279,41 +335,47 @@ class DirectoryIndex:
             if should_refresh and parent_path not in self.processing_paths:
                 print(f"Queuing refresh for {parent_path} ({reason})")
                 self.refresh_queue.put(parent_path)
+        
+        return children
+    
+    def get_children_wait_if_needed(self, parent_path, directories_only=True, timeout=300):
+        """Get children, wait for queue processing if directory is empty but exists"""
+        
+        # First: Quick database lookup
+        children = self._query_children(parent_path, directories_only)
+        
+        # If no children found but path exists, queue for processing and wait
+        if not children and os.path.exists(parent_path):
+            print(f"No data found for existing path {parent_path}, queuing and waiting...")
+            
+            # Create completion event for this path
+            completion_event = Event()
+            self.completion_events[parent_path] = completion_event
+            
+            try:
+                # Queue the refresh if not already processing
+                if parent_path not in self.processing_paths:
+                    self.refresh_queue.put(parent_path)
                 
-                # If no data found, wait briefly and try again
-                if not children:
-                    print(f"No entries found in database for {parent_path}, waiting for refresh...")
-                    time.sleep(0.5)  # Wait a bit longer
-                    
-                    # Try query again
+                # Wait for processing to complete
+                if completion_event.wait(timeout=timeout):
+                    print(f"Queue processing completed for {parent_path}, retrying query...")
+                    # Re-query the database after processing is complete
                     children = self._query_children(parent_path, directories_only)
+                else:
+                    print(f"Timeout waiting for queue processing of {parent_path}")
                     
-                    # If still no data, provide direct filesystem read as fallback
-                    if not children:
-                        print(f"Still no data after refresh, using filesystem fallback for {parent_path}")
-                        try:
-                            if os.path.exists(parent_path):
-                                items = []
-                                for item in os.listdir(parent_path):
-                                    if not item.startswith('.'):
-                                        item_path = os.path.join(parent_path, item)
-                                        if directories_only:
-                                            if os.path.isdir(item_path):
-                                                items.append(item)
-                                        else:
-                                            items.append({
-                                                'name': item,
-                                                'is_directory': os.path.isdir(item_path)
-                                            })
-                                children = sorted(items, key=lambda x: x if isinstance(x, str) else x['name'])
-                                print(f"Fallback returned {len(children)} items for {parent_path}")
-                        except Exception as e:
-                            print(f"Fallback filesystem read failed for {parent_path}: {e}")
+            finally:
+                # Clean up the completion event
+                self.completion_events.pop(parent_path, None)
         
         return children
     
     def force_refresh(self, parent_path):
         """Synchronously refresh a directory"""
+        # Normalize path
+        parent_path = self._normalize_path(parent_path)
+        
         # Remove from processed paths to force refresh
         self.processed_paths.pop(parent_path, None)
         self.processing_paths.discard(parent_path)
@@ -347,6 +409,11 @@ class DirectoryIndex:
         
         self.processed_paths.clear()
         self.processing_paths.clear()
+        
+        # Clear completion events
+        for event in self.completion_events.values():
+            event.set()
+        self.completion_events.clear()
         print("Queue cleared and processed paths reset")
     
     def close(self):
@@ -356,6 +423,10 @@ class DirectoryIndex:
         # Stop queue worker
         self.queue_worker_running = False
         self.refresh_queue.put(None)  # Poison pill
+        
+        # Signal all pending completion events
+        for event in self.completion_events.values():
+            event.set()
         
         # Wait for queue to empty
         try:

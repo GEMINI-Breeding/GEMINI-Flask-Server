@@ -42,7 +42,7 @@ import io
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
-from scripts.utils import process_directories_in_parallel, stream_output
+from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
 from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
 from scripts.bin_to_images.bin_to_images import extract_binary
 from scripts.plot_marking.plot_marking import plot_marking_bp
@@ -127,8 +127,6 @@ def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_o
         
         print("=== WORKFLOW FULLY COMPLETED ===")
 
-# Initialize directory index as None - will be set when data_root_dir is available
-dir_index = None
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -196,87 +194,85 @@ def fetch_data_root_dir():
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
     """Fast directory listing using index"""
-    global data_root_dir, dir_index
-    
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_index is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_index = DirectoryIndex(db_path=db_path)
+    global data_root_dir, dir_db
     
     full_path = os.path.join(data_root_dir, dir_path)
 
     # Try index first
-    dirs = dir_index.get_children(full_path)
-    
-    # Fallback to filesystem if index is empty
-    if not dirs and os.path.exists(full_path):
-        dirs = os.listdir(full_path)
-        # Update index in background
-        threading.Thread(target=dir_index.update_paths, args=(dirs,), daemon=True).start()
-    
+    dirs = dir_db.get_children_wait_if_needed(full_path)
+
     return jsonify(dirs), 200
 
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
-    global data_root_dir, dir_index
-    
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_index is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_index = DirectoryIndex(db_path=db_path)
+    global data_root_dir, dir_db
     
     base_dir = Path(data_root_dir) / 'Raw'
     
-    # Since DirectoryIndex doesn't have nested structure methods,
-    # use the original process_directories_in_parallel method
     try:
-        print(f"Getting nested structure for Raw directory: {base_dir}")
-        nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+        print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
+        
+        # Try database-first approach
+        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
+        
         return jsonify(nested_structure), 200
         
     except Exception as e:
-        print(f"Error getting nested structure for Raw: {e}")
-        return jsonify({'error': 'Failed to get directory structure'}), 500
+        print(f"Error getting nested structure from database: {e}")
+        print("Falling back to original filesystem method...")
+        
+        # Fallback to original method if database approach fails
+        try:
+            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+            return jsonify(nested_structure), 200
+        except Exception as fallback_error:
+            print(f"Error in fallback method: {fallback_error}")
+            return jsonify({'error': 'Failed to get directory structure'}), 500
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
-    global data_root_dir, dir_index
-    
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_index is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_index = DirectoryIndex(db_path=db_path)
+    global data_root_dir, dir_db
+
     
     base_dir = Path(data_root_dir) / 'Processed'
     
-    # Since DirectoryIndex doesn't have nested structure methods,
-    # use the original process_directories_in_parallel method
     try:
-        print(f"Getting nested structure for Processed directory: {base_dir}")
-        nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+        print(f"Getting nested structure for Processed directory using DirectoryIndex: {base_dir}")
+        
+        # Try database-first approach
+        nested_structure = await process_directories_in_parallel_from_db(base_dir, max_depth=9)
+        
         return jsonify(nested_structure), 200
         
     except Exception as e:
-        print(f"Error getting nested structure for Processed: {e}")
-        return jsonify({'error': 'Failed to get directory structure'}), 500
+        print(f"Error getting nested structure from database: {e}")
+        print("Falling back to original filesystem method...")
+        
+        # Fallback to original method if database approach fails
+        try:
+            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+            return jsonify(nested_structure), 200
+        except Exception as fallback_error:
+            print(f"Error in fallback method: {fallback_error}")
+            return jsonify({'error': 'Failed to get directory structure'}), 500
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
     """Fast file listing using directory index"""
-    global data_root_dir, dir_index
+    global data_root_dir, dir_db
     
     # Initialize dir_index if it hasn't been initialized yet
-    if dir_index is None:
+    if dir_db is None:
         db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_index = DirectoryIndex(db_path=db_path)
+        dir_db = DirectoryIndex(db_path=db_path)
     
     full_path = os.path.join(data_root_dir, dir_path)
     
     # Try to get files from directory index (both files and directories, then filter)
     try:
-        all_items = dir_index.get_children(full_path, directories_only=False, refresh_async=True)
+        all_items = dir_db.get_children(full_path, directories_only=False, refresh_async=True)
         
         # Filter to get only files (not directories)
         if all_items and isinstance(all_items[0], dict):
@@ -304,8 +300,8 @@ def list_files(dir_path):
             files.sort()
             
             # Queue for background processing to update the database
-            if hasattr(dir_index, 'refresh_queue'):
-                dir_index.refresh_queue.put(full_path)
+            if hasattr(dir_db, 'refresh_queue'):
+                dir_db.refresh_queue.put(full_path)
             
         except PermissionError:
             print(f"Permission denied accessing: {full_path}")
@@ -3586,6 +3582,58 @@ if __name__ == "__main__":
     global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
+    global dir_db
+    # Initialize directory index as None - will be set when data_root_dir is available
+    dir_db = None
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_db is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_db = DirectoryIndex(db_path=db_path)
+    
+        # Print some records to check data
+        print("=== DirectoryIndex Initialization Check ===")
+        print(f"Database path: {db_path}")
+        print(f"Database exists: {os.path.exists(db_path)}")
+        
+        # Check if we can query some basic directories
+        test_paths = [
+            os.path.join(data_root_dir, 'Raw/'),
+            os.path.join(data_root_dir, 'Processed/'),
+            data_root_dir
+        ]
+        
+        for test_path in test_paths:
+            if os.path.exists(test_path):
+                try:
+                    children = dir_db.get_children(test_path, directories_only=True, refresh_async=False)
+                    print(f"Path: {test_path}")
+                    print(f"  Exists: True")
+                    print(f"  Children count: {len(children)}")
+                    print(f"  Children: {children[:5] if len(children) > 5 else children}")  # Show first 5
+                    
+                    # Check database entries for this path
+                    try:
+                        with dir_db._get_db_connection(timeout=5) as conn:
+                            cursor = conn.execute(
+                                'SELECT COUNT(*) FROM files WHERE parent = ?', 
+                                (test_path,)
+                            )
+                            db_count = cursor.fetchone()[0]
+                            print(f"  Database entries: {db_count}")
+                    except Exception as db_e:
+                        print(f"  Database query error: {db_e}")
+                        
+                except Exception as e:
+                    print(f"Path: {test_path}")
+                    print(f"  Error getting children: {e}")
+            else:
+                print(f"Path: {test_path}")
+                print(f"  Exists: False")
+        
+        # Print processing status
+        status = dir_db.get_processing_status()
+        print(f"Processing status: {status}")
+        print("=== End DirectoryIndex Check ===")
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
 
