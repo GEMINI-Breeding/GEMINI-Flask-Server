@@ -218,7 +218,7 @@ async def list_dirs_nested():
         print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
         
         # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9, auto_refresh=True)
+        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
         
         return jsonify(nested_structure), 200
         
