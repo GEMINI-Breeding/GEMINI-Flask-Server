@@ -20,7 +20,7 @@ from scipy.interpolate import interp1d
 from google.protobuf import json_format
 from kornia_rs import ImageDecoder
 from kornia.core import tensor
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from farm_ng.oak import oak_pb2
 from farm_ng.gps import gps_pb2
@@ -227,6 +227,7 @@ def extract_images(
     calibrations: Dict[str, dict],
     output_path: Path,
     current_ts: int,
+    progress_tracker: Optional[dict] = None,
 ) -> bool:
     """Extracts images as jpg and stores timestamps into a csv file where they are synced based
     on their sequence number.
@@ -338,6 +339,10 @@ def extract_images(
                 img_name: str = f"rgb-{updated_ts}.jpg"
                 cv2.imwrite(str(camera_path / img_name), img)
 
+            if progress_tracker:
+                progress_tracker['events_processed'] += 1
+                _write_fractional_progress(progress_tracker)
+
     # split dataframe based on columns
     dfs = []
     ts_cols_list = []
@@ -384,7 +389,8 @@ def extract_gps(
     gps_topics: List[str],
     events_dict: Dict[str, List[EventLogPosition]],
     output_path: Path,
-    current_ts: int
+    current_ts: int,
+    progress_tracker: Optional[dict] = None,
 ) -> bool:
     """Extracts camera extrinsics/intrinsics from calibration event.
 
@@ -506,7 +512,8 @@ def extract_gps(
 def extract_calibrations(
     calib_topics: List[str],
     events_dict: Dict[str, List[EventLogPosition]],
-    output_path: Path
+    output_path: Path,
+    progress_tracker: Optional[dict] = None,
 ) -> bool:
     """Extracts camera extrinsics/intrinsics from calibration event.
 
@@ -518,121 +525,154 @@ def extract_calibrations(
     """ 
 
     print('--- calibration extraction ---')
-    
     # initialize save path
     save_path = output_path / 'Metadata'
     if not save_path.exists():
         save_path.mkdir(parents=True, exist_ok=True)
 
-    # loop through each topic
     calibrations = {}
     for topic_name in calib_topics:
-
-        # prepare save path
         camera_name = topic_name.split('/')[1]
-
-        # initialize calib events and event log
         calib_events: list[EventLogPosition] = events_dict[topic_name]
-        event_log: EventLogPosition
-
-        # check event log to extract information
-        for event_log in tqdm(calib_events): # *calibration events should remain unchange during the collection
-
-            # read message
+        for event_log in tqdm(calib_events):  # calibration events typically few
             calib_msg = event_log.read_message()
             json_data: dict = json_format.MessageToDict(calib_msg)
-
-            # store as pbtxt file
-            camera_name = CAMERA_POSITIONS[camera_name]
-            json_name = f'{camera_name}_calibration.json'
+            camera_name_pos = CAMERA_POSITIONS[camera_name]
+            json_name = f'{camera_name_pos}_calibration.json'
             json_path = save_path / json_name
-            
-            # store data
-            calibrations[camera_name] = json_data
-            
-            # check if json file exists
-            if json_path.exists():
-                continue
-            else:
+            calibrations[camera_name_pos] = json_data
+            if not json_path.exists():
                 with open(json_path, "w") as json_file:
                     json.dump(json_data, json_file, indent=4)
-
+            if progress_tracker:
+                progress_tracker['events_processed'] += 1
+                _write_fractional_progress(progress_tracker)
     return calibrations
 
+def _write_fractional_progress(progress_tracker: dict):
+    """Write fractional progress (completed files + current file fraction) to progress file."""
+    try:
+        ep = progress_tracker['events_processed']
+        te = progress_tracker['total_events'] or 1
+        fi = progress_tracker['file_index']
+        progress_value = fi + (ep / te)
+        progress_tracker['progress_path'].write_text(f"{progress_value:.4f}")
+    except Exception:
+        pass
+
 def process_single_binary_file(args):
-    """
-    Returns:
-        file_df (pd.DataFrame): synced & labeled rows for THIS file only
-        images_cols (list[str])
-        file_index (int)
-    """
-    file_name, output_path, file_index, total_files = args
+    # updated to accept progress tracking
+    file_name, output_path, file_index, total_files, progress_meta = args
     print(f"Processing file {file_index + 1}/{total_files}: {file_name}")
+    try:
+        reader = EventsFileReader(file_name)
+        if not reader.open():
+            raise RuntimeError(f"Failed to open events file: {file_name}")
+        # Try to get the index with error handling for malformed URI queries
+        try:
+            events_index = reader.get_index()
+        except ValueError as e:
+            if "dictionary update sequence element" in str(e) and "has length 1; 2 is required" in str(e):
+                print(f"Warning: Malformed URI query in file {file_name}. This may be due to corrupted binary data.")
+                print("Attempting to continue with available data...")
+                
+                # Try to patch the farm_ng library function temporarily
+                import farm_ng.core.uri as uri_module
+                original_func = uri_module.uri_query_to_dict
+                
+                def patched_uri_query_to_dict(uri):
+                    try:
+                        # Handle malformed query parameters by filtering out invalid ones
+                        params = []
+                        for x in uri.query.split("&"):
+                            if "=" in x:
+                                params.append(x.split("=", 1))  # Split only on first "="
+                            else:
+                                # Skip malformed parameters or treat as key with empty value
+                                if x.strip():  # Only if not empty
+                                    params.append([x, ""])
+                        return dict(params)
+                    except Exception:
+                        return {}
+                
+                # Temporarily patch the function
+                uri_module.uri_query_to_dict = patched_uri_query_to_dict
+                
+                try:
+                    events_index = reader.get_index()
+                finally:
+                    # Restore original function
+                    uri_module.uri_query_to_dict = original_func
+            else:
+                raise
 
-    reader = EventsFileReader(file_name)
-    if not reader.open():
-        raise RuntimeError(f"Failed to open events file: {file_name}")
+        events_dict = build_events_dict(events_index)
+        topics = [t for t in events_dict if any(tp in t.lower() for tp in TYPES)]
+        calib_topics = [t for t in topics if 'calibration' in t.lower()]
+        gps_topics = [t for t in topics if any(g in t.lower() for g in GPS_TYPES)]
+        image_topics = [t for t in topics if any(i in t.lower() for i in IMAGE_TYPES)]
+        # count events for progress granularity (only in sequential mode where progress_meta present)
+        progress_tracker = None
+        if progress_meta:
+            total_events = 0
+            for t in calib_topics + gps_topics + image_topics:
+                total_events += len(events_dict.get(t, []))
+            progress_tracker = {
+                'events_processed': 0,
+                'total_events': total_events,
+                'file_index': file_index,
+                'progress_path': progress_meta['progress_path']
+            }
+        # base ts
+        parts = os.path.basename(file_name).split('_')
+        if len(parts) < 7:
+            raise RuntimeError("File name is not compatible with this script.")
+        date_string = '_'.join(parts[:7])
+        date_object = datetime.strptime(date_string, '%Y_%m_%d_%H_%M_%S_%f').replace(tzinfo=timezone.utc)
+        current_ts = int(date_object.timestamp() * 1e6)
+        calibrations = extract_calibrations(calib_topics, events_dict, output_path, progress_tracker) or None
+        gps_dfs, gps_cols, _ = extract_gps(gps_topics, events_dict, output_path, current_ts, progress_tracker)
+        if not gps_dfs:
+            raise RuntimeError(f"Failed to extract gps event file for {file_name}")
+        image_dfs, images_cols, _ = extract_images(image_topics, events_dict, calibrations, output_path, current_ts, progress_tracker)
+        if not image_dfs:
+            raise RuntimeError(f"Failed to extract image event file for {file_name}")
+        # finalize progress for file
+        if progress_tracker:
+            progress_tracker['events_processed'] = progress_tracker['total_events']
+            _write_fractional_progress(progress_tracker)
+        # interpolate GPS
+        skip_pointer = 0
+        gps_np_list, gps_df_dict = interpolate_gps(gps_dfs, image_dfs, skip_pointer)
+        gps_arrays = []
+        gps_cols_flat = []
+        for i, name in enumerate(GPS_ORDER):
+            arr = gps_np_list[i]
+            schema = GPS_SCHEMAS[name]
+            if i == 0:
+                # keep the first GPS block completely (includes stamp)
+                gps_arrays.append(arr)
+                gps_cols_flat += schema
+            else:
+                # drop just the first column (stamp) for subsequent GPS blocks
+                gps_arrays.append(arr[:, 1:])
+                gps_cols_flat += schema[1:]
+        msgs = image_dfs + gps_arrays
+        msgs_synced = sync_msgs(msgs)
+        file_mat = np.concatenate(msgs_synced, axis=1)
+        final_cols = images_cols + gps_cols_flat
+        assert file_mat.shape[1] == len(final_cols), f"col mismatch {file_mat.shape[1]} vs {len(final_cols)}"
+        file_df = pd.DataFrame(file_mat, columns=final_cols).reset_index(drop=True)
+        file_df = postprocessing(file_df, images_cols)
 
-    events_index = reader.get_index()
-    events_dict = build_events_dict(events_index)
-    topics = [t for t in events_dict if any(tp in t.lower() for tp in TYPES)]
-
-    # base ts
-    parts = os.path.basename(file_name).split('_')
-    if len(parts) < 7:
-        raise RuntimeError("File name is not compatible with this script.")
-    date_string = '_'.join(parts[:7])
-    date_object = datetime.strptime(date_string, '%Y_%m_%d_%H_%M_%S_%f').replace(tzinfo=timezone.utc)
-    current_ts = int(date_object.timestamp() * 1e6)
-
-    # calibration
-    calib_topics = [t for t in topics if 'calibration' in t.lower()]
-    calibrations = extract_calibrations(calib_topics, events_dict, output_path) or None
-
-    # gps
-    gps_topics = [t for t in topics if any(g in t.lower() for g in GPS_TYPES)]
-    gps_dfs, gps_cols, _ = extract_gps(gps_topics, events_dict, output_path, current_ts)
-    if not gps_dfs:
-        raise RuntimeError(f"Failed to extract gps event file for {file_name}")
-
-    # images
-    image_topics = [t for t in topics if any(i in t.lower() for i in IMAGE_TYPES)]
-    image_dfs, images_cols, _ = extract_images(image_topics, events_dict, calibrations, output_path, current_ts)
-    if not image_dfs:
-        raise RuntimeError(f"Failed to extract image event file for {file_name}")
-
-    # interpolate GPS
-    skip_pointer = 0
-    gps_np_list, gps_df_dict = interpolate_gps(gps_dfs, image_dfs, skip_pointer)
-
-    # sync
-    gps_arrays = []
-    gps_cols_flat = []
-
-    for i, name in enumerate(GPS_ORDER):
-        arr = gps_np_list[i]
-        schema = GPS_SCHEMAS[name]
-
-        if i == 0:
-            # keep the first GPS block completely (includes stamp)
-            gps_arrays.append(arr)
-            gps_cols_flat += schema
-        else:
-            # drop just the first column (stamp) for subsequent GPS blocks
-            gps_arrays.append(arr[:, 1:])
-            gps_cols_flat += schema[1:]
-
-    msgs = image_dfs + gps_arrays
-    msgs_synced = sync_msgs(msgs)
-
-    file_mat = np.concatenate(msgs_synced, axis=1)
-    final_cols = images_cols + gps_cols_flat
-    assert file_mat.shape[1] == len(final_cols), f"col mismatch {file_mat.shape[1]} vs {len(final_cols)}"
-
-    file_df = pd.DataFrame(file_mat, columns=final_cols).reset_index(drop=True)
-    file_df = postprocessing(file_df, images_cols)
-
-    return file_df, gps_df_dict, images_cols, file_index
+        return file_df, gps_df_dict, images_cols, file_index
+        
+    except Exception as e:
+        print(f"Error processing file {file_name}: {e}")
+        # Return empty/minimal data to allow other files to continue processing
+        empty_df = pd.DataFrame()
+        empty_gps = {k: pd.DataFrame(columns=GPS_SCHEMAS[k]) for k in GPS_ORDER}
+        return empty_df, empty_gps, [], file_index
 
 def cleanup_output_files(output_path):
     """Clean up any partially created files and directories."""
@@ -645,7 +685,7 @@ def cleanup_output_files(output_path):
     except Exception as e:
         print(f"Warning: Could not clean up output directory: {e}")
 
-def extract_binary(file_names, output_path) -> None:
+def extract_binary(file_names, output_path, granular_progress: bool = True) -> None:
     """Read an events file and extracts relevant information from it.
 
     Args:
@@ -676,7 +716,7 @@ def extract_binary(file_names, output_path) -> None:
     # Check if we're running in a daemon process (which can't spawn child processes)
     current_process = mp.current_process()
     is_daemon = current_process.daemon if hasattr(current_process, 'daemon') else False
-    use_parallel = len(file_names) > 1
+    use_parallel = len(file_names) > 1 and not granular_progress  # disable parallel when granular progress desired
     use_multiprocessing = use_parallel and not is_daemon
     use_threading = use_parallel and is_daemon
     
@@ -766,16 +806,30 @@ def extract_binary(file_names, output_path) -> None:
                 futures = [executor.submit(process_single_binary_file, a) for a in process_args]
 
                 for fut in as_completed(futures):
-                    file_df, gps_df_dict, img_cols, file_index = fut.result()
-                    all_file_dfs.append(file_df)
-                    for k in GPS_ORDER:
-                        all_gps_parts[k].append(gps_df_dict[k])
-                    if images_cols is None:
-                        images_cols = img_cols
+                    try:
+                        file_df, gps_df_dict, img_cols, file_index = fut.result()
+                        
+                        # Only add to results if we got valid data
+                        if not file_df.empty:
+                            all_file_dfs.append(file_df)
+                            for k in GPS_ORDER:
+                                all_gps_parts[k].append(gps_df_dict[k])
+                            if images_cols is None:
+                                images_cols = img_cols
+                        else:
+                            print(f"Warning: Skipping file {file_index} due to processing errors")
 
-                    with progress_lock:
-                        progress_done += 1
-                        progress_path.write_text(f"{progress_done}")
+                        with progress_lock:
+                            progress_done += 1
+                            progress_path.write_text(f"{progress_done}")
+                        
+                    except Exception as e:
+                        print(f"Error processing one of the files: {e}")
+                        # Continue with other files
+                        with progress_lock:
+                            progress_done += 1
+                            progress_path.write_text(f"{progress_done}")
+                        continue
 
             if all_file_dfs:
                 save_path = output_path / 'Metadata'
@@ -803,52 +857,47 @@ def extract_binary(file_names, output_path) -> None:
             raise RuntimeError(f"Binary extraction failed in threading mode: {e}")
     
     else:
-        # Sequential processing
-        if is_daemon and len(file_names) > 1:
-            print("Running in daemon process - using sequential processing for multiple files.")
+        # Sequential processing with granular progress
+        if is_daemon and len(file_names) > 1 and granular_progress:
+            print("Granular progress enabled in daemon process - forcing sequential processing for multiple files.")
         elif len(file_names) == 1:
-            print("Using sequential processing for single file.")
+            print("Using sequential processing for single file (granular progress).")
         else:
-            print("Using sequential processing.")
-
+            print("Using sequential processing (granular progress enabled).")
         all_file_dfs = []
         all_gps_parts = {k: [] for k in GPS_ORDER}
         images_cols = None
-
         progress_path = output_path / "progress.txt"
         counter = 0
-
+        total_files = len(file_names)
         for file_name in tqdm(file_names):
             with open(report_path, "a") as f:
                 f.write(f"\n--- File: {file_name} ---\n")
-
+            # pass progress meta for fractional updates
+            progress_meta = { 'progress_path': progress_path }
             file_df, gps_df_dict, img_cols, _ = process_single_binary_file(
-                (file_name, output_path, counter, len(file_names))
+                (file_name, output_path, counter, total_files, progress_meta)
             )
             all_file_dfs.append(file_df)
             for k in GPS_ORDER:
                 all_gps_parts[k].append(gps_df_dict[k])
             if images_cols is None:
                 images_cols = img_cols
-
             counter += 1
+            # ensure progress shows completed file count precisely
             progress_path.write_text(f"{counter}")
-
         if all_file_dfs:
             save_path = output_path / 'Metadata'
             save_path.mkdir(parents=True, exist_ok=True)
-
             msgs_df = pd.concat(all_file_dfs, ignore_index=True)
             msgs_df.to_csv(save_path / "msgs_synced.csv", index=False)
-
             for k in GPS_ORDER:
                 gps_full = (pd.concat(all_gps_parts[k], ignore_index=True)
                             .drop_duplicates('stamp')
                             .sort_values('stamp'))
                 gps_full = enforce_schema(gps_full, k)
                 gps_full.to_csv(save_path / f"gps_{k}.csv", index=False)
-
-            print("Successfully created msgs_synced.csv (and gps_*.csv) from sequential processing")
+            print("Successfully created msgs_synced.csv (and gps_*.csv) with granular progress")
         else:
             print("Warning: No valid synced messages found for final output")
 

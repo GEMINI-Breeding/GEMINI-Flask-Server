@@ -73,7 +73,7 @@ class StereoWrapper:
         Returns:
             The processed images for both left and right
         """
-        if platform == 'rover':
+        if platform == 'rover' or platform == 'Amiga':
             left_img = cv2.flip(left_img, -1)
             right_img = cv2.flip(right_img, -1)
             left_img = cv2.remap(left_img, self.leftX, self.leftY, cv2.INTER_LINEAR)
@@ -83,7 +83,7 @@ class StereoWrapper:
     def compute_disparity(self,
                           left_img: np.ndarray,
                           right_img: np.ndarray,
-                          platform: str = 'rover'
+                          platform: str = 'Amiga'
                           ) -> np.ndarray:
         """
         Computes the disparity map using the named algorithm and platform.
