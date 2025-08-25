@@ -3579,8 +3579,8 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
-    parser.add_argument('--titiler_port', type=int, default=8095,required=False) # Default port is 8091
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
