@@ -4,6 +4,7 @@ import subprocess
 import os
 import shutil
 import platform
+import select
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -71,3 +72,70 @@ def dms_to_decimal(dms_str):
     if direction in ['S', 'W']:
         decimal = -decimal
     return decimal
+
+
+def stream_output(process):
+    """Function to read the process output and errors in real-time."""
+    while True:
+        reads = [process.stdout.fileno(), process.stderr.fileno()]
+        ret = select.select(reads, [], [])
+
+        for fd in ret[0]:
+            if fd == process.stdout.fileno():
+                output = process.stdout.readline()
+                if output:
+                    print("Output:", output.decode('utf-8').strip())
+            if fd == process.stderr.fileno():
+                error_output = process.stderr.readline()
+                if error_output:
+                    print("Error:", error_output.decode('utf-8').strip())
+
+        if process.poll() is not None:
+            break  # Break loop if process ends
+
+    # Close stdout and stderr after reading
+    process.stdout.close()
+    process.stderr.close()
+
+
+def build_nested_structure_sync_from_db(dir_index, path, current_depth=0, max_depth=2):
+    """Build nested structure using DirectoryIndex database"""
+    
+    if current_depth >= max_depth:
+        return {}
+    
+    structure = {}
+    
+    # Get children directories from database
+    children = dir_index.get_children(str(path), directories_only=True)
+    
+    for child_name in children:
+        child_path = path / child_name
+        structure[child_name] = build_nested_structure_sync_from_db(dir_index, child_path, current_depth + 1, max_depth)
+    
+    return structure
+
+async def build_nested_structure_from_db(dir_index, path, current_depth=0, max_depth=2):
+    """Async wrapper for database-based nested structure building"""
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor() as pool:
+        return await loop.run_in_executor(pool, build_nested_structure_sync_from_db, dir_index, path, current_depth, max_depth)
+
+async def process_directories_in_parallel_from_db(dir_index, base_dir, max_depth=2):
+    """Process directories using DirectoryIndex database"""
+
+    # Get top-level directories from database
+    top_level_dirs = dir_index.get_children(str(base_dir), directories_only=True)
+    
+    # Convert to Path objects
+    directories = [base_dir / dir_name for dir_name in top_level_dirs]
+    
+    # Build nested structures for each top-level directory
+    tasks = [build_nested_structure_from_db(dir_index, d, 0, max_depth) for d in directories]
+    nested_structures = await asyncio.gather(*tasks)
+    
+    combined_structure = {}
+    for d, structure in zip(directories, nested_structures):
+        combined_structure[d.name] = structure
+    
+    return combined_structure
