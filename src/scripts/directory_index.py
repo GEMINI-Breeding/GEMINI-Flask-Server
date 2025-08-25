@@ -358,7 +358,6 @@ class DirectoryIndex:
                 # Clean up the completion event
                 self.completion_events.pop(parent_path, None)
         
-        # Handle async refresh logic (only if not already handled by wait_if_needed)
         else:
             should_refresh = False
             
@@ -384,9 +383,6 @@ class DirectoryIndex:
     
     def force_refresh(self, parent_path):
         """Synchronously refresh a directory"""
-        # Normalize path
-        parent_path = self._normalize_path(parent_path)
-        
         # Remove from processed paths to force refresh
         self.processed_paths.pop(parent_path, None)
         self.processing_paths.discard(parent_path)
@@ -503,3 +499,38 @@ def get_cached_dirs(dir_path, include_files=False, return_type_info=False):
             print(f"Error reading directory {dir_path}: {e}")
     
     return []
+
+
+if __name__ == "__main___":
+    # Print some records to check data
+    print("=== DirectoryIndex Initialization Check ===")
+    print(f"Database path: {db_path}")
+    print(f"Database exists: {os.path.exists(db_path)}")
+
+    # Check if we can query some basic directories
+    test_paths = [
+        os.path.join(data_root_dir, 'Raw'),
+        os.path.join(data_root_dir, 'Processed'),
+        data_root_dir
+    ]
+    
+    for test_path in test_paths:
+        if os.path.exists(test_path):
+            try:
+                children = dir_db.get_children(test_path, directories_only=True, auto_refresh=False)
+                print(f"Path: {test_path}")
+                print(f"  Exists: True")
+                print(f"  Children count: {len(children)}")
+                print(f"  Children: {children[:5] if len(children) > 5 else children}")  # Show first 5
+                
+            except Exception as e:
+                print(f"Path: {test_path}")
+                print(f"  Error getting children: {e}")
+        else:
+            print(f"Path: {test_path}")
+            print(f"  Exists: False")
+    
+    # Print processing status
+    status = dir_db.get_processing_status()
+    print(f"Processing status: {status}")
+    print("=== End DirectoryIndex Check ===")

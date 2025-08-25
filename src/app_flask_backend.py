@@ -218,7 +218,7 @@ async def list_dirs_nested():
         print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
         
         # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
+        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9, auto_refresh=True)
         
         return jsonify(nested_structure), 200
         
@@ -3603,52 +3603,10 @@ if __name__ == "__main__":
     # Initialize dir_index if it hasn't been initialized yet
     if dir_db is None:
         db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_db = DirectoryIndex(db_path=db_path, verbose=True)
-    
-        # Print some records to check data
-        print("=== DirectoryIndex Initialization Check ===")
-        print(f"Database path: {db_path}")
-        print(f"Database exists: {os.path.exists(db_path)}")
-        
-        # Check if we can query some basic directories
-        test_paths = [
-            os.path.join(data_root_dir, 'Raw/'),
-            os.path.join(data_root_dir, 'Processed/'),
-            data_root_dir
-        ]
-        
-        for test_path in test_paths:
-            if os.path.exists(test_path):
-                try:
-                    children = dir_db.get_children(test_path, directories_only=True)
-                    print(f"Path: {test_path}")
-                    print(f"  Exists: True")
-                    print(f"  Children count: {len(children)}")
-                    print(f"  Children: {children[:5] if len(children) > 5 else children}")  # Show first 5
-                    
-                    # Check database entries for this path
-                    try:
-                        with dir_db._get_db_connection(timeout=5) as conn:
-                            cursor = conn.execute(
-                                'SELECT COUNT(*) FROM files WHERE parent = ?', 
-                                (test_path,)
-                            )
-                            db_count = cursor.fetchone()[0]
-                            print(f"  Database entries: {db_count}")
-                    except Exception as db_e:
-                        print(f"  Database query error: {db_e}")
-                        
-                except Exception as e:
-                    print(f"Path: {test_path}")
-                    print(f"  Error getting children: {e}")
-            else:
-                print(f"Path: {test_path}")
-                print(f"  Exists: False")
-        
-        # Print processing status
-        status = dir_db.get_processing_status()
-        print(f"Processing status: {status}")
-        print("=== End DirectoryIndex Check ===")
+        # Check if database exists
+        db_exists = os.path.exists(db_path)
+        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
+
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
 
