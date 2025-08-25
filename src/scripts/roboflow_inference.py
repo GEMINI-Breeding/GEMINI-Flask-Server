@@ -734,7 +734,7 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                         inference_status['message'] = f'Plot {plot_index} crop {j + 1}/{len(crops)}'
                         temp_dirs.add(crop_info['temp_dir'])
                         print(f"[DEBUG] Inference on crop {j+1}/{len(crops)} path={crop_info['crop_path']} offsets=({crop_info['x_offset']},{crop_info['y_offset']}) size=({crop_info['width']}x{crop_info['height']})")
-                        custom_configuration = InferenceConfiguration(confidence_threshold=0.29)
+                        custom_configuration = InferenceConfiguration(confidence_threshold=0.5) # adjust as needed / set automatically in future
                         try:
                             with client.use_configuration(custom_configuration):
                                 result = client.infer(crop_info['crop_path'], model_id=model_id)
