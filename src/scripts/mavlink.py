@@ -241,9 +241,34 @@ def plot_gps_quality(gps_df, save_path=None):
 
 def process_mavlink_log_for_webapp(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
     """Process MAVLink logs and extract relevant data for web app"""
-    mavlink_data_list = []
     
     gps_df_total = pd.DataFrame()
+    
+    # Convert existing_paths to a set of rounded timestamps if it's not already
+    if existing_df is not None and not existing_df.empty:
+        if 'timestamp' in existing_df.columns:
+            # Round existing timestamps to 6 decimal places (microsecond precision)
+            existing_timestamps = set(round(ts, 6) for ts in existing_df['timestamp'].values)
+        elif 'time' in existing_df.columns:
+            # Convert time strings back to timestamps if timestamp column doesn't exist
+            existing_timestamps = set()
+            for time_str in existing_df['time'].values:
+                try:
+                    # Parse the extended timestamp format with microseconds
+                    dt = datetime.strptime(time_str, '%Y:%m:%d %H:%M:%S.%f')
+                    existing_timestamps.add(round(dt.timestamp(), 6))
+                except ValueError:
+                    # Fallback for old format without microseconds
+                    try:
+                        dt = datetime.strptime(time_str, '%Y:%m:%d %H:%M:%S')
+                        existing_timestamps.add(round(dt.timestamp(), 6))
+                    except ValueError:
+                        continue
+        else:
+            existing_timestamps = set()
+    else:
+        existing_timestamps = set(existing_paths) if existing_paths else set()
+    
     for file_path in file_paths:
         try:
             print(f"Processing MAVLink log: {file_path}")
@@ -256,24 +281,65 @@ def process_mavlink_log_for_webapp(file_paths, data_type, msgs_synced_file, exis
             # Reuse the extract_gps_data function
             gps_df = extract_gps_data(mlog)
             
-            # Concatenate DataFrames correctly
-            gps_df_total = pd.concat([gps_df_total, gps_df], ignore_index=True)
-            
-            print(f"Extracted {len(gps_df)} GPS points from {file_path}")
+            if not gps_df.empty:
+                # Convert to webapp format (msgs_synced.csv format)
+                webapp_data = []
+                new_data_count = 0
+                duplicate_count = 0
+                
+                for _, row in gps_df.iterrows():
+                    if row['lat'] is not None and row['lon'] is not None:
+                        # Round timestamp to 6 decimal places for consistent comparison
+                        rounded_timestamp = round(row['timestamp'], 6)
+                        
+                        # Check if this rounded timestamp already exists
+                        if rounded_timestamp not in existing_timestamps:
+                            timestamp = datetime.fromtimestamp(row['timestamp'])
+                            
+                            webapp_row = {
+                                'image_path': file_path,
+                                'time': timestamp.strftime('%Y:%m:%d %H:%M:%S.%f'),  # Extended format with microseconds
+                                'timestamp': rounded_timestamp,  # Store rounded timestamp for next iteration
+                                'lat': round(row['lat'], 8),  # Round coordinates to 8 decimal places (~1cm precision)
+                                'lon': round(row['lon'], 8),
+                                'alt': round(row['alt'], 2) if row['alt'] is not None else None,  # Round altitude to cm
+                                'naturalWidth': None,
+                                'naturalHeight': None
+                            }
+                            
+                            webapp_data.append(webapp_row)
+                            existing_timestamps.add(rounded_timestamp)  # Add rounded timestamp to existing set
+                            new_data_count += 1
+                        else:
+                            duplicate_count += 1
+                
+                if webapp_data:
+                    webapp_df = pd.DataFrame(webapp_data)
+                    gps_df_total = pd.concat([gps_df_total, webapp_df], ignore_index=True)
+                    print(f"Added {new_data_count} new GPS points from {file_path}")
+                    if duplicate_count > 0:
+                        print(f"Skipped {duplicate_count} duplicate points")
+                else:
+                    print(f"No new data found in {file_path} (all {len(gps_df)} points already exist)")
             
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
     
-
-    # Save or append to msgs_synced_file
-    if existing_df is not None and not existing_df.empty:
-        gps_df.to_csv(msgs_synced_file, mode='a', header=False, index=False)
+    # Save to CSV if new data was extracted
+    if not gps_df_total.empty:
+        # Drop the timestamp column before saving (keep only webapp format)
+        # gps_df_save = gps_df_total.drop('timestamp', axis=1, errors='ignore')
+        
+        if existing_df is not None and not existing_df.empty:
+            gps_df_total.to_csv(msgs_synced_file, mode='a', header=False, index=False)
+        else:
+            gps_df_total.to_csv(msgs_synced_file, mode='w', header=True, index=False)
+        
+        print(f"Saved {len(gps_df_total)} new MAVLink records to {msgs_synced_file}")
     else:
-        gps_df.to_csv(msgs_synced_file, mode='w', header=True, index=False)
+        print("No new data to save")
     
-    print(f"Saved MAVLink data to {msgs_synced_file}")
-    
-    return gps_df
+    return gps_df_total
 
 def interpret_gps_status(status):
     """Interpret GPS status code"""

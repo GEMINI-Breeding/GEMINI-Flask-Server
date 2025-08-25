@@ -770,6 +770,12 @@ def upload_files():
         thread.start()
 
     if data_type.lower() == "platformlogs":
+        msgs_synced_file = os.path.join(os.path.dirname(full_dir_path), "drone_msgs.csv")
+        if os.path.isfile(msgs_synced_file):
+            existing_df = pd.read_csv(msgs_synced_file)
+            existing_paths = set(existing_df['timestamp'].values)
+        else:
+            existing_paths = set()
         thread = threading.Thread(
             target=process_mavlink_log_for_webapp, 
             args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
