@@ -877,11 +877,35 @@ def download_amiga_images():
                     Path(f).name for f in marked_plots_df[image_file_col].dropna()
                 )
 
+        # --- 2.5. Load plot borders data for custom naming ---
+        plot_data = {}
+        plot_borders_path = os.path.join(base_path, '..', '..', 'plot_borders.csv')
+        if os.path.exists(plot_borders_path):
+            try:
+                borders_df = pd.read_csv(plot_borders_path)
+                borders_df.columns = borders_df.columns.str.strip()
+                for _, row in borders_df.iterrows():
+                    plot_index = row.get('plot_index')
+                    plot_label = row.get('Plot')
+                    accession = row.get('Accession')
+                    
+                    if not pd.isna(plot_index):
+                        plot_data[int(plot_index)] = {
+                            'plot_label': plot_label if not pd.isna(plot_label) else None,
+                            'accession': accession if not pd.isna(accession) else None
+                        }
+                print(f"DEBUG: Loaded plot borders data for {len(plot_data)} plots")
+            except Exception as e:
+                print(f"WARNING: Error reading plot borders for custom naming: {e}")
+
         if download_all:
             print("No marked plots found. Preparing to download all images.")
 
         # --- 3. Zipping and Sending the File ---
-        zip_filename = f"{year}_{experiment}_{location}_{population}_{date}_Amiga_RGB.zip"
+        if download_all:
+            zip_filename = f"{year}_{experiment}_{location}_{population}_{date}_Amiga_RGB_All.zip"
+        else:
+            zip_filename = f"{year}_{experiment}_{location}_{population}_{date}_Amiga_RGB_Marked_Plots.zip"
         # Place the zip file in a temporary or cache directory if possible
         zip_path = images_path.parent / zip_filename
 
@@ -894,13 +918,29 @@ def download_amiga_images():
                     if download_all or file in marked_images_filenames:
                         if not download_all and file in marked_images_filenames:
                             # Find the row in the DataFrame matching this file by comparing just the file name
-                            df_row = marked_plots_df[marked_plots_df[image_file_col].apply(lambda x: Path(x).name) == {file}]
+                            df_row = marked_plots_df[marked_plots_df[image_file_col].apply(lambda x: Path(x).name) == file]
                             if not df_row.empty:
                                 plot_index = df_row['plot_index'].iloc[0]
-                                new_filename = f"plot{plot_index}-{file}"
+                                
+                                # Get plot metadata for custom naming
+                                metadata = plot_data.get(plot_index, {})
+                                plot_label = metadata.get('plot_label')
+                                accession = metadata.get('accession')
+                                
+                                # Create custom filename by prepending plot/accession info to original filename
+                                if plot_label and accession:
+                                    custom_filename = f"plot_{plot_label}_accession_{accession}_{file}"
+                                elif plot_label:
+                                    custom_filename = f"plot_{plot_label}_{file}"
+                                else:
+                                    # Fallback to plot index if no plot label available
+                                    custom_filename = f"plot_{plot_index}_{file}"
+                                
+                                print(f"DEBUG: Adding to zip: {file} -> {custom_filename}")
+                                zipf.write(file_path, arcname=custom_filename)
                             else:
-                                new_filename = file
-                            zipf.write(file_path, arcname=new_filename)
+                                # Fallback to original filename if row not found
+                                zipf.write(file_path, arcname=file)
                         else:
                             # Use 'arcname' to keep the zip file flat (no parent directories)
                             zipf.write(file_path, arcname=file)

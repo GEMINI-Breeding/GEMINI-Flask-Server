@@ -1316,146 +1316,131 @@ def run_stitch_process_for_plot(config_path, cpu_count, stitched_path, versioned
         all_files = os.listdir(stitched_path)
         print(f"Files found in {stitched_path}: {all_files}")
         
-        # Look for files that match this plot_index pattern - try multiple patterns
-        # Only use plot-specific patterns first, avoid generic ones that could match multiple plots
-        plot_patterns = [
-            f"temp_plot_{plot_index}",
+        # Define image extensions we care about for the main stitched output
+        image_extensions = ['.png', '.tif', '.tiff', '.jpg', '.jpeg']
+        
+        # Look for the main stitched image file - prioritize by likely patterns
+        main_image_file = None
+        
+        # Priority 1: Look for files with specific patterns that contain the plot_index
+        priority_patterns = [
             f"full_res_mosaic_temp_plot_{plot_index}",
-            f"plot_{plot_index}",
-            f"plot-{plot_index}",
-            str(int(plot_index)) if float(plot_index).is_integer() else str(plot_index),
+            f"temp_plot_{plot_index}",
+            f"mosaic_temp_plot_{plot_index}",
+            f"plot_{plot_index}_mosaic",
+            f"plot_{plot_index}"
         ]
         
-        plot_files = []
-        for pattern in plot_patterns:
-            matching_files = [f for f in all_files if pattern in f]
-            plot_files.extend(matching_files)
+        for pattern in priority_patterns:
+            matching_files = [f for f in all_files 
+                            if pattern in f and any(f.lower().endswith(ext) for ext in image_extensions)]
+            if matching_files:
+                # Take the largest file if multiple matches
+                main_image_file = max(matching_files, key=lambda f: os.path.getsize(os.path.join(stitched_path, f)))
+                print(f"Found main image using pattern '{pattern}': {main_image_file}")
+                break
         
-        # Remove duplicates while preserving order
-        plot_files = list(dict.fromkeys(plot_files))
-        print(f"Files matching plot {plot_index} patterns: {plot_files}")
-        
-        # If no specific plot files found, look for any image files that might be the result
-        if not plot_files:
-            image_extensions = ['.png', '.tif', '.tiff', '.jpg', '.jpeg']
-            image_files = [f for f in all_files if any(f.lower().endswith(ext) for ext in image_extensions)]
-            print(f"No plot-specific files found. Available image files: {image_files}")
+        # Priority 2: If no specific pattern found, look for any image files containing the plot_index
+        if not main_image_file:
+            plot_index_str = str(plot_index)
+            candidate_files = [f for f in all_files 
+                             if plot_index_str in f and any(f.lower().endswith(ext) for ext in image_extensions)]
             
-            # If there's only one image file, assume it's our result
-            if len(image_files) == 1:
-                plot_files = image_files
-                print(f"Using single image file as result: {plot_files}")
-            elif len(image_files) > 1:
-                # Look for files with "mosaic" or "stitch" in the name AND the plot_index
-                plot_specific_mosaic = [f for f in image_files if 
-                                      ('mosaic' in f.lower() or 'stitch' in f.lower()) and 
-                                      str(plot_index) in f]
-                if plot_specific_mosaic:
-                    plot_files = plot_specific_mosaic
-                    print(f"Using plot-specific mosaic files: {plot_files}")
+            if candidate_files:
+                # Prefer files with "mosaic" or "stitch" in the name
+                mosaic_files = [f for f in candidate_files if 'mosaic' in f.lower() or 'stitch' in f.lower()]
+                if mosaic_files:
+                    main_image_file = max(mosaic_files, key=lambda f: os.path.getsize(os.path.join(stitched_path, f)))
                 else:
-                    # Only use generic approach if we're sure it's plot-specific
-                    # Look for files that contain the plot_index as a substring
-                    plot_id_files = [f for f in image_files if str(plot_index) in f]
-                    if plot_id_files:
-                        # Take the largest plot-specific file
-                        largest_file = max(plot_id_files, key=lambda f: os.path.getsize(os.path.join(stitched_path, f)))
-                        plot_files = [largest_file]
-                        print(f"Using largest plot-specific image file: {plot_files}")
-                    else:
-                        print(f"Warning: No plot-specific files found for plot {plot_index}. Skipping to avoid incorrect georeferencing.")
-                        return
+                    # Take the largest image file containing plot_index
+                    main_image_file = max(candidate_files, key=lambda f: os.path.getsize(os.path.join(stitched_path, f)))
+                print(f"Found main image by plot_index matching: {main_image_file}")
         
-        if not plot_files:
-            print(f"No files found for plot {plot_index} in {stitched_path}")
+        # Priority 3: If still no file found and there's only one image file, use it
+        if not main_image_file:
+            all_images = [f for f in all_files if any(f.lower().endswith(ext) for ext in image_extensions)]
+            if len(all_images) == 1:
+                main_image_file = all_images[0]
+                print(f"Using single available image file: {main_image_file}")
+            elif len(all_images) > 1:
+                print(f"Multiple image files found but none match plot patterns: {all_images}")
+                print(f"Cannot determine which is the main stitched output for plot {plot_index}")
+                return
+        
+        if not main_image_file:
+            print(f"No suitable stitched image file found for plot {plot_index}")
             return
         
-        # Copy files directly to the versioned output directory
-        base_name = "AgRowStitch"
-        main_mosaic_file = None
-        files_copied = 0
+        # Verify the main image file exists and has content
+        src_file_path = os.path.join(stitched_path, main_image_file)
+        if not os.path.exists(src_file_path):
+            print(f"Main image file does not exist: {src_file_path}")
+            return
+            
+        file_size = os.path.getsize(src_file_path)
+        if file_size == 0:
+            print(f"Main image file is empty: {src_file_path}")
+            return
+            
+        print(f"Processing main stitched image: {main_image_file} (size: {file_size} bytes)")
         
-        for file_name in plot_files:
-            try:
-                # Skip files that should not be copied to final folder
-                excluded_patterns = []
-                
-                if file_name in excluded_patterns:
-                    print(f"Skipping excluded file: {file_name}")
-                    continue
-                
-                src_file_path = os.path.join(stitched_path, file_name)
-                
-                # Verify source file exists and has content
-                if not os.path.exists(src_file_path):
-                    print(f"Source file does not exist: {src_file_path}")
-                    continue
-                    
-                file_size = os.path.getsize(src_file_path)
-                if file_size == 0:
-                    print(f"Source file is empty: {src_file_path}")
-                    continue
-                    
-                print(f"Copying {file_name} (size: {file_size} bytes)")
-                
-                # Create destination file path
-                dst_file_path = os.path.join(versioned_output_path, file_name)
-                
-                # Copy the file
-                shutil.copy2(src_file_path, dst_file_path)
-                print(f"Successfully copied {file_name} to {versioned_output_path}")
-                files_copied += 1
-                
-                # Identify the main mosaic file for renaming
-                # Look for patterns that indicate the main mosaic AND contain the plot_index
-                main_patterns = [
-                    f"temp_plot_{plot_index}",
-                    f"full_res_mosaic_temp_plot_{plot_index}",
-                ]
-                
-                # Also check for generic patterns but only if plot_index is in filename
-                generic_patterns = ["mosaic", "stitch"]
-                
-                # First try plot-specific patterns
-                is_main_file = any(pattern in file_name.lower() for pattern in main_patterns)
-                
-                # If not found, try generic patterns but only if plot_index is in filename
-                if not is_main_file and str(plot_index) in file_name:
-                    is_main_file = any(pattern in file_name.lower() for pattern in generic_patterns)
-                
-                if is_main_file:
-                    main_mosaic_file = file_name
-                    
-            except Exception as e:
-                print(f"Error copying file {file_name}: {str(e)}")
-                continue
+        # Create the standardized filename that other parts of the system expect
+        file_extension = os.path.splitext(main_image_file)[1]
+        standardized_name = f"full_res_mosaic_temp_plot_{plot_index}{file_extension}"
+        dst_file_path = os.path.join(versioned_output_path, standardized_name)
         
-        print(f"Successfully copied {files_copied} files for plot {plot_index}")
-        
-        if files_copied == 0:
-            print(f"No files were successfully copied for plot {plot_index}")
+        # Copy the main stitched image with the standardized name
+        try:
+            shutil.copy2(src_file_path, dst_file_path)
+            print(f"Successfully copied and renamed stitched image: {main_image_file} -> {standardized_name}")
+            
+            # Verify the copied file
+            if os.path.exists(dst_file_path) and os.path.getsize(dst_file_path) > 0:
+                print(f"Verified copied file: {standardized_name} ({os.path.getsize(dst_file_path)} bytes)")
+            else:
+                print(f"ERROR: Copied file verification failed for {standardized_name}")
+                return
+                
+        except Exception as e:
+            print(f"Error copying main stitched image: {str(e)}")
             return
         
-        # Rename the main mosaic file to include a cleaner name
-        if main_mosaic_file:
-            try:
-                src_mosaic = os.path.join(versioned_output_path, main_mosaic_file)
-                file_extension = os.path.splitext(main_mosaic_file)[1]
-                new_mosaic_name = f"{base_name}_plot-id-{plot_index}{file_extension}"
-                dst_mosaic = os.path.join(versioned_output_path, new_mosaic_name)
-                
-                # Only rename if the destination doesn't already exist
-                if not os.path.exists(dst_mosaic):
-                    shutil.move(src_mosaic, dst_mosaic)
-                    print(f"Renamed main mosaic to {new_mosaic_name}")
-                else:
-                    print(f"Destination file already exists, skipping rename: {new_mosaic_name}")
-            except Exception as e:
-                print(f"Error renaming main mosaic file: {str(e)}")
-        else:
-            print(f"Warning: No main mosaic file found to rename for plot {plot_index}")
+        # Optional: Copy additional files (logs, metadata, etc.) but with clear naming
+        # Only copy these if they exist and are useful
+        additional_files_to_copy = []
         
-        print(f"Completed processing plot {plot_index} - copied {files_copied} files to {versioned_output_path}")
+        # Look for log files
+        log_files = [f for f in all_files if f.endswith('.log') and str(plot_index) in f]
+        if log_files:
+            for log_file in log_files:
+                additional_files_to_copy.append((log_file, f"AgRowStitch_plot-id-{plot_index}.log"))
+        
+        # Look for CSV files (but don't rename them to avoid confusion with the main image)
+        csv_files = [f for f in all_files if f.endswith('.csv') and str(plot_index) in f]
+        if csv_files:
+            for csv_file in csv_files:
+                # Keep original CSV name but prefix with AgRowStitch for clarity
+                csv_name = f"AgRowStitch_plot-id-{plot_index}.csv"
+                additional_files_to_copy.append((csv_file, csv_name))
+        
+        # Copy additional files if any
+        additional_copied = 0
+        for src_name, dst_name in additional_files_to_copy:
+            try:
+                src_path = os.path.join(stitched_path, src_name)
+                dst_path = os.path.join(versioned_output_path, dst_name)
+                
+                if os.path.exists(src_path) and os.path.getsize(src_path) > 0:
+                    shutil.copy2(src_path, dst_path)
+                    print(f"Copied additional file: {src_name} -> {dst_name}")
+                    additional_copied += 1
+            except Exception as e:
+                print(f"Warning: Could not copy additional file {src_name}: {str(e)}")
+        
+        print(f"Completed processing plot {plot_index}:")
+        print(f"  - Main stitched image: {standardized_name}")
+        print(f"  - Additional files copied: {additional_copied}")
+        print(f"  - Output directory: {versioned_output_path}")
             
     except Exception as e:
         print(f"Error in stitching process for plot {plot_index}: {str(e)}")
