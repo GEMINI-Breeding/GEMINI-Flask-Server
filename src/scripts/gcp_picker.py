@@ -75,10 +75,9 @@ def get_image_exif(image_path):
                 break
     
     # If no standard timestamp but GPS data exists
-    # if not standard_time_exists and exif_data is not None and 34853 in exif_data:
-
+    if not standard_time_exists and exif_data is not None and 34853 in exif_data:
     # If GPS data exists
-    if exif_data is not None and 34853 in exif_data:
+    # if exif_data is not None and 34853 in exif_data:
         gps_info = exif_data[34853]
         
         # Extract GPS date and time if available
@@ -237,7 +236,6 @@ def image_selection(data_root_dir, image_folder, files, df_msgs_synced,
                 msg['naturalHeight'] = img.height
             
         elif check_exif:
-            # print('Using get_image_exif')
             msg = get_image_exif(image_path)
             # If we got valid EXIF data, add it to the DataFrame and CSV
             if msg is not None:
@@ -411,6 +409,17 @@ def collect_gcp_candidate(data_root_dir, image_folder, radius_meters):
     # Create a new CSV with headers
     df_msgs_synced.to_csv(msgs_synced_path, mode='w', header=True, index=False)
 
+    # Check if drone_msgs.csv exists
+    drone_msgs_path = os.path.join(os.path.dirname(image_folder), "drone_msgs.csv")
+    if os.path.exists(drone_msgs_path):
+        print(f"Found drone_msgs.csv at {drone_msgs_path}")
+        # Update df_msgs_synced lat, lon, and alt using drone_msgs.csv
+        df_msgs_synced = update_msgs_synced_with_drone_data(df_msgs_synced, drone_msgs_path)
+        
+        # Save updated data back to CSV
+        df_msgs_synced.to_csv(msgs_synced_path, mode='w', header=True, index=False)
+        print("Updated msgs_synced.csv with drone GPS data")
+        
     # Create a geo.txt for ODM
     print("Create a geo.txt for ODM")
     geo_txt_path = os.path.join(os.path.dirname(image_folder), "geo.txt")
@@ -688,3 +697,110 @@ def gcp_picker_save_array(data_root_dir, data, debug=False):
             f.write(formatted_data)
 
     return filename
+
+def update_msgs_synced_with_drone_data(df_msgs_synced, drone_msgs_path):
+    """
+    Update df_msgs_synced lat, lon, and alt using drone_msgs.csv with KD tree timestamp matching
+    """
+    from sklearn.neighbors import NearestNeighbors
+    from datetime import datetime
+    import pandas as pd
+    import numpy as np
+    
+    print(f"Loading drone messages from {drone_msgs_path}")
+    df_drone = pd.read_csv(drone_msgs_path)
+    
+    # Convert timestamps to Unix timestamps for KD tree matching
+    def convert_to_unix_timestamp(timestamp_str):
+        try:
+            # Try different timestamp formats
+            formats = [
+                '%Y:%m:%d %H:%M:%S',  # EXIF format
+                '%Y-%m-%d %H:%M:%S',  # Standard format
+                '%Y/%m/%d %H:%M:%S',  # Alternative format
+            ]
+            
+            for fmt in formats:
+                try:
+                    dt = datetime.strptime(str(timestamp_str), fmt)
+                    return dt.timestamp()
+                except ValueError:
+                    continue
+            
+            # If no format works, try parsing as float (already Unix timestamp)
+            return float(timestamp_str)
+        except:
+            return None
+    
+    # Convert timestamps for both datasets
+    print("Converting timestamps for matching...")
+    
+    # For msgs_synced
+    df_msgs_synced['unix_time'] = df_msgs_synced['time'].apply(convert_to_unix_timestamp)
+    valid_msgs_mask = df_msgs_synced['unix_time'].notna()
+    valid_msgs_count = valid_msgs_mask.sum()
+    
+    # For drone_msgs
+    if 'timestamp' in df_drone.columns:
+        df_drone['unix_time'] = df_drone['timestamp'].apply(convert_to_unix_timestamp)
+    elif 'time' in df_drone.columns:
+        df_drone['unix_time'] = df_drone['time'].apply(convert_to_unix_timestamp)
+    else:
+        print("ERROR: No timestamp column found in drone_msgs.csv")
+        return df_msgs_synced
+    
+    valid_drone_mask = df_drone['unix_time'].notna()
+    valid_drone_count = valid_drone_mask.sum()
+    
+    print(f"Valid timestamps: {valid_msgs_count} in msgs_synced, {valid_drone_count} in drone_msgs")
+    
+    if valid_msgs_count == 0 or valid_drone_count == 0:
+        print("No valid timestamps found for matching")
+        return df_msgs_synced
+    
+    # Filter to valid timestamps only
+    df_msgs_valid = df_msgs_synced[valid_msgs_mask].copy()
+    df_drone_valid = df_drone[valid_drone_mask].copy()
+    
+    # Prepare data for KD tree (timestamps as 1D array)
+    drone_timestamps = df_drone_valid['unix_time'].values.reshape(-1, 1)
+    msgs_timestamps = df_msgs_valid['unix_time'].values.reshape(-1, 1)
+    
+    # Create KD tree for drone timestamps
+    print("Building KD tree for timestamp matching...")
+    kd_tree = NearestNeighbors(n_neighbors=1, algorithm='kd_tree')
+    kd_tree.fit(drone_timestamps)
+    
+    # Find nearest drone timestamp for each image timestamp
+    distances, indices = kd_tree.kneighbors(msgs_timestamps)
+    
+    # Set maximum time difference threshold (e.g., 5 seconds)
+    max_time_diff = 5.0  # seconds
+    
+    updates_count = 0
+    for i, (distance, drone_idx) in enumerate(zip(distances.flatten(), indices.flatten())):
+        if distance <= max_time_diff:
+            # Get the corresponding rows
+            msgs_idx = df_msgs_valid.index[i]
+            drone_row = df_drone_valid.iloc[drone_idx]
+            
+            # Update coordinates if available in drone data
+            if 'lat' in drone_row and pd.notna(drone_row['lat']):
+                df_msgs_synced.at[msgs_idx, 'lat'] = drone_row['lat']
+            if 'lon' in drone_row and pd.notna(drone_row['lon']):
+                df_msgs_synced.at[msgs_idx, 'lon'] = drone_row['lon']
+            if 'alt' in drone_row and pd.notna(drone_row['alt']):
+                df_msgs_synced.at[msgs_idx, 'alt'] = drone_row['alt']
+            elif 'altitude' in drone_row and pd.notna(drone_row['altitude']):
+                df_msgs_synced.at[msgs_idx, 'alt'] = drone_row['altitude']
+            
+            updates_count += 1
+        else:
+            print(f"Timestamp difference too large: {distance:.2f}s for image at index {i}")
+    
+    print(f"Updated {updates_count} entries with drone GPS data")
+    
+    # Clean up temporary column
+    df_msgs_synced.drop('unix_time', axis=1, inplace=True)
+    
+    return df_msgs_synced
