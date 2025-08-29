@@ -502,6 +502,16 @@ def get_cached_dirs(dir_path, include_files=False, return_type_info=False):
 
 
 if __name__ == "__main___":
+    data_root_dir = "/home/heesup/GEMINI-App-Data"
+    
+    dir_db = None
+    # Initialize dir_index if it hasn't been initialized yet
+    if dir_db is None:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        # Check if database exists
+        db_exists = os.path.exists(db_path)
+        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
+
     # Print some records to check data
     print("=== DirectoryIndex Initialization Check ===")
     print(f"Database path: {db_path}")

@@ -6,17 +6,13 @@ import threading
 import time
 import glob
 import yaml
-import random
-import string
 import csv
 import shutil
 import traceback
 import tempfile
 import torch
 import argparse
-import multiprocessing
 import requests
-import zipfile
 from multiprocessing import active_children, Process
 from pathlib import Path
 
@@ -44,11 +40,13 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png, monitor_log_updates
 from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
+from scripts.utils import update_or_add_entry, split_data, prepare_labels, remove_files_from_folder, copy_files_to_folder, check_model_details
+from scripts.utils import generate_hash
 from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
 from scripts.mavlink import process_mavlink_log_for_webapp
-from scripts.bin_to_images.bin_to_images import extract_binary
+from scripts.bin_to_images.bin_to_images import extract_binary, extraction_worker
 from scripts.plot_marking.plot_marking import plot_marking_bp
 
 # stitch pipeline
@@ -131,7 +129,6 @@ def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_o
         
         print("=== WORKFLOW FULLY COMPLETED ===")
 
-
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
     data = request.json
@@ -207,7 +204,6 @@ def list_dirs(dir_path):
 
     return jsonify(dirs), 200
 
-
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
     global data_root_dir, dir_db
@@ -238,7 +234,6 @@ async def list_dirs_nested():
 async def list_dirs_nested_processed():
     global data_root_dir, dir_db
 
-    
     base_dir = Path(data_root_dir) / 'Processed'
     
     try:
@@ -783,6 +778,14 @@ def upload_files():
         thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
 
+    # Update directory database after upload completion
+    if uploaded_file_paths and dir_db is not None:
+        try:
+            # Refresh the directory in the database
+            dir_db.force_refresh(full_dir_path)
+            print(f"Updated directory database for: {full_dir_path}")
+        except Exception as e:
+            print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -825,37 +828,6 @@ def cancel_extraction():
     p.join()
     return jsonify({'status': 'cancelled'}), 200
 
-def _cleanup_files(file_paths):
-    global extraction_status
-    for p in file_paths:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-
-def _extraction_worker(file_paths, output_path):
-    global extraction_status, extraction_error_message
-
-    try:
-        extraction_status = "in_progress"
-        extraction_error_message = None
-        extract_binary(file_paths, output_path)
-        
-        # cleanup files
-        _cleanup_files(file_paths)
-        extraction_status = "done"
-    except EOFError as e:
-        error_msg = f"EOFError during binary extraction: {e}"
-        print(error_msg)
-        extraction_status = "failed"
-        extraction_error_message = error_msg
-    except Exception as e:
-        error_msg = f"Extraction failed: {e}"
-        print(f"[ERROR] {error_msg}")
-        # print full traceback
-        traceback.print_exc()
-        extraction_status = "failed"
-        extraction_error_message = error_msg
 
 @file_app.route('/get_binary_status', methods=['GET'])
 def get_binary_status():
@@ -890,7 +862,7 @@ def extract_binary_file():
     #     return jsonify({'status': 'already running'}), 429
 
     extraction_status = "in_progress"
-    p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)
+    p = Process(target=extraction_worker, args=(file_paths, output_path), daemon=True)
     p.start()
     extraction_processes[dir_path] = p
 
@@ -928,8 +900,6 @@ def upload_chunk():
     dir_path = request.form['dirPath']
     
     # Sanitize the directory path to remove any hidden Unicode characters
-
-    
     # Normalize Unicode and remove control characters
     dir_path_clean = unicodedata.normalize('NFKD', dir_path)
     dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
@@ -963,9 +933,19 @@ def upload_chunk():
                         shutil.copyfileobj(part_file, full_file)
             os.replace(assembled_path + ".tmp", assembled_path)  # atomic move
             print("Finished reassembling file...")
+            
             # Optionally, cleanup parts here
             for i in range(total_chunks):
                 os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))
+            
+            # Update directory database after successful file assembly
+            if dir_db is not None:
+                try:
+                    dir_db.force_refresh(full_dir_path)
+                    print(f"Updated directory database for: {full_dir_path}")
+                except Exception as e:
+                    print(f"Error updating directory database: {e}")
+                    
             return "File reassembled and saved successfully", 200
         except Exception as e:
             print(f"Error during reassembly: {e}")
@@ -1837,7 +1817,7 @@ def run_odm_endpoint():
         logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
         progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
         os.makedirs(os.path.dirname(progress_file), exist_ok=True)
-        thread_prog = threading.Thread(target=monitor_log_updates, args=(logs_path, progress_file), daemon=True)
+        thread_prog = threading.Thread(target=monitor_log_updates, args=(latest_data, logs_path, progress_file), daemon=True)
         thread_prog.start()
 
         return jsonify({"status": "success", "message": "ODM processing started successfully"})
@@ -2465,12 +2445,7 @@ def download_single_plot():
         print(f"Error downloading single plot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def update_progress_file(progress_file, progress, debug=False):
-    with open(progress_file, 'w') as pf:
-        pf.write(f"{progress}%")
-        latest_data['ortho'] = progress
-        if debug:
-            print('Ortho progress updated:', progress)
+
 
 @file_app.route('/get_data_options', methods=['GET'])
 def get_data_options():
@@ -2680,72 +2655,7 @@ def get_sensors():
         print(f"Error getting sensors: {e}")
         return jsonify({'error': str(e)}), 500
                
-def monitor_log_updates(logs_path, progress_file):
-    
-    try:
-        progress_stages = [
-            "Running dataset stage", # After spin up a docker container
-            "Finished dataset stage", # After finish loading dataset
-            "Computing pair matching", # After finish feature extraction, before the pair matching
-            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
-            "Export reconstruction stats", # After Ceres Solver Report
-            "Finished opensfm stage", # After Undistorting images
-            "Densifying point-cloud completed", # After fusing depth maps
-            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
-            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
-            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
-            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
-            "Finished odm_dem stage", # After Finished odm_dem stage
-            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
-            "Finished odm_report stage",  # After Finished odm_report stage
-            "Finished odm_postprocess stage", # Finished odm_postprocess stage
-            "ODM app finished",             # ODM Processes are done, but some additional steps left
-            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
-            "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
-            "Copied DEM.tif",
-            "Generated DEM-Pyramid.tif",
-            "Orthomosaic Generation Completed",
-        ]   
-        
-        with open(progress_file, 'w') as file:
-            file.write("0")
-        
-        # Wait for the log file to be created
-        while not os.path.exists(logs_path):
-            print("Waiting for log file to be created...")
-            time.sleep(5)  # Check every 5 seconds
-        
-        print("Log file found. Monitoring for updates.")
-        
-        # Log file exists, start monitoring
-        with open(logs_path, 'r') as file:
-            # Start by reading the file from the beginning
-            file.seek(0)
-            current_stage = -1
-            while True:
-                line = file.readline() # It will read the file line by line
-                if line:
-                    # print(line)
-                    found_stages_msg = False
-                    for idx, step in enumerate(progress_stages):
-                        if step in line:
-                            found_stages_msg = True
-                            current_stage = idx
-                            break
 
-                    if found_stages_msg and current_stage > -1:
-                        current_progress = (current_stage+1) / len(progress_stages) * 100
-                        update_progress_file(progress_file, round(current_progress))
-                        print(progress_stages[current_stage])
-                        print(f"Progress updated: {current_progress:.1f}%")
-                        if current_stage == len(progress_stages) - 1:
-                            break
-                else:
-                    time.sleep(10)  # Sleep briefly to avoid busy waiting
-
-    except Exception as e:
-        # Handle exception: log it, set a flag, etc.
-        print(f"Error in thread: {e}")
         
 ### CVAT #### 
 @file_app.route('/start_cvat', methods=['POST'])
@@ -2895,127 +2805,31 @@ def check_existing_labels():
 
 @file_app.route('/upload_trait_labels', methods=['POST'])
 def upload_trait_labels():
-    # global data_root_dir
-    
     dir_path = request.form.get('dirPath')
     full_dir_path = os.path.join(data_root_dir, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
 
+    uploaded_files = []
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
         file_path = os.path.join(full_dir_path, filename)
         print(f'Saving {file_path}...')
         file.save(file_path)
+        uploaded_files.append(file_path)
+
+    # Update directory database after upload completion
+    if uploaded_files and dir_db is not None:
+        try:
+            dir_db.force_refresh(full_dir_path)
+            print(f"Updated directory database for: {full_dir_path}")
+        except Exception as e:
+            print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
-def split_data(labels, images, test_size=0.2):
-    # Calculate split index
-    split_index = int(len(labels) * (1 - test_size))
-    
-    # Split the labels and images into train and validation sets
-    labels_train = labels[:split_index]
-    labels_val = labels[split_index:]
-    
-    images_train = images[:split_index]
-    images_val = images[split_index:]
-    
-    return labels_train, labels_val, images_train, images_val
 
-def copy_files_to_folder(source_files, target_folder):
-    for source_file in source_files:
-        target_file = target_folder / source_file.name
-        if not target_file.exists():
-            shutil.copy(source_file, target_file)
-            
-def remove_files_from_folder(folder):
-    for file in folder.iterdir():
-        if file.is_file():
-            file.unlink()
 
-def prepare_labels(annotations, images_path):
-    
-    try:
-        # global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-        
-        # path to labels
-        labels_train_folder = annotations.parent/'labels'/'train'
-        labels_val_folder = annotations.parent/'labels'/'val'
-        images_train_folder = annotations.parent/'images'/'train'
-        images_val_folder = annotations.parent/'images'/'val'
-        labels_train_folder.mkdir(parents=True, exist_ok=True)
-        labels_val_folder.mkdir(parents=True, exist_ok=True)
-        images_train_folder.mkdir(parents=True, exist_ok=True)
-        images_val_folder.mkdir(parents=True, exist_ok=True)
 
-        # obtain path to images
-        images = list(images_path.rglob('*.jpg')) + list(images_path.rglob('*.png'))
-        
-        # split images to train and val
-        labels = list(annotations.glob('*.txt'))
-        label_stems = set(Path(label).stem for label in labels)
-        filtered_images = [image for image in images if Path(image).stem in label_stems]
-        labels_train, labels_val, images_train, images_val = split_data(labels, filtered_images)
-
-        # link images and labels to folder
-        copy_files_to_folder(labels_train, labels_train_folder)
-        copy_files_to_folder(labels_val, labels_val_folder)
-        copy_files_to_folder(images_train, images_train_folder)
-        copy_files_to_folder(images_val, images_val_folder)
-        
-        # check if images_train_folder and images_val_folder are not empty
-        if not any(images_train_folder.iterdir()) or not any(images_val_folder.iterdir()):
-            return False
-        else:
-            return True
-        
-    except Exception as e:
-        print(f'Error preparing labels for training: {e}')
-
-### ROVER MODEL TRAINING ###
-def check_model_details(key, value = None):
-    
-    # get base folder, args file and results file
-    base_path = key.parent.parent
-    args_file = base_path / 'args.yaml'
-    results_file = base_path / 'results.csv'
-    
-    # get epochs, batch size and image size
-    values = []
-    with open(args_file, 'r') as file:
-        args = yaml.safe_load(file)
-        epochs = args.get('epochs')
-        batch = args.get('batch')
-        imgsz = args.get('imgsz')
-        
-        values.extend([epochs, batch, imgsz])
-    
-    # get mAP of model
-    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
-    values.extend([mAP])
-    
-    # get run name
-    run = base_path.name
-    match = re.search(r'-([A-Za-z0-9]+)$', run)
-    id = match.group(1)
-    
-    # get date(s)
-    if value is not None:
-        date = ', '.join(value)
-    else:
-        date = None
-    
-    # get platform
-    platform = base_path.parts[-3]
-    
-    # get sensor
-    sensor = base_path.parts[-2].split()[0]
-    
-    # collate details
-    details = {'id': id, 'dates': date, 'platform': platform, 'sensor': sensor, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
-    
-    return details
 
 @file_app.route('/get_model_info', methods=['POST'])
 def get_model_info():
@@ -3287,16 +3101,7 @@ def get_locate_progress():
     else:
         return jsonify({'error': 'Locate progress not found'}), 404
 
-def generate_hash(trait, length=6):
-    """Generate a hash for model where it starts with the trait followed by a random string of characters.
 
-    Args:
-        trait (str): trait to be analyzed (plant, flower, pod, etc.)
-        length (int, optional): Length for random sequence. Defaults to 5.
-    """
-    random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    hash_id = f"{trait}-{random_sequence}"
-    return hash_id
 
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
@@ -3384,15 +3189,6 @@ def stop_locate():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
-    
-### ROVER EXTRACT PLANTS ###
-def update_or_add_entry(data, key, new_values):
-    if key in data:
-        # Update existing entry
-        data[key].update(new_values)
-    else:
-        # Add new entry
-        data[key] = new_values
         
 @file_app.route('/get_extract_progress', methods=['GET'])
 def get_extract_progress():

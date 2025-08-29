@@ -465,12 +465,84 @@ def run_odm(args):
         
         process_outputs(args)
         
-      
-
-    
     except Exception as e:
         # Handle exception: log it, set a flag, etc.
         print(f"Error in thread: {e}")
+
+def update_progress_file(latest_data, progress_file, progress, debug=False):
+    with open(progress_file, 'w') as pf:
+        pf.write(f"{progress}%")
+        latest_data['ortho'] = progress
+        if debug:
+            print('Ortho progress updated:', progress)
+
+def monitor_log_updates(latest_data, logs_path, progress_file):
+    
+    try:
+        progress_stages = [
+            "Running dataset stage", # After spin up a docker container
+            "Finished dataset stage", # After finish loading dataset
+            "Computing pair matching", # After finish feature extraction, before the pair matching
+            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
+            "Export reconstruction stats", # After Ceres Solver Report
+            "Finished opensfm stage", # After Undistorting images
+            "Densifying point-cloud completed", # After fusing depth maps
+            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
+            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
+            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
+            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
+            "Finished odm_dem stage", # After Finished odm_dem stage
+            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
+            "Finished odm_report stage",  # After Finished odm_report stage
+            "Finished odm_postprocess stage", # Finished odm_postprocess stage
+            "ODM app finished",             # ODM Processes are done, but some additional steps left
+            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
+            "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
+            "Copied DEM.tif",
+            "Generated DEM-Pyramid.tif",
+            "Orthomosaic Generation Completed",
+        ]   
+        
+        with open(progress_file, 'w') as file:
+            file.write("0")
+        
+        # Wait for the log file to be created
+        while not os.path.exists(logs_path):
+            print("Waiting for log file to be created...")
+            time.sleep(5)  # Check every 5 seconds
+        
+        print("Log file found. Monitoring for updates.")
+        
+        # Log file exists, start monitoring
+        with open(logs_path, 'r') as file:
+            # Start by reading the file from the beginning
+            file.seek(0)
+            current_stage = -1
+            while True:
+                line = file.readline() # It will read the file line by line
+                if line:
+                    # print(line)
+                    found_stages_msg = False
+                    for idx, step in enumerate(progress_stages):
+                        if step in line:
+                            found_stages_msg = True
+                            current_stage = idx
+                            break
+
+                    if found_stages_msg and current_stage > -1:
+                        current_progress = (current_stage+1) / len(progress_stages) * 100
+                        update_progress_file(latest_data, progress_file, round(current_progress))
+                        print(progress_stages[current_stage])
+                        print(f"Progress updated: {current_progress:.1f}%")
+                        if current_stage == len(progress_stages) - 1:
+                            break
+                else:
+                    time.sleep(10)  # Sleep briefly to avoid busy waiting
+
+    except Exception as e:
+        # Handle exception: log it, set a flag, etc.
+        print(f"Error in thread: {e}")
+
     
 if __name__ == '__main__':
     # Main function for debugging

@@ -5,6 +5,12 @@ import os
 import shutil
 import platform
 import select
+import yaml
+from pathlib import Path
+import pandas as pd
+import random
+import re
+import string
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -60,7 +66,6 @@ async def process_directories_in_parallel(base_dir, max_depth=2):
     
     return combined_structure
 
-
 def dms_to_decimal(dms_str):
     parts = dms_str.split()
     degrees = float(parts[0])
@@ -72,7 +77,6 @@ def dms_to_decimal(dms_str):
     if direction in ['S', 'W']:
         decimal = -decimal
     return decimal
-
 
 def stream_output(process):
     """Function to read the process output and errors in real-time."""
@@ -96,7 +100,6 @@ def stream_output(process):
     # Close stdout and stderr after reading
     process.stdout.close()
     process.stderr.close()
-
 
 def build_nested_structure_sync_from_db(dir_index, path, current_depth=0, max_depth=2):
     """Build nested structure using DirectoryIndex database"""
@@ -139,3 +142,129 @@ async def process_directories_in_parallel_from_db(dir_index, base_dir, max_depth
         combined_structure[d.name] = structure
     
     return combined_structure
+
+### ROVER EXTRACT PLANTS ###
+def update_or_add_entry(data, key, new_values):
+    if key in data:
+        # Update existing entry
+        data[key].update(new_values)
+    else:
+        # Add new entry
+        data[key] = new_values
+
+def split_data(labels, images, test_size=0.2):
+    # Calculate split index
+    split_index = int(len(labels) * (1 - test_size))
+    
+    # Split the labels and images into train and validation sets
+    labels_train = labels[:split_index]
+    labels_val = labels[split_index:]
+    
+    images_train = images[:split_index]
+    images_val = images[split_index:]
+    
+    return labels_train, labels_val, images_train, images_val
+
+def copy_files_to_folder(source_files, target_folder):
+    for source_file in source_files:
+        target_file = target_folder / source_file.name
+        if not target_file.exists():
+            shutil.copy(source_file, target_file)
+            
+def remove_files_from_folder(folder):
+    for file in folder.iterdir():
+        if file.is_file():
+            file.unlink()
+
+def prepare_labels(annotations, images_path):
+    try:
+        # global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
+        
+        # path to labels
+        labels_train_folder = annotations.parent/'labels'/'train'
+        labels_val_folder = annotations.parent/'labels'/'val'
+        images_train_folder = annotations.parent/'images'/'train'
+        images_val_folder = annotations.parent/'images'/'val'
+        labels_train_folder.mkdir(parents=True, exist_ok=True)
+        labels_val_folder.mkdir(parents=True, exist_ok=True)
+        images_train_folder.mkdir(parents=True, exist_ok=True)
+        images_val_folder.mkdir(parents=True, exist_ok=True)
+
+        # obtain path to images
+        images = list(images_path.rglob('*.jpg')) + list(images_path.rglob('*.png'))
+        
+        # split images to train and val
+        labels = list(annotations.glob('*.txt'))
+        label_stems = set(Path(label).stem for label in labels)
+        filtered_images = [image for image in images if Path(image).stem in label_stems]
+        labels_train, labels_val, images_train, images_val = split_data(labels, filtered_images)
+
+        # link images and labels to folder
+        copy_files_to_folder(labels_train, labels_train_folder)
+        copy_files_to_folder(labels_val, labels_val_folder)
+        copy_files_to_folder(images_train, images_train_folder)
+        copy_files_to_folder(images_val, images_val_folder)
+        
+        # check if images_train_folder and images_val_folder are not empty
+        if not any(images_train_folder.iterdir()) or not any(images_val_folder.iterdir()):
+            return False
+        else:
+            return True
+        
+    except Exception as e:
+        print(f'Error preparing labels for training: {e}')
+
+### ROVER MODEL TRAINING ###
+def check_model_details(key, value = None):
+    # get base folder, args file and results file
+    base_path = key.parent.parent
+    args_file = base_path / 'args.yaml'
+    results_file = base_path / 'results.csv'
+    
+    # get epochs, batch size and image size
+    values = []
+    with open(args_file, 'r') as file:
+        args = yaml.safe_load(file)
+        epochs = args.get('epochs')
+        batch = args.get('batch')
+        imgsz = args.get('imgsz')
+        
+        values.extend([epochs, batch, imgsz])
+    
+    # get mAP of model
+    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
+    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
+    values.extend([mAP])
+    
+    # get run name
+    run = base_path.name
+    match = re.search(r'-([A-Za-z0-9]+)$', run)
+    id = match.group(1)
+    
+    # get date(s)
+    if value is not None:
+        date = ', '.join(value)
+    else:
+        date = None
+    
+    # get platform
+    platform = base_path.parts[-3]
+    
+    # get sensor
+    sensor = base_path.parts[-2].split()[0]
+    
+    # collate details
+    details = {'id': id, 'dates': date, 'platform': platform, 'sensor': sensor, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
+    
+    return details
+
+def generate_hash(trait, length=6):
+    """Generate a hash for model where it starts with the trait followed by a random string of characters.
+
+    Args:
+        trait (str): trait to be analyzed (plant, flower, pod, etc.)
+        length (int, optional): Length for random sequence. Defaults to 5.
+    """
+    random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    hash_id = f"{trait}-{random_sequence}"
+    return hash_id
