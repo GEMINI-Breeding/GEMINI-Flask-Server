@@ -107,17 +107,9 @@ update_environment() {
     # First try to update from yml file if it exists and is newer
     if [ -f "gemini-flask-server.yml" ]; then
         echo "Updating environment from gemini-flask-server.yml..."
+        # Use --prefix to update the current .conda environment instead of creating new one
         conda env update --prefix "$conda_env_path" --file gemini-flask-server.yml --prune || {
             echo "⚠️  Warning: Failed to update from yml file, trying requirements.txt"
-        }
-    fi
-    
-    # Update from requirements.txt if it exists
-    if [ -f "requirements.txt" ]; then
-        echo "Installing/updating packages from requirements.txt..."
-        source activate "$conda_env_path"
-        pip install -r requirements.txt || {
-            echo "⚠️  Warning: Some packages from requirements.txt may have failed to install"
         }
     fi
     
@@ -137,7 +129,7 @@ fi
 
 # Activate the environment using resolved path (add a check)
 echo "Activating Conda environment at: $conda_env_path"
-source activate "$conda_env_path" || {
+conda activate "$conda_env_path" || {
     echo "❌ Error: Failed to activate Conda environment at $conda_env_path"
     exit 1
 }
