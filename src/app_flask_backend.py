@@ -62,7 +62,7 @@ from scripts.stitch_utils import (
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
-from scripts.directory_index import DirectoryIndex, get_cached_dirs
+from scripts.directory_index import DirectoryIndexDict, get_cached_dirs
 
 
 # Paths to scripts
@@ -3394,14 +3394,16 @@ if __name__ == "__main__":
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global dir_db
-    # Initialize directory index as None - will be set when data_root_dir is available
+    dict_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
     dir_db = None
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_db is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        # Check if database exists
-        db_exists = os.path.exists(db_path)
-        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
+    # Use dictionary-based index
+    dir_db = DirectoryIndexDict(verbose=False)
+    # Try loading from file if exists
+    if os.path.exists(dict_path):
+        dir_db.load_dict(dict_path)
+        print(f"Loaded directory index dict from {dict_path}")
+    else:
+        print(f"No dict file found, will build index from scratch.")
 
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
@@ -3415,6 +3417,9 @@ if __name__ == "__main__":
 
     # Start the Flask server
     uvicorn.run(app, port=args.flask_port)
+
+    # Save the directory index dict before shutdown
+    dir_db.save_dict(dict_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
