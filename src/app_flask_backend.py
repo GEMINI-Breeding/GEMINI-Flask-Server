@@ -3370,8 +3370,8 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
-    parser.add_argument('--titiler_port', type=int, default=8095,required=False) # Default port is 8091
+    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
@@ -3393,7 +3393,7 @@ if __name__ == "__main__":
         db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
         dir_db = None
         # Use dictionary-based index
-        dir_db = DirectoryIndexDict(verbose=True)
+        dir_db = DirectoryIndexDict(verbose=False)
         # Try loading from file if exists
         if os.path.exists(db_path):
             dir_db.load_dict(db_path)
@@ -3404,7 +3404,7 @@ if __name__ == "__main__":
         db_path = os.path.join(data_root_dir, "directory_index.db")
         dir_db = None
         # Use SQLite-based index
-        dir_db = DirectoryIndex(db_path=db_path, verbose=True)
+        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
         # No need to load_dict or save_dict for DirectoryIndex
 
     # Register inference routes
