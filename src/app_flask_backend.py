@@ -62,8 +62,7 @@ from scripts.stitch_utils import (
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
-from scripts.directory_index import DirectoryIndexDict, get_cached_dirs
-
+from scripts.directory_index import DirectoryIndex, DirectoryIndexDict
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -261,11 +260,6 @@ async def list_dirs_nested_processed():
 def list_files(dir_path):
     """Fast file listing using directory index"""
     global data_root_dir, dir_db
-    
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_db is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_db = DirectoryIndex(db_path=db_path)
     
     full_path = os.path.join(data_root_dir, dir_path)
     
@@ -3394,16 +3388,23 @@ if __name__ == "__main__":
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global dir_db
-    dict_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
-    dir_db = None
-    # Use dictionary-based index
-    dir_db = DirectoryIndexDict(verbose=False)
-    # Try loading from file if exists
-    if os.path.exists(dict_path):
-        dir_db.load_dict(dict_path)
-        print(f"Loaded directory index dict from {dict_path}")
+    if 1:
+        db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
+        dir_db = None
+        # Use dictionary-based index
+        dir_db = DirectoryIndexDict(verbose=False)
+        # Try loading from file if exists
+        if os.path.exists(db_path):
+            dir_db.load_dict(db_path)
+            print(f"Loaded directory index dict from {db_path}")
+        else:
+            print(f"No dict file found, will build index from scratch.")
     else:
-        print(f"No dict file found, will build index from scratch.")
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_db = None
+        # Use SQLite-based index
+        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
+        # No need to load_dict or save_dict for DirectoryIndex
 
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
@@ -3419,7 +3420,8 @@ if __name__ == "__main__":
     uvicorn.run(app, port=args.flask_port)
 
     # Save the directory index dict before shutdown
-    dir_db.save_dict(dict_path)
+    if ".pkl" in db_path:
+        dir_db.save_dict(db_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
