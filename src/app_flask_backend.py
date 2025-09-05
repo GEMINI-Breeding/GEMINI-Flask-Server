@@ -62,8 +62,7 @@ from scripts.stitch_utils import (
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
-from scripts.directory_index import DirectoryIndexDict, get_cached_dirs
-
+from scripts.directory_index import DirectoryIndex, DirectoryIndexDict
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -214,7 +213,7 @@ async def list_dirs_nested():
         print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
         
         # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
+        nested_structure = process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
         
         return jsonify(nested_structure), 200
         
@@ -240,7 +239,7 @@ async def list_dirs_nested_processed():
         print(f"Getting nested structure for Processed directory using DirectoryIndex: {base_dir}")
         
         # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(base_dir, max_depth=9)
+        nested_structure = process_directories_in_parallel_from_db(base_dir, max_depth=9)
         
         return jsonify(nested_structure), 200
         
@@ -261,11 +260,6 @@ async def list_dirs_nested_processed():
 def list_files(dir_path):
     """Fast file listing using directory index"""
     global data_root_dir, dir_db
-    
-    # Initialize dir_index if it hasn't been initialized yet
-    if dir_db is None:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_db = DirectoryIndex(db_path=db_path)
     
     full_path = os.path.join(data_root_dir, dir_path)
     
@@ -1815,8 +1809,8 @@ def run_odm_endpoint():
         
         # Run progress tracker
         logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
-        progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
-        os.makedirs(os.path.dirname(progress_file), exist_ok=True)
+        progress_file = os.path.join(data_root_dir, 'temp/progress.txt');
+        os.makedirs(os.path.dirname(progress_file), exist_ok=True);
         thread_prog = threading.Thread(target=monitor_log_updates, args=(latest_data, logs_path, progress_file), daemon=True)
         thread_prog.start()
 
@@ -1995,7 +1989,7 @@ def download_plot_ortho():
         
         temp_dir = tempfile.mkdtemp()
         zip_filename = f"{data['date']}-{data['platform']}-{data['sensor']}-{data['agrowstitchDir']}-plots.zip"
-        zip_path = os.path.join(temp_dir, zip_filename)
+        zip_path = os.path.join(temp_dir, zip_filename);
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for plot_file in sorted(plot_files):
@@ -2152,7 +2146,7 @@ def associate_plots_with_boundaries():
             return jsonify({'error': 'plot_index column not found in plot_borders.csv'}), 400
             
         # Get unique plot indices (excluding unassigned)
-        plot_indices = [idx for idx in msgs_df['plot_index'].unique() if idx > 0 and not pd.isna(idx)]
+        plot_indices = [pid for pid in msgs_df['plot_index'].unique() if pid != 0 and not pd.isna(pid)]
         
         if len(plot_indices) == 0:
             return jsonify({'error': 'No plot indices found in msgs_synced.csv'}), 400
@@ -3375,8 +3369,8 @@ if __name__ == "__main__":
     # Add arguments to the command line
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
-    parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
-    parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
+    parser.add_argument('--flask_port', type=int, default=5005,required=False) # Default port is 5000
+    parser.add_argument('--titiler_port', type=int, default=8095,required=False) # Default port is 8091
     args = parser.parse_args()
 
     # Print the arguments to the console
@@ -3394,16 +3388,23 @@ if __name__ == "__main__":
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global dir_db
-    dict_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
-    dir_db = None
-    # Use dictionary-based index
-    dir_db = DirectoryIndexDict(verbose=False)
-    # Try loading from file if exists
-    if os.path.exists(dict_path):
-        dir_db.load_dict(dict_path)
-        print(f"Loaded directory index dict from {dict_path}")
+    if 1:
+        dict_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
+        dir_db = None
+        # Use dictionary-based index
+        dir_db = DirectoryIndexDict(verbose=False)
+        # Try loading from file if exists
+        if os.path.exists(dict_path):
+            dir_db.load_dict(dict_path)
+            print(f"Loaded directory index dict from {dict_path}")
+        else:
+            print(f"No dict file found, will build index from scratch.")
     else:
-        print(f"No dict file found, will build index from scratch.")
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_db = None
+        # Use SQLite-based index
+        dir_db = DirectoryIndex(db_path=db_path, verbose=True)
+        # No need to load_dict or save_dict for DirectoryIndex
 
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
@@ -3419,7 +3420,8 @@ if __name__ == "__main__":
     uvicorn.run(app, port=args.flask_port)
 
     # Save the directory index dict before shutdown
-    dir_db.save_dict(dict_path)
+    if "plk" in db_path:
+        dir_db.save_dict(dict_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
