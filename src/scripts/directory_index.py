@@ -262,13 +262,12 @@ class DirectoryIndex:
                 self._log(f"Path is not directory: {parent_path}")
                 return False
                 
-            # Get current directory contents
+            # Get current directory contents (directories only, fast)
             current_items = []
-            for item in os.listdir(parent_path):
-                if not item.startswith('.'):  # Skip hidden files
-                    item_path = os.path.join(parent_path, item)
-                    is_dir = os.path.isdir(item_path)
-                    current_items.append({'path': item_path, 'is_directory': is_dir})
+            with os.scandir(parent_path) as it:
+                for entry in it:
+                    if not entry.name.startswith('.') and entry.is_dir():
+                        current_items.append({'path': entry.path, 'is_directory': True})
             
             # Update database
             with self.lock:
@@ -312,7 +311,7 @@ class DirectoryIndex:
             self._log(f"Error in background refresh for {parent_path}: {e}")
             return False
     
-    def get_children(self, parent_path, directories_only=True, wait_if_needed=False, timeout=300):
+    def get_children(self, parent_path, directories_only=True, wait_if_needed=True, timeout=300):
         """
         Get children from database with flexible refresh and waiting options
         
@@ -580,7 +579,7 @@ class DirectoryIndexDict:
             self._log(f"Error joining queue: {e}")
         self._log("DirectoryIndexDict shutdown complete")
 
-    def get_children(self, parent_path, directories_only=True, wait_if_needed=False, timeout=300):
+    def get_children(self, parent_path, directories_only=True, wait_if_needed=True, timeout=300):
         """
         Get children from dict with flexible refresh and waiting options.
         """
@@ -642,12 +641,12 @@ class DirectoryIndexDict:
             if not os.path.isdir(parent_path):
                 self._log(f"Path is not directory: {parent_path}")
                 return False
+            # Get current directory contents (directories only, fast)
             current_items = []
-            for item in os.listdir(parent_path):
-                if not item.startswith('.'):
-                    item_path = os.path.join(parent_path, item)
-                    is_dir = os.path.isdir(item_path)
-                    current_items.append({'path': item_path, 'is_directory': is_dir})
+            with os.scandir(parent_path) as it:
+                for entry in it:
+                    if not entry.name.startswith('.') and entry.is_dir():
+                        current_items.append({'path': entry.path, 'is_directory': True})
             with self.db_lock:
                 self.db[parent_path] = current_items
             self._log(f"Background refresh: updated {len(current_items)} items for {parent_path}")

@@ -213,7 +213,7 @@ async def list_dirs_nested():
         print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
         
         # Try database-first approach
-        nested_structure = process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
+        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
         
         return jsonify(nested_structure), 200
         
@@ -228,6 +228,7 @@ async def list_dirs_nested():
         except Exception as fallback_error:
             print(f"Error in fallback method: {fallback_error}")
             return jsonify({'error': 'Failed to get directory structure'}), 500
+
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
@@ -3389,14 +3390,14 @@ if __name__ == "__main__":
 
     global dir_db
     if 1:
-        dict_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
+        db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
         dir_db = None
         # Use dictionary-based index
-        dir_db = DirectoryIndexDict(verbose=False)
+        dir_db = DirectoryIndexDict(verbose=True)
         # Try loading from file if exists
-        if os.path.exists(dict_path):
-            dir_db.load_dict(dict_path)
-            print(f"Loaded directory index dict from {dict_path}")
+        if os.path.exists(db_path):
+            dir_db.load_dict(db_path)
+            print(f"Loaded directory index dict from {db_path}")
         else:
             print(f"No dict file found, will build index from scratch.")
     else:
@@ -3420,8 +3421,8 @@ if __name__ == "__main__":
     uvicorn.run(app, port=args.flask_port)
 
     # Save the directory index dict before shutdown
-    if "plk" in db_path:
-        dir_db.save_dict(dict_path)
+    if ".pkl" in db_path:
+        dir_db.save_dict(db_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
