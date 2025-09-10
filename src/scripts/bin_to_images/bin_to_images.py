@@ -30,6 +30,7 @@ from farm_ng.core.events_file_reader import EventLogPosition
 
 import warnings
 warnings.filterwarnings("ignore")
+import traceback
 
 # camera positions
 CAMERA_POSITIONS = {'oak0': 'top', 'oak1': 'left', 'oak2': 'right'}
@@ -901,6 +902,38 @@ def extract_binary(file_names, output_path, granular_progress: bool = True) -> N
         else:
             print("Warning: No valid synced messages found for final output")
 
+def _cleanup_files(file_paths):
+    global extraction_status
+    for p in file_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+def extraction_worker(file_paths, output_path):
+    global extraction_status, extraction_error_message
+
+    try:
+        extraction_status = "in_progress"
+        extraction_error_message = None
+        extract_binary(file_paths, output_path)
+        
+        # cleanup files
+        _cleanup_files(file_paths)
+        extraction_status = "done"
+    except EOFError as e:
+        error_msg = f"EOFError during binary extraction: {e}"
+        print(error_msg)
+        extraction_status = "failed"
+        extraction_error_message = error_msg
+    except Exception as e:
+        error_msg = f"Extraction failed: {e}"
+        print(f"[ERROR] {error_msg}")
+        # print full traceback
+        traceback.print_exc()
+        extraction_status = "failed"
+        extraction_error_message = error_msg
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--file_names', type=str, nargs='+', required=True,
@@ -923,3 +956,5 @@ if __name__ == '__main__':
 
     # Extract binary files
     extract_binary(file_names, output_path)
+
+

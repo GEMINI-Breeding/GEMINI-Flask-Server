@@ -75,3 +75,4 @@ utm
 requests
 piexif
 zipfile36
+pymavlink

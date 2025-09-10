@@ -6,21 +6,20 @@ import threading
 import time
 import glob
 import yaml
-import random
-import string
 import csv
 import shutil
 import traceback
 import tempfile
 import torch
 import argparse
-import select
-import multiprocessing
 import requests
-import zipfile
 from multiprocessing import active_children, Process
 from pathlib import Path
 
+import unicodedata
+import re
+
+# Third-party library imports
 
 import uvicorn
 import json
@@ -42,10 +41,13 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png
-from scripts.utils import process_directories_in_parallel
-from scripts.gcp_picker import collect_gcp_candidate, get_image_exif, refresh_gcp_candidate
-from scripts.bin_to_images.bin_to_images import extract_binary
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png, monitor_log_updates
+from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
+from scripts.utils import update_or_add_entry, split_data, prepare_labels, remove_files_from_folder, copy_files_to_folder, check_model_details
+from scripts.utils import generate_hash
+from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
+from scripts.mavlink import process_mavlink_log_for_webapp
+from scripts.bin_to_images.bin_to_images import extract_binary, extraction_worker
 from scripts.plot_marking.plot_marking import plot_marking_bp
 
 # stitch pipeline
@@ -58,13 +60,10 @@ from scripts.stitch_utils import (
     monitor_stitch_updates_multi_plot,
     create_combined_mosaic_separate
 )
-
-# stitch pipeline
-import sys
-AGROWSTITCH_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../AgRowStitch"))
-print(AGROWSTITCH_PATH)
-sys.path.append(AGROWSTITCH_PATH)
-from panorama_maker.AgRowStitch import run as run_agrowstitch
+from rasterio.transform import from_bounds
+from rasterio.crs import CRS
+from PIL import ImageFile
+from scripts.directory_index import DirectoryIndex, DirectoryIndexDict
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -129,43 +128,6 @@ def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_o
             print("Final progress set to 100% - workflow complete!")
         
         print("=== WORKFLOW FULLY COMPLETED ===")
-
-
-def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
-    exif_data_list = []
-    
-    # Extract EXIF Data Extraction
-    for file_path in file_paths:
-        if data_type.lower() == 'image':
-            if file_path not in existing_paths:
-                msg = get_image_exif(file_path)
-                if msg and msg['image_path'] not in existing_paths:
-                    exif_data_list.append(msg)
-                    existing_paths.add(msg['image_path'])  # Prevent duplicated process
-    
-    if data_type.lower() == 'image' and exif_data_list:
-        if existing_df is not None and not existing_df.empty:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-        else:
-            pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
-
-# def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df, existing_paths):
-#     exif_data_list = []
-    
-#     # Extract EXIF Data Extraction
-#     for file_path in file_paths:
-#         if data_type.lower() == 'image':
-#             if file_path not in existing_paths:
-#                 msg = get_image_exif(file_path)
-#                 if msg and msg['image_path'] not in existing_paths:
-#                     exif_data_list.append(msg)
-#                     existing_paths.add(msg['image_path'])  # Prevent duplicated process
-    
-#     if data_type.lower() == 'image' and exif_data_list:
-#         if existing_df is not None and not existing_df.empty:
-#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
-#         else:
-#             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
 
 @file_app.route('/get_tif_to_png', methods=['POST'])
 def get_tif_to_png():
@@ -232,62 +194,120 @@ def fetch_data_root_dir():
 # endpoint to list directories
 @file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
 def list_dirs(dir_path):
-    # global data_root_dir
-    dir_path = os.path.join(data_root_dir, dir_path)  # join with base directory path
-    if os.path.exists(dir_path):
-        dirs = (entry.name for entry in os.scandir(dir_path) if entry.is_dir())
-        return jsonify(list(dirs)), 200
-    else:
-        return jsonify({'message': 'Directory not found'}), 404
+    """Fast directory listing using index"""
+    global data_root_dir, dir_db
     
-def stream_output(process):
-    """Function to read the process output and errors in real-time."""
-    while True:
-        reads = [process.stdout.fileno(), process.stderr.fileno()]
-        ret = select.select(reads, [], [])
+    full_path = os.path.join(data_root_dir, dir_path)
 
-        for fd in ret[0]:
-            if fd == process.stdout.fileno():
-                output = process.stdout.readline()
-                if output:
-                    print("Output:", output.decode('utf-8').strip())
-            if fd == process.stderr.fileno():
-                error_output = process.stderr.readline()
-                if error_output:
-                    print("Error:", error_output.decode('utf-8').strip())
+    # Try index first
+    dirs = dir_db.get_children(full_path, directories_only=True, wait_if_needed=True)
 
-        if process.poll() is not None:
-            break  # Break loop if process ends
-
-    # Close stdout and stderr after reading
-    process.stdout.close()
-    process.stderr.close()
+    return jsonify(dirs), 200
 
 @file_app.get("/list_dirs_nested")
 async def list_dirs_nested():
+    global data_root_dir, dir_db
+    
     base_dir = Path(data_root_dir) / 'Raw'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-    return jsonify(combined_structure), 200
+    
+    try:
+        print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
+        
+        # Try database-first approach
+        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
+        
+        return jsonify(nested_structure), 200
+        
+    except Exception as e:
+        print(f"Error getting nested structure from database: {e}")
+        print("Falling back to original filesystem method...")
+        
+        # Fallback to original method if database approach fails
+        try:
+            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+            return jsonify(nested_structure), 200
+        except Exception as fallback_error:
+            print(f"Error in fallback method: {fallback_error}")
+            return jsonify({'error': 'Failed to get directory structure'}), 500
 
 @file_app.get("/list_dirs_nested_processed")
 async def list_dirs_nested_processed():
+    global data_root_dir, dir_db
+
     base_dir = Path(data_root_dir) / 'Processed'
-    combined_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-    return jsonify(combined_structure), 200
+    
+    try:
+        print(f"Getting nested structure for Processed directory using DirectoryIndex: {base_dir}")
+        
+        # Try database-first approach
+        nested_structure = await process_directories_in_parallel_from_db(base_dir, max_depth=9)
+        
+        return jsonify(nested_structure), 200
+        
+    except Exception as e:
+        print(f"Error getting nested structure from database: {e}")
+        print("Falling back to original filesystem method...")
+        
+        # Fallback to original method if database approach fails
+        try:
+            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
+            return jsonify(nested_structure), 200
+        except Exception as fallback_error:
+            print(f"Error in fallback method: {fallback_error}")
+            return jsonify({'error': 'Failed to get directory structure'}), 500
 
 # endpoint to list files
 @file_app.route('/list_files/<path:dir_path>', methods=['GET'])
 def list_files(dir_path):
-    # global data_root_dir
-    dir_path = os.path.join(data_root_dir, dir_path)
-    if os.path.exists(dir_path):
-        files = os.listdir(dir_path)
-        files = [x for x in files if not x.startswith('.')]
-        files = [x for x in files if not os.path.isdir(os.path.join(dir_path, x))]
-        files.sort()
-        return jsonify(files), 200
-    else:
+    """Fast file listing using directory index"""
+    global data_root_dir, dir_db
+    
+    full_path = os.path.join(data_root_dir, dir_path)
+    
+    # Try to get files from directory index (both files and directories, then filter)
+    try:
+        all_items = dir_db.get_children(full_path, directories_only=False, wait_if_needed=True)
+        
+        # Filter to get only files (not directories)
+        if all_items and isinstance(all_items[0], dict):
+            # If items have type information
+            files = [item['name'] for item in all_items if not item.get('is_directory', True)]
+        else:
+            # If no items returned from index, use fallback
+            files = []
+    except Exception as e:
+        print(f"Error using directory index for files: {e}")
+        files = []
+    
+    # Enhanced fallback with error handling
+    if not files and os.path.exists(full_path):
+        try:
+            # Direct filesystem read as fallback
+            all_entries = os.listdir(full_path)
+            files = []
+            for entry in all_entries:
+                if not entry.startswith('.'):  # Skip hidden files
+                    entry_path = os.path.join(full_path, entry)
+                    if os.path.isfile(entry_path):  # Only include files
+                        files.append(entry)
+            
+            files.sort()
+            
+            # Queue for background processing to update the database
+            if hasattr(dir_db, 'refresh_queue'):
+                dir_db.refresh_queue.put(full_path)
+            
+        except PermissionError:
+            print(f"Permission denied accessing: {full_path}")
+            return jsonify({'error': 'Permission denied'}), 403
+        except Exception as e:
+            print(f"Error reading directory {full_path}: {e}")
+            return jsonify({'error': 'Directory read failed'}), 500
+    
+    if not os.path.exists(full_path):
         return jsonify({'message': 'Directory not found'}), 404
+    
+    return jsonify(files), 200
 
 @file_app.route('/view_synced_data', methods=['POST'])
 def view_synced_data():
@@ -453,16 +473,6 @@ def update_data():
         #                 old_dir = os.path.dirname(old_dir)
         #             except OSError:
         #                 break
-        npy_path = new_path_raw + "/image_names_final.npy"
-
-        if not os.path.isfile(npy_path):
-            print(f"The file {npy_path} does not exist. Skipping this block.")
-        else:
-            loaded_npy = np.load(npy_path, allow_pickle=True).item()
-            new_path_npy = f"/Raw/{new_data['year']}/{new_data['experiment']}/{new_data['location']}/{new_data['population']}/{new_data['date']}/{new_data['platform']}/{new_data['sensor']}/Images/"
-            for entry in loaded_npy['selected_images']:
-                entry['image_path'] = new_path_npy + entry['image_path'].split('/')[-1]
-            np.save(npy_path, loaded_npy)
 
         for file in os.listdir(new_path_processed):
             file_path = os.path.join(new_path_processed, file)
@@ -698,18 +708,16 @@ def upload_files():
     dir_path = request.form.get('dirPath')
     upload_new_files_only = request.form.get('uploadNewFilesOnly') == 'true'
     
-    # Sanitize the directory path to remove any hidden Unicode characters
-    import unicodedata
-    import re
-    
+    # Sanitize the directory path to remove any hidden Unicode characters    
     # Normalize Unicode and remove control characters
     dir_path_clean = unicodedata.normalize('NFKD', dir_path)
     dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
     dir_path_clean = re.sub(r'[^\x20-\x7e]', '', dir_path_clean)  # Keep only ASCII printable characters
     dir_path_clean = dir_path_clean.strip()  # Remove leading/trailing whitespace
     
-    print(f"Original dir_path: {repr(dir_path)}")
-    print(f"Cleaned dir_path: {repr(dir_path_clean)}")
+    if dir_path != dir_path_clean:
+        print(f"Original dir_path: {repr(dir_path)}")
+        print(f"Cleaned dir_path: {repr(dir_path_clean)}")
     
     full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     os.makedirs(full_dir_path, exist_ok=True)
@@ -748,8 +756,31 @@ def upload_files():
             target=process_exif_data_async, 
             args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
         )
-        thread.daemon = True  # Stop the main thread
+        thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
+
+    if data_type.lower() == "platformlogs":
+        msgs_synced_file = os.path.join(os.path.dirname(full_dir_path), "drone_msgs.csv")
+        if os.path.isfile(msgs_synced_file):
+            existing_df = pd.read_csv(msgs_synced_file)
+            existing_paths = set(existing_df['timestamp'].values)
+        else:
+            existing_paths = set()
+        thread = threading.Thread(
+            target=process_mavlink_log_for_webapp, 
+            args=(uploaded_file_paths, data_type, msgs_synced_file, existing_df, existing_paths)
+        )
+        thread.daemon = True  # Set as daemon thread to terminate with main thread
+        thread.start()
+
+    # Update directory database after upload completion
+    if uploaded_file_paths and dir_db is not None:
+        try:
+            # Refresh the directory in the database
+            dir_db.force_refresh(full_dir_path)
+            print(f"Updated directory database for: {full_dir_path}")
+        except Exception as e:
+            print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -793,37 +824,6 @@ def cancel_extraction():
     p.join()
     return jsonify({'status': 'cancelled'}), 200
 
-def _cleanup_files(file_paths):
-    global extraction_status
-    for p in file_paths:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-
-def _extraction_worker(file_paths, output_path):
-    global extraction_status, extraction_error_message
-
-    try:
-        extraction_status = "in_progress"
-        extraction_error_message = None
-        extract_binary(file_paths, output_path)
-        
-        # cleanup files
-        _cleanup_files(file_paths)
-        extraction_status = "done"
-    except EOFError as e:
-        error_msg = f"EOFError during binary extraction: {e}"
-        print(error_msg)
-        extraction_status = "failed"
-        extraction_error_message = error_msg
-    except Exception as e:
-        error_msg = f"Extraction failed: {e}"
-        print(f"[ERROR] {error_msg}")
-        # print full traceback
-        traceback.print_exc()
-        extraction_status = "failed"
-        extraction_error_message = error_msg
 
 @file_app.route('/get_binary_status', methods=['GET'])
 def get_binary_status():
@@ -858,7 +858,7 @@ def extract_binary_file():
     #     return jsonify({'status': 'already running'}), 429
 
     extraction_status = "in_progress"
-    p = Process(target=_extraction_worker, args=(file_paths, output_path), daemon=True)
+    p = Process(target=extraction_worker, args=(file_paths, output_path), daemon=True)
     p.start()
     extraction_processes[dir_path] = p
 
@@ -894,9 +894,6 @@ def upload_chunk():
     dir_path = request.form['dirPath']
     
     # Sanitize the directory path to remove any hidden Unicode characters
-    import unicodedata
-    import re
-    
     # Normalize Unicode and remove control characters
     dir_path_clean = unicodedata.normalize('NFKD', dir_path)
     dir_path_clean = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', dir_path_clean)  # Remove control characters
@@ -931,16 +928,18 @@ def upload_chunk():
             os.replace(assembled_path + ".tmp", assembled_path)  # atomic move
             print("Finished reassembling file...")
             
-            # Check if this is an orthomosaic file and create pyramid if needed
-            if file_name.endswith(('-RGB.tif', '-DEM.tif')) and 'Processed' in dir_path_clean:
-                create_pyramid_for_orthomosaic(assembled_path, file_name)
-                
-                # Also create corresponding Raw directory structure for data filtering
-                create_raw_directory_structure_for_orthomosaic(dir_path_clean)
-            
             # Optionally, cleanup parts here
             for i in range(total_chunks):
                 os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))
+            
+            # Update directory database after successful file assembly
+            if dir_db is not None:
+                try:
+                    dir_db.force_refresh(full_dir_path)
+                    print(f"Updated directory database for: {full_dir_path}")
+                except Exception as e:
+                    print(f"Error updating directory database: {e}")
+                    
             return "File reassembled and saved successfully", 200
         except Exception as e:
             print(f"Error during reassembly: {e}")
@@ -1844,7 +1843,7 @@ def run_odm_endpoint():
         logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
         progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
         os.makedirs(os.path.dirname(progress_file), exist_ok=True)
-        thread_prog = threading.Thread(target=monitor_log_updates, args=(logs_path, progress_file), daemon=True)
+        thread_prog = threading.Thread(target=monitor_log_updates, args=(latest_data, logs_path, progress_file), daemon=True)
         thread_prog.start()
 
         return jsonify({"status": "success", "message": "ODM processing started successfully"})
@@ -2520,23 +2519,6 @@ def download_single_plot():
         print(f"Error downloading single plot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def update_progress_file(progress_file, progress, debug=False):
-    with open(progress_file, 'w') as pf:
-        pf.write(f"{progress}%")
-        latest_data['ortho'] = progress
-        if debug:
-            print('Ortho progress updated:', progress)
-
-
-
-
-
-
-
-
-
-
-
 
 
 @file_app.route('/get_data_options', methods=['GET'])
@@ -2747,72 +2729,7 @@ def get_sensors():
         print(f"Error getting sensors: {e}")
         return jsonify({'error': str(e)}), 500
                
-def monitor_log_updates(logs_path, progress_file):
-    
-    try:
-        progress_stages = [
-            "Running dataset stage", # After spin up a docker container
-            "Finished dataset stage", # After finish loading dataset
-            "Computing pair matching", # After finish feature extraction, before the pair matching
-            "Merging features onto tracks", # After pair matching, before merging features, 241.8s
-            "Export reconstruction stats", # After Ceres Solver Report
-            "Finished opensfm stage", # After Undistorting images
-            "Densifying point-cloud completed", # After fusing depth maps
-            "Finished openmvs stage", # After Finished openmvs stage, 31.83s
-            "Finished odm_filterpoints stage", # Finished odm_filterpoints stage
-            "Finished mvs_texturing stage", # After Finished mvs_texturing stage, 57.216s
-            "Finished odm_georeferencing stage", # After Finished odm_georeferencing stage 
-            "Finished odm_dem stage", # After Finished odm_dem stage
-            "Finished odm_orthophoto stage", # After Finished odm_orthophoto stage
-            "Finished odm_report stage",  # After Finished odm_report stage
-            "Finished odm_postprocess stage", # Finished odm_postprocess stage
-            "ODM app finished",             # ODM Processes are done, but some additional steps left
-            "Copied RGB.tif",               # scripts/orthomosaic_generation.py L124
-            "Generated RGB-Pyramid.tif",        # # scripts/orthomosaic_generation.py L163
-            "Copied DEM.tif",
-            "Generated DEM-Pyramid.tif",
-            "Orthomosaic Generation Completed",
-        ]   
-        
-        with open(progress_file, 'w') as file:
-            file.write("0")
-        
-        # Wait for the log file to be created
-        while not os.path.exists(logs_path):
-            print("Waiting for log file to be created...")
-            time.sleep(5)  # Check every 5 seconds
-        
-        print("Log file found. Monitoring for updates.")
-        
-        # Log file exists, start monitoring
-        with open(logs_path, 'r') as file:
-            # Start by reading the file from the beginning
-            file.seek(0)
-            current_stage = -1
-            while True:
-                line = file.readline() # It will read the file line by line
-                if line:
-                    # print(line)
-                    found_stages_msg = False
-                    for idx, step in enumerate(progress_stages):
-                        if step in line:
-                            found_stages_msg = True
-                            current_stage = idx
-                            break
 
-                    if found_stages_msg and current_stage > -1:
-                        current_progress = (current_stage+1) / len(progress_stages) * 100
-                        update_progress_file(progress_file, round(current_progress))
-                        print(progress_stages[current_stage])
-                        print(f"Progress updated: {current_progress:.1f}%")
-                        if current_stage == len(progress_stages) - 1:
-                            break
-                else:
-                    time.sleep(10)  # Sleep briefly to avoid busy waiting
-
-    except Exception as e:
-        # Handle exception: log it, set a flag, etc.
-        print(f"Error in thread: {e}")
         
 ### CVAT #### 
 @file_app.route('/start_cvat', methods=['POST'])
@@ -2962,127 +2879,31 @@ def check_existing_labels():
 
 @file_app.route('/upload_trait_labels', methods=['POST'])
 def upload_trait_labels():
-    # global data_root_dir
-    
     dir_path = request.form.get('dirPath')
     full_dir_path = os.path.join(data_root_dir, dir_path)
     os.makedirs(full_dir_path, exist_ok=True)
 
+    uploaded_files = []
     for file in request.files.getlist("files"):
         filename = secure_filename(file.filename)
         file_path = os.path.join(full_dir_path, filename)
         print(f'Saving {file_path}...')
         file.save(file_path)
+        uploaded_files.append(file_path)
+
+    # Update directory database after upload completion
+    if uploaded_files and dir_db is not None:
+        try:
+            dir_db.force_refresh(full_dir_path)
+            print(f"Updated directory database for: {full_dir_path}")
+        except Exception as e:
+            print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
-def split_data(labels, images, test_size=0.2):
-    # Calculate split index
-    split_index = int(len(labels) * (1 - test_size))
-    
-    # Split the labels and images into train and validation sets
-    labels_train = labels[:split_index]
-    labels_val = labels[split_index:]
-    
-    images_train = images[:split_index]
-    images_val = images[split_index:]
-    
-    return labels_train, labels_val, images_train, images_val
 
-def copy_files_to_folder(source_files, target_folder):
-    for source_file in source_files:
-        target_file = target_folder / source_file.name
-        if not target_file.exists():
-            shutil.copy(source_file, target_file)
-            
-def remove_files_from_folder(folder):
-    for file in folder.iterdir():
-        if file.is_file():
-            file.unlink()
 
-def prepare_labels(annotations, images_path):
-    
-    try:
-        # global data_root_dir, labels_train_folder, labels_val_folder, images_train_folder, images_val_folder
-        
-        # path to labels
-        labels_train_folder = annotations.parent/'labels'/'train'
-        labels_val_folder = annotations.parent/'labels'/'val'
-        images_train_folder = annotations.parent/'images'/'train'
-        images_val_folder = annotations.parent/'images'/'val'
-        labels_train_folder.mkdir(parents=True, exist_ok=True)
-        labels_val_folder.mkdir(parents=True, exist_ok=True)
-        images_train_folder.mkdir(parents=True, exist_ok=True)
-        images_val_folder.mkdir(parents=True, exist_ok=True)
 
-        # obtain path to images
-        images = list(images_path.rglob('*.jpg')) + list(images_path.rglob('*.png'))
-        
-        # split images to train and val
-        labels = list(annotations.glob('*.txt'))
-        label_stems = set(Path(label).stem for label in labels)
-        filtered_images = [image for image in images if Path(image).stem in label_stems]
-        labels_train, labels_val, images_train, images_val = split_data(labels, filtered_images)
-
-        # link images and labels to folder
-        copy_files_to_folder(labels_train, labels_train_folder)
-        copy_files_to_folder(labels_val, labels_val_folder)
-        copy_files_to_folder(images_train, images_train_folder)
-        copy_files_to_folder(images_val, images_val_folder)
-        
-        # check if images_train_folder and images_val_folder are not empty
-        if not any(images_train_folder.iterdir()) or not any(images_val_folder.iterdir()):
-            return False
-        else:
-            return True
-        
-    except Exception as e:
-        print(f'Error preparing labels for training: {e}')
-
-### ROVER MODEL TRAINING ###
-def check_model_details(key, value = None):
-    
-    # get base folder, args file and results file
-    base_path = key.parent.parent
-    args_file = base_path / 'args.yaml'
-    results_file = base_path / 'results.csv'
-    
-    # get epochs, batch size and image size
-    values = []
-    with open(args_file, 'r') as file:
-        args = yaml.safe_load(file)
-        epochs = args.get('epochs')
-        batch = args.get('batch')
-        imgsz = args.get('imgsz')
-        
-        values.extend([epochs, batch, imgsz])
-    
-    # get mAP of model
-    df = pd.read_csv(results_file, delimiter=',\s+', engine='python')
-    mAP = round(df['metrics/mAP50(B)'].iloc[-1], 2)  # Get the last value in the column
-    values.extend([mAP])
-    
-    # get run name
-    run = base_path.name
-    match = re.search(r'-([A-Za-z0-9]+)$', run)
-    id = match.group(1)
-    
-    # get date(s)
-    if value is not None:
-        date = ', '.join(value)
-    else:
-        date = None
-    
-    # get platform
-    platform = base_path.parts[-3]
-    
-    # get sensor
-    sensor = base_path.parts[-2].split()[0]
-    
-    # collate details
-    details = {'id': id, 'dates': date, 'platform': platform, 'sensor': sensor, 'epochs': epochs, 'batch': batch, 'imgsz': imgsz, 'map': mAP}
-    
-    return details
 
 @file_app.route('/get_model_info', methods=['POST'])
 def get_model_info():
@@ -3354,16 +3175,7 @@ def get_locate_progress():
     else:
         return jsonify({'error': 'Locate progress not found'}), 404
 
-def generate_hash(trait, length=6):
-    """Generate a hash for model where it starts with the trait followed by a random string of characters.
 
-    Args:
-        trait (str): trait to be analyzed (plant, flower, pod, etc.)
-        length (int, optional): Length for random sequence. Defaults to 5.
-    """
-    random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    hash_id = f"{trait}-{random_sequence}"
-    return hash_id
 
 @file_app.route('/locate_plants', methods=['POST'])
 def locate_plants():
@@ -3451,15 +3263,6 @@ def stop_locate():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
-    
-### ROVER EXTRACT PLANTS ###
-def update_or_add_entry(data, key, new_values):
-    if key in data:
-        # Update existing entry
-        data[key].update(new_values)
-    else:
-        # Add new entry
-        data[key] = new_values
         
 @file_app.route('/get_extract_progress', methods=['GET'])
 def get_extract_progress():
@@ -3871,6 +3674,25 @@ if __name__ == "__main__":
     global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
+    global dir_db
+    if 1:
+        db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
+        dir_db = None
+        # Use dictionary-based index
+        dir_db = DirectoryIndexDict(verbose=False)
+        # Try loading from file if exists
+        if os.path.exists(db_path):
+            dir_db.load_dict(db_path)
+            print(f"Loaded directory index dict from {db_path}")
+        else:
+            print(f"No dict file found, will build index from scratch.")
+    else:
+        db_path = os.path.join(data_root_dir, "directory_index.db")
+        dir_db = None
+        # Use SQLite-based index
+        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
+        # No need to load_dict or save_dict for DirectoryIndex
+
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
 
@@ -3882,7 +3704,11 @@ if __name__ == "__main__":
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
     # Start the Flask server
-    uvicorn.run(app, host="127.0.0.1", port=args.flask_port)
+    uvicorn.run(app, port=args.flask_port)
+
+    # Save the directory index dict before shutdown
+    if ".pkl" in db_path:
+        dir_db.save_dict(db_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
