@@ -12,9 +12,10 @@ import time
 import pandas as pd
 import geopandas as gpd
 from PIL import Image
-from flask import jsonify, request
-from inference_sdk import InferenceHTTPClient
+from flask import jsonify, request, send_file
+from inference_sdk import InferenceHTTPClient, InferenceConfiguration
 from shapely.geometry import Polygon
+import json  
 
 # Global variables for inference tracking
 inference_status = {
@@ -441,10 +442,19 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         
         # Save the traits GeoJSON file at the ORTHOMOSAIC VERSION level (not sensor level)
         # This allows multiple orthomosaic versions to have separate trait files
-        output_dir = os.path.join(
-            data_root_dir, 'Processed', year, experiment, location, population,
-            date, platform, sensor, agrowstitch_dir
-        )
+        if agrowstitch_dir == 'Plot_Images':
+            # For Plot_Images, save to plot_images directory
+            output_dir = os.path.join(
+                data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date
+            )
+            geojson_filename = f"{date}-Plot_Images-Traits-WGS84.geojson"
+        else:
+            # For AgRowStitch, use traditional path
+            output_dir = os.path.join(
+                data_root_dir, 'Processed', year, experiment, location, population,
+                date, platform, sensor, agrowstitch_dir
+            )
+            geojson_filename = f"{date}-{platform}-{sensor}-{agrowstitch_dir}-Traits-WGS84.geojson"
         
         print(f"DEBUG: Creating output directory at orthomosaic level: {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
@@ -455,8 +465,7 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         else:
             print(f"ERROR: Failed to create output directory: {output_dir}")
         
-        # Include agrowstitch_dir in the filename to make it unique per version
-        geojson_filename = f"{date}-{platform}-{sensor}-{agrowstitch_dir}-Traits-WGS84.geojson"
+        geojson_path = os.path.join(output_dir, geojson_filename)
         geojson_path = os.path.join(output_dir, geojson_filename)
         
         print(f"DEBUG: Full GeoJSON path will be: {geojson_path}")
@@ -536,41 +545,51 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
     @file_app.route('/run_roboflow_inference', methods=['POST'])
     def run_roboflow_inference():
         global inference_status
-        
         try:
             data = request.json
-            # Support for local or cloud inference
-            inference_mode = data.get('inferenceMode', 'cloud')  # 'cloud' or 'local'
+            print(f"[DEBUG] /run_roboflow_inference called. Payload keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+            inference_mode = data.get('inferenceMode', 'cloud')
+            model_task = data.get('modelTask', 'detection')  # 'detection' or 'segmentation'
+            include_masks = bool(data.get('includeMasks', True))
+            print(f"[DEBUG] inference_mode={inference_mode} model_task={model_task} include_masks={include_masks}")
+            # ...existing code determining api_url...
             import subprocess
             import socket
             def is_local_inference_running(host='localhost', port=9001):
                 try:
                     with socket.create_connection((host, port), timeout=2):
                         return True
-                except Exception:
+                except Exception as e:
                     return False
-
             if inference_mode == 'local':
                 api_url = data.get('apiUrl', 'http://localhost:9001')
-                # Check if local inference server is running, if not, start it
-                if not is_local_inference_running():
+                print(f"[DEBUG] Using local inference. api_url={api_url}")
+                already_running = is_local_inference_running()
+                print(f"[DEBUG] Local inference running before start attempt: {already_running}")
+                if not already_running:
                     try:
-                        # Start the inference server in the background (verbose output)
-                        subprocess.Popen([
-                            'inference', 'server', 'start'
-                        ])
-                        # Wait for the server to be ready
-                        max_wait = 120
+                        print("[DEBUG] Attempting to start local inference server via 'inference server start'")
+                        subprocess.Popen(['inference', 'server', 'start'])
+                        max_wait = 600
                         waited = 0
                         while not is_local_inference_running() and waited < max_wait:
+                            if waited % 10 == 0:
+                                print(f"[DEBUG] Waiting for local inference server... {waited}s")
                             time.sleep(1)
                             waited += 1
                         if not is_local_inference_running():
-                            return jsonify({'error': 'Local inference server failed to start within 2 minutes.'}), 500
+                            print("[ERROR] Local inference server failed to start within timeout")
+                            return jsonify({'error': 'Local inference server failed to start within 10 minutes.'}), 500
+                        print(f"[DEBUG] Local inference server started after {waited}s")
+                    except FileNotFoundError as fe:
+                        print(f"[ERROR] 'inference' CLI not found. Ensure it is installed and on PATH. {fe}")
+                        return jsonify({'error': "'inference' CLI not found. Install the Roboflow inference client."}), 500
                     except Exception as e:
+                        print(f"[ERROR] Exception starting local inference server: {type(e).__name__}: {e}")
                         return jsonify({'error': f'Failed to start local inference server: {e}'}), 500
             else:
                 api_url = data.get('apiUrl', 'https://detect.roboflow.com')
+                print(f"[DEBUG] Using cloud inference. api_url={api_url}")
             api_key = data.get('apiKey')
             model_id = data.get('modelId')
             year = data.get('year')
@@ -581,68 +600,71 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
             platform = data.get('platform')
             sensor = data.get('sensor')
             agrowstitch_dir = data.get('agrowstitchDir')
-            
+            print(f"[DEBUG] Params year={year} experiment={experiment} location={location} population={population} date={date} platform={platform} sensor={sensor} agrowstitchDir={agrowstitch_dir}")
             if not all([api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir]):
+                print("[ERROR] Missing required parameters for inference start")
                 return jsonify({'error': 'Missing required parameters'}), 400
-                
-            # Reset inference status
-            inference_status = {
-                'running': True,
-                'progress': 0,
-                'message': 'Initializing inference...',
-                'error': None,
-                'results': None,
-                'completed': False
-            }
-            
-            # Start inference in background thread
-            thread = threading.Thread(
-                target=run_roboflow_inference_worker,
-                args=(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir),
-                daemon=True
-            )
+            inference_status.update({'running': True,'progress': 0,'message': 'Initializing inference...','error': None,'results': None,'completed': False})
+            print("[DEBUG] Spawning inference worker thread")
+            thread = threading.Thread(target=run_roboflow_inference_worker, args=(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task, include_masks), daemon=True)
             thread.start()
-            
             return jsonify({'message': 'Inference started successfully'}), 200
-            
         except Exception as e:
-            print(f"Error starting Roboflow inference: {e}")
+            print(f"[ERROR] Error starting Roboflow inference: {type(e).__name__}: {e}")
             inference_status['error'] = str(e)
             return jsonify({'error': str(e)}), 500
 
 
-def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir):
-    """
-    Worker function to run Roboflow inference in background
-    """
+def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task='detection', include_masks=True):
+    """Worker function to run Roboflow inference in background (supports detection & segmentation)."""
     global inference_status
-    
     try:
         inference_status['message'] = 'Loading plot images...'
         inference_status['progress'] = 10
         
-        # Build path to AgRowStitch plot images
-        plots_dir = os.path.join(
-            data_root_dir, 'Processed', year, experiment, location, population,
-            date, platform, sensor, agrowstitch_dir
-        )
-        
-        if not os.path.exists(plots_dir):
-            inference_status['error'] = f'AgRowStitch directory not found: {plots_dir}'
-            inference_status['running'] = False
-            return
+        # Check if using Plot_Images from split_orthomosaics
+        if agrowstitch_dir == 'Plot_Images':
+            # Use plot images from split_orthomosaics
+            plots_dir = os.path.join(
+                data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date
+            )
             
-        # Find all plot image files
-        plot_files = [f for f in os.listdir(plots_dir) 
-                     if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
-        
-        if not plot_files:
-            inference_status['error'] = 'No plot images found in AgRowStitch directory'
-            inference_status['running'] = False
-            return
+            if not os.path.exists(plots_dir):
+                inference_status.update({'error': f'Plot images directory not found: {plots_dir}. Please run "Get Plot Images" first.','running': False})
+                return
+                
+            # Find all plot PNG files from split_orthomosaics
+            plot_files = [f for f in os.listdir(plots_dir) 
+                         if f.startswith('plot_') and f.endswith('.png')]
             
-        inference_status['message'] = f'Found {len(plot_files)} plot images'
-        inference_status['progress'] = 20
+            if not plot_files:
+                inference_status.update({'error': 'No plot images found. Please run "Get Plot Images" first.','running': False})
+                return
+                
+            use_plot_images_format = True
+            
+        else:
+            # Build path to AgRowStitch plot images
+            plots_dir = os.path.join(
+                data_root_dir, 'Processed', year, experiment, location, population,
+                date, platform, sensor, agrowstitch_dir
+            )
+            
+            if not os.path.exists(plots_dir):
+                inference_status.update({'error': f'AgRowStitch directory not found: {plots_dir}','running': False})
+                return
+                
+            # Find all plot image files
+            plot_files = [f for f in os.listdir(plots_dir) 
+                         if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+            
+            if not plot_files:
+                inference_status.update({'error': 'No plot images found in AgRowStitch directory','running': False})
+                return
+                
+            use_plot_images_format = False
+            
+        inference_status.update({'message': f'Found {len(plot_files)} plot images','progress': 20})
         
         # Load plot borders data for plot labels
         plot_borders_path = os.path.join(
@@ -666,97 +688,98 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
         # Initialize results storage
         all_predictions = []
         label_counts = {}
+        mask_count_total = 0
+        has_any_segmentation = False
         
         # Initialize Roboflow client
-        inference_status['message'] = 'Initializing Roboflow client...'
-        inference_status['progress'] = 25
-        
+        inference_status.update({'message': 'Initializing Roboflow client...','progress': 25})
         try:
             client = InferenceHTTPClient(
                 api_url=api_url,
                 api_key=api_key
             )
         except Exception as e:
-            inference_status['error'] = f'Failed to initialize Roboflow client: {e}'
-            inference_status['running'] = False
+            inference_status.update({'error': f'Failed to initialize Roboflow client: {e}','running': False})
             return
         
-        inference_status['message'] = 'Running inference on plots...'
-        inference_status['progress'] = 30
-        
+        inference_status.update({'message': 'Running inference on plots...','progress': 30})
         for i, plot_file in enumerate(sorted(plot_files)):
             try:
                 # Extract plot index from filename
-                plot_match = re.search(r'temp_plot_(\d+)', plot_file)
-                if not plot_match:
-                    continue
-                    
+                if use_plot_images_format:
+                    # Format: plot_{plot_id}_accession_{accession_id}.png
+                    plot_match = re.search(r'plot_(\d+)_accession_', plot_file)
+                    if not plot_match:
+                        print(f"[WARN] Could not parse plot index from Plot_Images filename {plot_file}")
+                        continue
+                else:
+                    # Format: full_res_mosaic_temp_plot_{plot_id}.png
+                    plot_match = re.search(r'temp_plot_(\d+)', plot_file)
+                    if not plot_match:
+                        print(f"[WARN] Could not parse plot index from AgRowStitch filename {plot_file}")
+                        continue
                 plot_index = int(plot_match.group(1))
                 plot_info = plot_data.get(plot_index, {})
-                
-                # Get full image path
                 image_path = os.path.join(plots_dir, plot_file)
-                
+                print(f"[DEBUG] Processing plot_index={plot_index} file={plot_file} ({i+1}/{len(plot_files)})")
                 inference_status['message'] = f'Processing plot {plot_index} ({i + 1}/{len(plot_files)}) - cropping image...'
-                
-                # Crop the image into patches with overlap
                 crops = crop_image_with_overlap(image_path, crop_size=640, overlap=32)
-
                 if not crops:
-                    print(f"Warning: No crops generated for {plot_file}")
+                    print(f"[WARN] No crops generated for {plot_file}")
                     continue
-                
                 plot_predictions = []
-                temp_dirs_to_cleanup = set()
-                
-                # Process each crop
+                temp_dirs = set()
                 for j, crop_info in enumerate(crops):
                     try:
-                        inference_status['message'] = f'Processing plot {plot_index} crop {j + 1}/{len(crops)}'
-                        
-                        # Track temp directory for cleanup
-                        temp_dirs_to_cleanup.add(crop_info['temp_dir'])
-                        
-                        # Use Roboflow SDK for inference
-                        result = client.infer(crop_info['crop_path'], model_id=model_id)
-                        
-                        if 'predictions' in result:
-                            crop_predictions = result['predictions']
-                            
-                            # Extract model version from result if available
-                            model_version = None
-                            if hasattr(result, 'model') and hasattr(result.model, 'version'):
-                                model_version = result.model.version
-                            elif isinstance(result, dict) and 'model' in result:
-                                model_info = result['model']
-                                if isinstance(model_info, dict) and 'version' in model_info:
-                                    model_version = model_info['version']
-                            
-                            # Add model information to each prediction
-                            for pred in crop_predictions:
-                                pred['model_id'] = model_id
-                                pred['model_version'] = model_version
-                            
-                            # Transform predictions to plot coordinates
-                            transformed_predictions = transform_predictions_to_plot_coordinates(
-                                crop_predictions, crop_info
-                            )
-                            
-                            plot_predictions.extend(transformed_predictions)
-                            
-                        else:
-                            print(f"No predictions found for {plot_file} crop {j}")
-                    
+                        inference_status['message'] = f'Plot {plot_index} crop {j + 1}/{len(crops)}'
+                        temp_dirs.add(crop_info['temp_dir'])
+                        print(f"[DEBUG] Inference on crop {j+1}/{len(crops)} path={crop_info['crop_path']} offsets=({crop_info['x_offset']},{crop_info['y_offset']}) size=({crop_info['width']}x{crop_info['height']})")
+                        custom_configuration = InferenceConfiguration(confidence_threshold=0.5) # adjust as needed / set automatically in future
+                        try:
+                            with client.use_configuration(custom_configuration):
+                                result = client.infer(crop_info['crop_path'], model_id=model_id)
+                        except Exception as infer_e:
+                            print(f"[ERROR] client.infer failed plot={plot_index} crop={j+1}: {type(infer_e).__name__}: {infer_e}")
+                            if 'docker' in str(infer_e).lower():
+                                inference_status.update({'error': f'Docker related inference error: {infer_e}','running': False})
+                                return
+                            continue
+                        crop_predictions = result.get('predictions', []) if isinstance(result, dict) else []
+                        model_version = None
+                        if isinstance(result, dict):
+                            model_info = result.get('model')
+                            if isinstance(model_info, dict):
+                                model_version = model_info.get('version')
+                        for pred in crop_predictions:
+                            pred['model_id'] = model_id
+                            pred['model_version'] = model_version
+                        transformed = transform_predictions_to_plot_coordinates(crop_predictions, crop_info)
+                        # Fix mask placement: transform segmentation points/segments to plot coordinates
+                        for tp in transformed:
+                            matching = next((p for p in crop_predictions if abs((p.get('x',0)+crop_info['x_offset'])-tp['x'])<1e-3 and abs((p.get('y',0)+crop_info['y_offset'])-tp['y'])<1e-3), None)
+                            if matching and model_task == 'segmentation' and include_masks:
+                                # Transform points if present
+                                if 'points' in matching and matching['points']:
+                                    # Each point is {x, y} in crop coordinates
+                                    tp['points'] = [
+                                        {'x': pt['x'] + crop_info['x_offset'], 'y': pt['y'] + crop_info['y_offset']} for pt in matching['points']
+                                    ]
+                                elif 'segments' in matching and matching['segments']:
+                                    # Each segment is a list of [x, y] pairs
+                                    tp['segments'] = [
+                                        [pt[0] + crop_info['x_offset'], pt[1] + crop_info['y_offset']] for pt in matching['segments']
+                                    ]
+                        plot_predictions.extend(transformed)
                     except Exception as e:
-                        print(f"Error processing crop {j} of {plot_file}: {e}")
+                        print(f"[ERROR] Unexpected error processing crop {j} for plot {plot_file}: {type(e).__name__}: {e}")
                         continue
                 
                 # Clean up temporary crop files
-                for temp_dir in temp_dirs_to_cleanup:
+                for temp_dir in temp_dirs:
                     try:
                         shutil.rmtree(temp_dir)
-                    except Exception as e:
-                        print(f"Warning: Could not clean up temp directory {temp_dir}: {e}")
+                    except Exception:
+                        pass
                 
                 # Apply Non-Maximum Suppression to remove duplicate detections
                 inference_status['message'] = f'Applying NMS to plot {plot_index} predictions...'
@@ -778,18 +801,22 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                         'model_id': pred.get('model_id'),
                         'model_version': pred.get('model_version')
                     }
+                    if model_task == 'segmentation' and include_masks:
+                        if 'points' in pred:
+                            prediction_data['points'] = json.dumps(pred['points'])
+                        elif 'segments' in pred:
+                            prediction_data['segments'] = json.dumps(pred['segments'])
                     all_predictions.append(prediction_data)
                     
                     # Count labels
-                    class_name = pred.get('class', 'unknown')
-                    label_counts[class_name] = label_counts.get(class_name, 0) + 1
+                    cn = pred.get('class','unknown')
+                    label_counts[cn] = label_counts.get(cn,0)+1
                 
                 print(f"Processed plot {plot_index}: {len(crops)} crops -> {len(plot_predictions)} raw predictions -> {len(final_predictions)} final predictions")
                 
                 # Update progress
                 progress = 30 + int((i + 1) / len(plot_files) * 60)
-                inference_status['progress'] = progress
-                inference_status['message'] = f'Completed plot {plot_index} ({i + 1}/{len(plot_files)})'
+                inference_status.update({'progress': progress,'message': f'Completed plot {plot_index} ({i + 1}/{len(plot_files)})'})
                 
             except Exception as e:
                 print(f"Error processing {plot_file}: {e}")
@@ -802,15 +829,23 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
         if all_predictions:
             predictions_df = pd.DataFrame(all_predictions)
             
-            # Create output directory
-            output_dir = os.path.join(
-                data_root_dir, 'Processed', year, experiment, location, population,
-                date, platform, sensor
-            )
-            os.makedirs(output_dir, exist_ok=True)
+            # Create output directory 
+            if agrowstitch_dir == 'Plot_Images':
+                # For Plot_Images, save to plot_images directory
+                output_dir = os.path.join(
+                    data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date
+                )
+                task_suffix = f"_{model_task}" if model_task else ""
+                csv_filename = f"{date}_Plot_Images_roboflow_predictions{task_suffix}.csv"
+            else:
+                output_dir = os.path.join(
+                    data_root_dir, 'Processed', year, experiment, location, population,
+                    date, platform, sensor
+                )
+                task_suffix = f"_{model_task}" if model_task else ""
+                csv_filename = f"{date}_{platform}_{sensor}_{agrowstitch_dir}_roboflow_predictions{task_suffix}.csv"
             
-            # Save CSV
-            csv_filename = f"{date}_{platform}_{sensor}_{agrowstitch_dir}_roboflow_predictions.csv"
+            os.makedirs(output_dir, exist_ok=True)
             csv_path = os.path.join(output_dir, csv_filename)
             predictions_df.to_csv(csv_path, index=False)
             
@@ -822,14 +857,16 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
             )
             
             # Prepare results summary
-            label_summary = [{'name': name, 'count': count} for name, count in label_counts.items()]
+            label_summary = [{'name': n, 'count': c} for n, c in label_counts.items()]
             
             inference_status['results'] = {
                 'csvPath': csv_path,
                 'geojsonPath': geojson_path,
                 'totalPlots': len(plot_files),
                 'totalPredictions': len(all_predictions),
-                'labels': label_summary
+                'labels': label_summary,
+                'hasSegmentation': has_any_segmentation,
+                'maskCount': mask_count_total
             }
         else:
             inference_status['results'] = {
@@ -837,18 +874,15 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                 'geojsonPath': None,
                 'totalPlots': len(plot_files),
                 'totalPredictions': 0,
-                'labels': []
+                'labels': [],
+                'hasSegmentation': False,
+                'maskCount': 0
             }
         
-        inference_status['message'] = 'Inference completed successfully!'
-        inference_status['progress'] = 100
-        inference_status['completed'] = True
-        inference_status['running'] = False
-        
+        inference_status.update({'message': 'Inference completed successfully!','progress': 100,'completed': True,'running': False})
     except Exception as e:
         print(f"Error in Roboflow inference worker: {e}")
-        inference_status['error'] = str(e)
-        inference_status['running'] = False
+        inference_status.update({'error': str(e),'running': False})
 
 
 def get_inference_progress_endpoint(file_app):
@@ -922,88 +956,179 @@ def get_inference_results_endpoint(file_app, data_root_dir):
                 
             results = []
             
-            # Check processed directory for inference results
+            # Check processed directory for AgRowStitch inference results
             dates_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population)
             
-            if not os.path.exists(dates_dir):
-                return jsonify({'results': results}), 200
-                
-            for date in os.listdir(dates_dir):
-                date_path = os.path.join(dates_dir, date)
-                if not os.path.isdir(date_path):
-                    continue
-                    
-                for platform in os.listdir(date_path):
-                    platform_path = os.path.join(date_path, platform)
-                    if not os.path.isdir(platform_path):
+            if os.path.exists(dates_dir):
+                for date in os.listdir(dates_dir):
+                    date_path = os.path.join(dates_dir, date)
+                    if not os.path.isdir(date_path):
                         continue
                         
-                    for sensor in os.listdir(platform_path):
-                        sensor_path = os.path.join(platform_path, sensor)
-                        if not os.path.isdir(sensor_path):
+                    for platform in os.listdir(date_path):
+                        platform_path = os.path.join(date_path, platform)
+                        if not os.path.isdir(platform_path):
                             continue
-                        
-                        # Look for inference CSV files
-                        for file in os.listdir(sensor_path):
-                            if file.endswith('_roboflow_predictions.csv'):
-                                csv_path = os.path.join(sensor_path, file)
-                                
-                                # Extract agrowstitch version from filename
-                                # Format: date_platform_sensor_agrowstitchversion_roboflow_predictions.csv
-                                parts = file.split('_')
-                                if len(parts) >= 5:
-                                    orthomosaic_version = '_'.join(parts[3:-2])  # Everything between sensor and 'roboflow'
-                                else:
-                                    orthomosaic_version = 'unknown'
-                                
-                                # Check if corresponding plot images exist
-                                agrowstitch_dir = os.path.join(sensor_path, orthomosaic_version)
-                                plot_images_exist = False
-                                plot_count = 0
-                                
-                                if os.path.exists(agrowstitch_dir):
-                                    plot_files = [f for f in os.listdir(agrowstitch_dir) 
-                                                if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
-                                    plot_images_exist = len(plot_files) > 0
-                                    plot_count = len(plot_files)
-                                
-                                # Get basic statistics from CSV including model information
-                                total_predictions = 0
-                                classes_detected = []
-                                model_id_used = None
-                                model_version_used = None
-                                
-                                try:
-                                    df = pd.read_csv(csv_path)
-                                    total_predictions = len(df)
-                                    classes_detected = df['class'].value_counts().to_dict()
+                            
+                        for sensor in os.listdir(platform_path):
+                            sensor_path = os.path.join(platform_path, sensor)
+                            if not os.path.isdir(sensor_path):
+                                continue
+                            
+                            # Look for inference CSV files (detection and segmentation)
+                            for file in os.listdir(sensor_path):
+                                if re.match(r'.*_roboflow_predictions(_detection|_segmentation)?\.csv$', file):
+                                    csv_path = os.path.join(sensor_path, file)
+                                    # Extract agrowstitch version from filename
+                                    # Format: date_platform_sensor_agrowstitchversion_roboflow_predictions(_segmentation|_detection).csv
+                                    parts = file.split('_')
+                                    # Find the index of 'roboflow' to get everything between sensor and 'roboflow'
+                                    try:
+                                        roboflow_idx = parts.index('roboflow')
+                                        orthomosaic_version = '_'.join(parts[3:roboflow_idx]) if roboflow_idx > 3 else 'unknown'
+                                    except Exception:
+                                        orthomosaic_version = 'unknown'
+                                    # Check if corresponding plot images exist
+                                    agrowstitch_dir = os.path.join(sensor_path, orthomosaic_version)
+                                    plot_images_exist = False
+                                    plot_count = 0
+                                    if os.path.exists(agrowstitch_dir):
+                                        plot_files = [f for f in os.listdir(agrowstitch_dir) 
+                                                    if f.startswith('full_res_mosaic_temp_plot_') and f.endswith('.png')]
+                                        plot_images_exist = len(plot_files) > 0
+                                        plot_count = len(plot_files)
                                     
-                                    # Extract model information from first prediction if available
-                                    if not df.empty:
-                                        if 'model_id' in df.columns:
-                                            model_id_used = df['model_id'].iloc[0] if pd.notna(df['model_id'].iloc[0]) else None
-                                        if 'model_version' in df.columns:
-                                            model_version_used = df['model_version'].iloc[0] if pd.notna(df['model_version'].iloc[0]) else None
-                                except Exception as e:
-                                    print(f"Error reading CSV {csv_path}: {e}")
-                                
-                                result_entry = {
-                                    'id': f"{date}-{platform}-{sensor}-{orthomosaic_version}",
-                                    'date': date,
-                                    'platform': platform,
-                                    'sensor': sensor,
-                                    'orthomosaic': orthomosaic_version,
-                                    'model_id': model_id_used,
-                                    'model_version': model_version_used,
-                                    'csv_path': csv_path,
-                                    'total_predictions': total_predictions,
-                                    'classes_detected': classes_detected,
-                                    'plot_images_available': plot_images_exist,
-                                    'plot_count': plot_count,
-                                    'timestamp': os.path.getmtime(csv_path)
-                                }
-                                
-                                results.append(result_entry)
+                                    # Get basic statistics from CSV including model information
+                                    total_predictions = 0
+                                    classes_detected = []
+                                    model_id_used = None
+                                    model_version_used = None
+                                    has_segmentation = False
+                                    mask_count = 0
+                                    try:
+                                        df = pd.read_csv(csv_path)
+                                        total_predictions = len(df)
+                                        classes_detected = df['class'].value_counts().to_dict()
+                                        # Extract model information from first prediction if available
+                                        if not df.empty:
+                                            if 'model_id' in df.columns:
+                                                model_id_used = df['model_id'].iloc[0] if pd.notna(df['model_id'].iloc[0]) else None
+                                            if 'model_version' in df.columns:
+                                                model_version_used = df['model_version'].iloc[0] if pd.notna(df['model_version'].iloc[0]) else None
+                                            if 'points' in df.columns or 'segments' in df.columns:
+                                                # segmentation presence
+                                                seg_col = 'points' if 'points' in df.columns else 'segments'
+                                                non_null = df[seg_col].dropna()
+                                                has_segmentation = not non_null.empty
+                                                if has_segmentation:
+                                                    # count masks (rows with non-empty json array)
+                                                    def count_masks(val):
+                                                        try:
+                                                            if pd.isna(val): return 0
+                                                            parsed = json.loads(val)
+                                                            if isinstance(parsed, list):
+                                                                return 1 if len(parsed) > 0 else 0
+                                                            return 0
+                                                        except Exception:
+                                                            return 0
+                                                    mask_count = int(non_null.apply(count_masks).sum())
+                                    except Exception as e:
+                                        print(f"Error reading CSV {csv_path}: {e}")
+                                    
+                                    result_entry = {
+                                        'id': f"{date}-{platform}-{sensor}-{orthomosaic_version}",
+                                        'date': date,
+                                        'platform': platform,
+                                        'sensor': sensor,
+                                        'orthomosaic': orthomosaic_version,
+                                        'model_id': model_id_used,
+                                        'model_version': model_version_used,
+                                        'csv_path': csv_path,
+                                        'total_predictions': total_predictions,
+                                        'classes_detected': classes_detected,
+                                        'plot_images_available': plot_images_exist,
+                                        'plot_count': plot_count,
+                                        'timestamp': os.path.getmtime(csv_path),
+                                        'has_segmentation': has_segmentation,
+                                        'mask_count': mask_count
+                                    }
+                                    results.append(result_entry)
+            
+            # Check intermediate directory for Plot_Images inference results
+            intermediate_path = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images')
+            
+            if os.path.exists(intermediate_path):
+                for date in os.listdir(intermediate_path):
+                    date_path = os.path.join(intermediate_path, date)
+                    if not os.path.isdir(date_path):
+                        continue
+                    
+                    # Look for inference CSV files in plot_images directory
+                    for file in os.listdir(date_path):
+                        if re.match(r'.*_Plot_Images_roboflow_predictions(_detection|_segmentation)?\.csv$', file):
+                            csv_path = os.path.join(date_path, file)
+                            
+                            # Check if corresponding plot images exist
+                            plot_files = [f for f in os.listdir(date_path) 
+                                        if f.startswith('plot_') and f.endswith('.png')]
+                            plot_images_exist = len(plot_files) > 0
+                            plot_count = len(plot_files)
+                            
+                            # Get basic statistics from CSV including model information
+                            total_predictions = 0
+                            classes_detected = []
+                            model_id_used = None
+                            model_version_used = None
+                            has_segmentation = False
+                            mask_count = 0
+                            try:
+                                df = pd.read_csv(csv_path)
+                                total_predictions = len(df)
+                                classes_detected = df['class'].value_counts().to_dict()
+                                # Extract model information from first prediction if available
+                                if not df.empty:
+                                    if 'model_id' in df.columns:
+                                        model_id_used = df['model_id'].iloc[0] if pd.notna(df['model_id'].iloc[0]) else None
+                                    if 'model_version' in df.columns:
+                                        model_version_used = df['model_version'].iloc[0] if pd.notna(df['model_version'].iloc[0]) else None
+                                    if 'points' in df.columns or 'segments' in df.columns:
+                                        # segmentation presence
+                                        seg_col = 'points' if 'points' in df.columns else 'segments'
+                                        non_null = df[seg_col].dropna()
+                                        has_segmentation = not non_null.empty
+                                        if has_segmentation:
+                                            # count masks (rows with non-empty json array)
+                                            def count_masks(val):
+                                                try:
+                                                    if pd.isna(val): return 0
+                                                    parsed = json.loads(val)
+                                                    if isinstance(parsed, list):
+                                                        return 1 if len(parsed) > 0 else 0
+                                                    return 0
+                                                except Exception:
+                                                    return 0
+                                            mask_count = int(non_null.apply(count_masks).sum())
+                            except Exception as e:
+                                print(f"Error reading CSV {csv_path}: {e}")
+                            
+                            result_entry = {
+                                'id': f"{date}-Plot_Images",
+                                'date': date,
+                                'platform': 'ODM',  # Indicate this is from ODM orthomosaic
+                                'sensor': 'RGB',    # Assume RGB for Plot_Images
+                                'orthomosaic': 'Plot_Images',
+                                'model_id': model_id_used,
+                                'model_version': model_version_used,
+                                'csv_path': csv_path,
+                                'total_predictions': total_predictions,
+                                'classes_detected': classes_detected,
+                                'plot_images_available': plot_images_exist,
+                                'plot_count': plot_count,
+                                'timestamp': os.path.getmtime(csv_path),
+                                'has_segmentation': has_segmentation,
+                                'mask_count': mask_count
+                            }
+                            results.append(result_entry)
             
             # Sort results by timestamp (newest first)
             results.sort(key=lambda x: x['timestamp'], reverse=True)
@@ -1023,173 +1148,168 @@ def get_plot_predictions_endpoint(file_app, data_root_dir):
     def get_plot_predictions():
         try:
             data = request.json
-            year = data.get('year')
-            experiment = data.get('experiment')
-            location = data.get('location')
-            population = data.get('population')
-            date = data.get('date')
-            platform = data.get('platform')
-            sensor = data.get('sensor')
-            agrowstitch_version = data.get('agrowstitch_version')  # Keep for backward compatibility
-            orthomosaic = data.get('orthomosaic')  # New parameter name
-            
-            # Use orthomosaic if provided, otherwise fall back to agrowstitch_version
+            year = data.get('year'); experiment = data.get('experiment'); location = data.get('location'); population = data.get('population'); date = data.get('date'); platform = data.get('platform'); sensor = data.get('sensor')
+            agrowstitch_version = data.get('agrowstitch_version'); orthomosaic = data.get('orthomosaic')
             version_identifier = orthomosaic if orthomosaic else agrowstitch_version
-            
             plot_filename = data.get('plot_filename')
+            model_task = data.get('model_task', 'detection')  # Get model task parameter
             
-            if not all([year, experiment, location, population, date, platform, sensor, version_identifier, plot_filename]):
+            if not all([year, experiment, location, population, date, version_identifier, plot_filename]):
                 return jsonify({'error': 'Missing required parameters'}), 400
-                
-            # Find the CSV file
-            csv_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions.csv"
-            csv_path = os.path.join(
-                data_root_dir, 'Processed', year, experiment, location, population,
-                date, platform, sensor, csv_filename
-            )
             
-            if not os.path.exists(csv_path):
+            csv_path = None
+            
+            # Check if this is Plot_Images from split_orthomosaics
+            if version_identifier == 'Plot_Images':
+                # Look in Intermediate directory for Plot_Images results
+                plot_images_dir = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date)
+                
+                # Look for specific model task CSV first
+                if model_task == 'segmentation':
+                    primary_filename = f"{date}_Plot_Images_roboflow_predictions_segmentation.csv"
+                else:
+                    primary_filename = f"{date}_Plot_Images_roboflow_predictions_detection.csv"
+                
+                primary_path = os.path.join(plot_images_dir, primary_filename)
+                if os.path.exists(primary_path):
+                    csv_path = primary_path
+                else:
+                    # Fallback to generic filename if specific task file doesn't exist
+                    fallback_filename = f"{date}_Plot_Images_roboflow_predictions.csv"
+                    fallback_path = os.path.join(plot_images_dir, fallback_filename)
+                    if os.path.exists(fallback_path):
+                        csv_path = fallback_path
+                
+                # Last resort: search for any matching CSV but prefer the model task
+                if not csv_path and os.path.exists(plot_images_dir):
+                    preferred_suffix = f"_segmentation.csv" if model_task == 'segmentation' else f"_detection.csv"
+                    for file in os.listdir(plot_images_dir):
+                        if file.endswith(preferred_suffix) and "_Plot_Images_roboflow_predictions" in file:
+                            csv_path = os.path.join(plot_images_dir, file)
+                            break
+                    
+                    # If still not found, take any Plot_Images predictions file
+                    if not csv_path:
+                        for file in os.listdir(plot_images_dir):
+                            if "_Plot_Images_roboflow_predictions" in file and file.endswith(".csv"):
+                                csv_path = os.path.join(plot_images_dir, file)
+                                break
+            else:
+                
+                processed_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+                
+                # Look for specific model task CSV first
+                if model_task == 'segmentation':
+                    primary_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions_segmentation.csv"
+                else:
+                    primary_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions_detection.csv"
+                
+                primary_path = os.path.join(processed_dir, primary_filename)
+                if os.path.exists(primary_path):
+                    csv_path = primary_path
+                else:
+                    # Fallback to generic filename if specific task file doesn't exist
+                    fallback_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions.csv"
+                    fallback_path = os.path.join(processed_dir, fallback_filename)
+                    if os.path.exists(fallback_path):
+                        csv_path = fallback_path
+                
+                # Last resort: search for any matching CSV but prefer the model task
+                if not csv_path and os.path.exists(processed_dir):
+                    preferred_suffix = f"_segmentation.csv" if model_task == 'segmentation' else f"_detection.csv"
+                    for file in os.listdir(processed_dir):
+                        if file.endswith(preferred_suffix) and f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions" in file:
+                            csv_path = os.path.join(processed_dir, file)
+                            break
+                    
+                    # If still not found, take any predictions file for this version
+                    if not csv_path:
+                        for file in os.listdir(processed_dir):
+                            if file.startswith(f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions") and file.endswith(".csv"):
+                                csv_path = os.path.join(processed_dir, file)
+                                break
+                            break
+            
+            if not csv_path or not os.path.exists(csv_path):
                 return jsonify({'error': 'Inference results not found'}), 404
-                
-            # Load predictions for this specific plot
+            
             df = pd.read_csv(csv_path)
-            
-            # Filter by image file
             plot_predictions = df[df['image_file'] == plot_filename]
-            
-            # Convert to list of dictionaries
-            predictions = []
-            class_counts = {}
-            
+            predictions = []; class_counts = {}; has_segmentation=False; mask_count=0
             for _, row in plot_predictions.iterrows():
-                prediction = {
-                    'class': row['class'],
-                    'confidence': float(row['confidence']),
-                    'x': float(row['x']),
-                    'y': float(row['y']),
-                    'width': float(row['width']),
-                    'height': float(row['height']),
-                    'plot_index': int(row['plot_index']) if pd.notna(row['plot_index']) else None,
-                    'plot_label': row['plot_label'] if pd.notna(row['plot_label']) else None,
-                    'accession': row['accession'] if pd.notna(row['accession']) else None,
-                    'model_id': row.get('model_id') if pd.notna(row.get('model_id')) else None,
-                    'model_version': row.get('model_version') if pd.notna(row.get('model_version')) else None
-                }
-                predictions.append(prediction)
-                
-                # Count classes
-                class_name = row['class']
-                class_counts[class_name] = class_counts.get(class_name, 0) + 1
-            
-            return jsonify({
-                'predictions': predictions,
-                'class_counts': class_counts,
-                'total_detections': len(predictions)
-            }), 200
-            
+                pred = {'class': row['class'],'confidence': float(row['confidence']),'x': float(row['x']),'y': float(row['y']),'width': float(row['width']),'height': float(row['height']),'plot_index': int(row['plot_index']) if pd.notna(row['plot_index']) else None,'plot_label': row['plot_label'] if pd.notna(row['plot_label']) else None,'accession': row['accession'] if pd.notna(row['accession']) else None,'model_id': row.get('model_id') if pd.notna(row.get('model_id')) else None,'model_version': row.get('model_version') if pd.notna(row.get('model_version')) else None}
+                # segmentation
+                if 'points' in row and pd.notna(row['points']):
+                    try:
+                        pred['points'] = json.loads(row['points'])
+                        has_segmentation = True; mask_count += 1
+                    except Exception:
+                        pass
+                elif 'segments' in row and pd.notna(row['segments']):
+                    try:
+                        pred['segments'] = json.loads(row['segments'])
+                        has_segmentation = True; mask_count += 1
+                    except Exception:
+                        pass
+                predictions.append(pred)
+                cn = row['class']; class_counts[cn] = class_counts.get(cn,0)+1
+            return jsonify({'predictions': predictions,'class_counts': class_counts,'total_detections': len(predictions),'has_segmentation': has_segmentation,'mask_count': mask_count}), 200
         except Exception as e:
             print(f"Error getting plot predictions: {e}")
             return jsonify({'error': str(e)}), 500
 
 
-def delete_inference_results_endpoint(file_app, data_root_dir):
-    """
-    Delete inference results including CSV file and optionally the GeoJSON traits file
-    """
+def delete_inference_results_endpoint(file_app):
     @file_app.route('/delete_inference_results', methods=['POST'])
     def delete_inference_results():
         try:
+            global inference_status
             data = request.json
-            year = data.get('year')
-            experiment = data.get('experiment')
-            location = data.get('location')
-            population = data.get('population')
-            date = data.get('date')
-            platform = data.get('platform')
-            sensor = data.get('sensor')
-            orthomosaic = data.get('orthomosaic')
-            delete_traits = data.get('delete_traits', False)  # Optional: also delete traits GeoJSON
+            csv_path = data.get('csv_path')
+            if not csv_path or not os.path.exists(csv_path):
+                return jsonify({'error': 'CSV path not found'}), 400
+            try:
+                os.remove(csv_path)
+            except Exception as e:
+                return jsonify({'error': f'Failed to delete CSV: {e}'}), 500
+            inference_status = {'running': False,'progress': 0,'message': '','error': None,'results': None,'completed': False}
+            return jsonify({'message': 'Inference results deleted'}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+
+def download_inference_csv_endpoint(file_app):
+    """
+    Download inference CSV file
+    """
+    @file_app.route('/download_inference_csv', methods=['POST'])
+    def download_inference_csv():
+        try:
+            data = request.json
+            csv_path = data.get('csv_path')
             
-            if not all([year, experiment, location, population, date, platform, sensor, orthomosaic]):
-                return jsonify({'error': 'Missing required parameters'}), 400
+            if not csv_path or not os.path.exists(csv_path):
+                return jsonify({'error': 'CSV file not found'}), 404
             
-            # Build paths
-            output_dir = os.path.join(
-                data_root_dir, 'Processed', year, experiment, location, population,
-                date, platform, sensor
+            # Extract filename for download
+            filename = os.path.basename(csv_path)
+            
+            return send_file(
+                csv_path,
+                mimetype='text/csv',
+                as_attachment=True,
+                download_name=filename
             )
             
-            csv_filename = f"{date}_{platform}_{sensor}_{orthomosaic}_roboflow_predictions.csv"
-            csv_path = os.path.join(output_dir, csv_filename)
-            
-            deleted_files = []
-            
-            # Delete CSV file
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-                deleted_files.append(csv_filename)
-                print(f"Deleted inference CSV: {csv_path}")
-            else:
-                return jsonify({'error': 'Inference results file not found'}), 404
-            
-            # Optionally delete traits GeoJSON file
-            if delete_traits:
-                # Look for GeoJSON in the orthomosaic version directory with updated filename
-                geojson_filename = f"{date}-{platform}-{sensor}-{orthomosaic}-Traits-WGS84.geojson"
-                geojson_dir = os.path.join(output_dir, orthomosaic)
-                geojson_path = os.path.join(geojson_dir, geojson_filename)
-                
-                if os.path.exists(geojson_path):
-                    # Check if the GeoJSON file contains inference data (detection counts)
-                    try:
-                        gdf = gpd.read_file(geojson_path)
-                        
-                        # Check if it has detection-related columns (new naming scheme)
-                        detection_columns = [col for col in gdf.columns if 
-                                           'Total_Detections_' in col or '/' in col]
-                        
-                        if detection_columns:
-                            # Remove only the detection columns, keep other traits
-                            gdf_cleaned = gdf.drop(columns=detection_columns)
-                            
-                            # If there are still other trait columns, save the cleaned version
-                            trait_columns = [col for col in gdf_cleaned.columns 
-                                           if col not in ['geometry', 'plot_index', 'Plot', 'Bed', 'Tier', 'accession', 'population']]
-                            
-                            if trait_columns:
-                                gdf_cleaned.to_file(geojson_path, driver='GeoJSON')
-                                deleted_files.append(f"Detection data ({len(detection_columns)} columns) from {geojson_filename}")
-                            else:
-                                # No other traits, delete the entire file
-                                os.remove(geojson_path)
-                                deleted_files.append(geojson_filename)
-                                deleted_files.append(geojson_filename)
-                        else:
-                            print(f"GeoJSON file {geojson_path} does not contain detection data")
-                            
-                    except Exception as e:
-                        print(f"Error processing GeoJSON file: {e}")
-                        # If we can't process it, just delete it if explicitly requested
-                        os.remove(geojson_path)
-                        deleted_files.append(geojson_filename)
-            
-            return jsonify({
-                'message': 'Inference results deleted successfully',
-                'deleted_files': deleted_files
-            }), 200
-            
         except Exception as e:
-            print(f"Error deleting inference results: {e}")
+            print(f"Error downloading inference CSV: {e}")
             return jsonify({'error': str(e)}), 500
 
 
 def register_inference_routes(file_app, data_root_dir):
-    """
-    Register all inference-related routes with the Flask app
-    """
     run_roboflow_inference_endpoint(file_app, data_root_dir)
     get_inference_progress_endpoint(file_app)
-    get_agrowstitch_versions_endpoint(file_app, data_root_dir)
     get_inference_results_endpoint(file_app, data_root_dir)
     get_plot_predictions_endpoint(file_app, data_root_dir)
-    delete_inference_results_endpoint(file_app, data_root_dir)
+    delete_inference_results_endpoint(file_app)
+    download_inference_csv_endpoint(file_app)

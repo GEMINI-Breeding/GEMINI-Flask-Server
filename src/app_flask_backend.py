@@ -20,6 +20,7 @@ import unicodedata
 import re
 
 # Third-party library imports
+
 import uvicorn
 import json
 import pandas as pd
@@ -802,7 +803,8 @@ def get_binary_report():
     data = request.json
     # Construct file path based on metadata
     report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/rover/RGB/report.txt"
-    
+    if not os.path.exists(report_path):
+        report_path = f"{UPLOAD_BASE_DIR}/{data['year']}/{data['experiment']}/{data['location']}/{data['population']}/{data['date']}/Amiga/RGB/report.txt"
     try:
         with open(report_path, "r") as f:
             content = f.read()
@@ -866,22 +868,20 @@ def extract_binary_file():
 def get_binary_progress():
     dir_path = request.json['localDirPath']
     dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path)
-    
     try:
-        # Traverse through the directory and its subdirectories
         for root, dirs, files in os.walk(dir_path):
             if 'progress.txt' in files:
                 progress_file_path = os.path.join(root, 'progress.txt')
-                # print(f'progress.txt found in {progress_file_path}')
                 with open(progress_file_path, 'r') as file:
-                    progress = int(file.read().strip())
-                print(f'Binary extraction progress: {progress}')
+                    content = file.read().strip()
+                try:
+                    # allow float fractional progress
+                    progress = float(content)
+                except ValueError:
+                    progress = 0.0
+                print(f'Binary extraction progress (raw): {progress}')
                 return jsonify({'progress': progress}), 200
-        
-        # If no progress.txt is found
-        print(f'progress.txt not found in {progress_file_path}')
         return jsonify({'progress': 0, 'error': 'progress.txt not found'}), 404
-    
     except Exception as e:
         return jsonify({'progress': 0, 'error': str(e)}), 500
 
@@ -1119,7 +1119,7 @@ def stop_drone_extract():
 @file_app.route('/process_drone_tiff', methods=['POST'])
 def process_drone_tiff():
     global processed_image_folder
-    # global now_drone_processing
+    global now_drone_processing
     # receive the parameters
     location = request.json['location']
     population = request.json['population']
@@ -1287,18 +1287,15 @@ def query_traits():
     sensor = request.json['sensor']
     year = request.json['year']
     experiment = request.json['experiment']
+    platform = request.json['platform']
     orthomosaic_version = request.json.get('orthomosaic_version')  # Optional parameter for specific version
 
     prefix = data_root_dir+'/Processed'
     
     # If orthomosaic_version is provided, look in the version-specific directory
     if orthomosaic_version:
-        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', orthomosaic_version,
+        traitpth = os.path.join(prefix, year, experiment, location, population, date, platform, sensor, orthomosaic_version,
                               f"{date}-{sensor}-{orthomosaic_version}-Traits-WGS84.geojson")
-    else:
-        # Default behavior - look in the Results directory (for aerial/drone traits)
-        traitpth = os.path.join(prefix, year, experiment, location, population, date, 'Results', 
-                              '-'.join([date, sensor, 'Traits-WGS84.geojson']))
 
     if not os.path.isfile(traitpth):
         return jsonify({'message': []}), 404
@@ -1318,18 +1315,45 @@ def get_orthomosaic_versions():
     """
     try:
         data = request.json
-        year = data['year']
-        experiment = data['experiment']
-        location = data['location']
-        population = data['population']
-        date = data['date']
-        platform = data['platform']
-        sensor = data['sensor']
+        year = data.get('year')
+        experiment = data.get('experiment')
+        location = data.get('location')
+        population = data.get('population')
+        date = data.get('date')
+        platform = data.get('platform')
+        sensor = data.get('sensor')
+        
+        if not all([year, experiment, location, population, date, platform, sensor]):
+            return jsonify({"error": "Missing required parameters"}), 400
+            
+        versions = []
+        
+        # Check for AgRowStitch versions
+        processed_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+        if os.path.exists(processed_path):
+            for item in os.listdir(processed_path):
+                item_path = os.path.join(processed_path, item)
+                if os.path.isdir(item_path) and item.startswith('AgRowStitch_v'):
+                    versions.append({'type': 'AgRowStitch', 'AGR_version': item})
+
+        # Check for ODM orthomosaics for splitting if not done in get plot images
+        # if os.path.exists(processed_path):
+        #     for file in os.listdir(processed_path):
+        #         if file.endswith('-RGB.tif'):
+        #             versions.append('ODM_Direct')
+        #             break
+        
+        # Check for plot images from split_orthomosaics
+        intermediate_path = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date)
+        if os.path.exists(intermediate_path):
+            plot_files = [f for f in os.listdir(intermediate_path) if f.startswith('plot_') and f.endswith('.png')]
+            if plot_files:
+                versions.append({'type': 'Plot_Images', 'AGR_version': 'Plot_Images'})
 
         prefix = data_root_dir + '/Processed'
         sensor_dir = os.path.join(prefix, year, experiment, location, population, date, platform, sensor)
         
-        versions = []
+        # versions = []
         
         if os.path.exists(sensor_dir):
             # Check for aerial/drone traits at sensor level
@@ -1365,12 +1389,19 @@ def get_orthomosaic_versions():
                             'versionType': 'roboflow',
                             'path': f'/files/{relative_path.replace(os.sep, "/")}'
                         })
-        
+        print(f"Available orthomosaic versions: {versions}")
         return jsonify(versions), 200
         
     except Exception as e:
         print(f"Error getting orthomosaic versions: {e}")
         return jsonify({'error': str(e)}), 500
+
+@file_app.route('/get_agrowstitch_versions', methods=['POST'])
+def get_agrowstitch_versions():
+    """
+    Alias for get_orthomosaic_versions for backward compatibility
+    """
+    return get_orthomosaic_versions()
     
 def select_middle(df):
     middle_index = len(df) // 2  # Find the middle index
@@ -1382,11 +1413,11 @@ def filter_images(geojson_features, year, experiment, location, population, date
 
     # Construct the CSV path from the state variables
     csv_path = os.path.join(data_root_dir, 'Raw', year, experiment, location, 
-                            population, date, 'msgs_synced.csv')
+                            population, date, 'rover', 'RGB', 'Metadata', 'msgs_synced.csv')
     df = pd.read_csv(csv_path)
 
     # Convert DataFrame to GeoDataFrame
-    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon_interp_adj, df.lat_interp_adj))
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat))
 
     # Convert GeoJSON features to GeoDataFrame
     geojson = {'type': 'FeatureCollection', 'features': geojson_features}
@@ -1399,9 +1430,10 @@ def filter_images(geojson_features, year, experiment, location, population, date
     if middle_image:
         filtered_gdf = filtered_gdf.sort_values(by=sensor+"_time")
         filtered_gdf = filtered_gdf.groupby('Plot').apply(select_middle).reset_index(drop=True)
-
+    
     # Extract the image names and labels from the filtered GeoDataFrame
-    filtered_images = filtered_gdf[sensor+"_file"].tolist()
+    sensor_col = '/top/' + sensor.lower()
+    filtered_images = filtered_gdf[sensor_col+"_file"].tolist()
     filtered_labels = filtered_gdf['Label'].tolist()
     filtered_plots = filtered_gdf['Plot'].tolist()
 
@@ -1983,19 +2015,66 @@ def download_plot_ortho():
         if not plot_files:
             return jsonify({'error': 'No plot files found'}), 404
         
+        # Get plot borders data for custom naming
+        plot_borders_path = os.path.join(
+            data_root_dir, "Raw", data['year'], data['experiment'], 
+            data['location'], data['population'], "plot_borders.csv"
+        )
+        
+        plot_data = {}
+        if os.path.exists(plot_borders_path):
+            try:
+                borders_df = pd.read_csv(plot_borders_path)
+                for _, row in borders_df.iterrows():
+                    plot_index = row.get('plot_index')
+                    plot_label = row.get('Plot')
+                    accession = row.get('Accession')
+                    
+                    if not pd.isna(plot_index):
+                        plot_data[int(plot_index)] = {
+                            'plot_label': plot_label if not pd.isna(plot_label) else None,
+                            'accession': accession if not pd.isna(accession) else None
+                        }
+            except Exception as e:
+                print(f"Error reading plot borders for zip download: {e}")
+        
         # Create a temporary zip file
         import tempfile
         import zipfile
         
         temp_dir = tempfile.mkdtemp()
-        zip_filename = f"{data['date']}-{data['platform']}-{data['sensor']}-{data['agrowstitchDir']}-plots.zip"
+        zip_filename = f"{data['date']}-{data['platform']}-{data['sensor']}-plots-with-metadata.zip"
         zip_path = os.path.join(temp_dir, zip_filename)
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for plot_file in sorted(plot_files):
                 file_path = os.path.join(plot_dir, plot_file)
-                # Add file to zip with just the filename (no directory structure)
-                zipf.write(file_path, plot_file)
+                
+                # Extract plot index and create custom filename
+                plot_match = re.search(r'temp_plot_(\d+)', plot_file)
+                if plot_match:
+                    plot_index = int(plot_match.group(1))
+                    extension = os.path.splitext(plot_file)[1]
+                    
+                    # Get plot metadata
+                    metadata = plot_data.get(plot_index, {})
+                    plot_label = metadata.get('plot_label')
+                    accession = metadata.get('accession')
+                    
+                    # Create custom filename using the requested format
+                    if plot_label and accession:
+                        custom_filename = f"plot_{plot_label}_accession_{accession}{extension}"
+                    elif plot_label:
+                        custom_filename = f"plot_{plot_label}{extension}"
+                    else:
+                        custom_filename = f"plot_{plot_index}{extension}"
+                    
+                    # Add file to zip with custom name
+                    zipf.write(file_path, custom_filename)
+                    print(f"Adding to zip: {plot_file} -> {custom_filename}")
+                else:
+                    # Fallback to original filename if pattern doesn't match
+                    zipf.write(file_path, plot_file)
         
         print(f"Sending zip file: {zip_path}")
         return send_file(
@@ -2393,19 +2472,20 @@ def download_single_plot():
         if not os.path.exists(file_path):
             return jsonify({'error': 'Plot file not found'}), 404
         
-        # Create new filename with plot label and accession
+        # Create new filename with plot label and accession in the requested format
         base_name = os.path.splitext(plot_filename)[0]
         extension = os.path.splitext(plot_filename)[1]
         
-        new_filename_parts = [base_name]
-        if plot_label:
-            new_filename_parts.append(f"Plot_{plot_label}")
-        if accession:
-            new_filename_parts.append(f"Acc_{accession}")
+        # Use the format: plot_{plot}_accession_{accession}
+        if plot_label and accession:
+            new_filename = f"plot_{plot_label}_accession_{accession}{extension}"
+        elif plot_label:
+            new_filename = f"plot_{plot_label}{extension}"
+        else:
+            # Fallback to plot index if no plot label available
+            new_filename = f"plot_{plot_index}{extension}"
         
-        new_filename = "_".join(new_filename_parts) + extension
-        
-        print(f"Download debug - Original: {plot_filename}, Enhanced: {new_filename}")
+        print(f"Download debug - Original: {plot_filename}, New format: {new_filename}")
         print(f"Plot data - plot_index: {plot_index}, plot_label: {plot_label}, accession: {accession}")
 
         # Create temporary directory
@@ -2426,7 +2506,7 @@ def download_single_plot():
             )
             
             # Clean up temp file after sending (Flask handles this automatically)
-            print(f"Sending file with enhanced name: {new_filename}")
+            print(f"Sending file with custom format name: {new_filename}")
             return response
             
         except Exception as temp_error:
@@ -3078,7 +3158,7 @@ def get_locate_info():
     for key in data:
         details = check_locate_details(Path(key))
         details_data.append(details)
-        
+
     return jsonify(details_data)
 
 @file_app.route('/get_locate_progress', methods=['GET'])
@@ -3230,7 +3310,7 @@ def extract_traits():
         
         # other args
         summary_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/summary_date/platform/sensor/'Locate'/f'Locate-{locate_id}'/'locate.csv'
-        model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/platform/f'RGB {trait} Detection'/f'{trait}-{model_id}'/'weights'/'last.pt'
+        model_path = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Training'/f'{platform}'/'RGB Plant Detection'/f'Plant-{id}'/'weights'/'last.pt' # TODO: DEBUG
         images = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Images'
         disparity = Path(data_root_dir)/'Raw'/year/experiment/location/population/date/platform/sensor/'Disparity'
         plotmap = Path(data_root_dir)/'Intermediate'/year/experiment/location/population/'Plot-Boundary-WGS84.geojson'
@@ -3351,6 +3431,213 @@ def done_extract():
         return jsonify({"message": "Python process in container successfully stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
+
+@file_app.route('/split_orthomosaics', methods=['POST'])
+def split_orthomosaics():
+    """
+    Split orthomosaics into individual plot images based on plot boundaries
+    """
+    try:
+        data = request.get_json()
+        year = data['year']
+        experiment = data['experiment']
+        location = data['location']
+        population = data['population']
+        date = data['date']
+        boundaries = data['boundaries']
+        
+        # Construct paths
+        base_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
+        intermediate_path = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population)
+        
+        # Find orthomosaic
+        orthomosaic_path = None
+        platform_name = None
+        sensor_name = None
+        
+        for platform in os.listdir(base_path):
+            platform_path = os.path.join(base_path, platform)
+            if not os.path.isdir(platform_path):
+                continue
+                
+            for sensor in os.listdir(platform_path):
+                sensor_path = os.path.join(platform_path, sensor)
+                if not os.path.isdir(sensor_path):
+                    continue
+                    
+                for file in os.listdir(sensor_path):
+                    if file.endswith('-RGB.tif'):
+                        orthomosaic_path = os.path.join(sensor_path, file)
+                        platform_name = platform
+                        sensor_name = sensor
+                        break
+                        
+                if orthomosaic_path:
+                    break
+            if orthomosaic_path:
+                break
+        
+        if not orthomosaic_path:
+            return jsonify({"error": "No RGB orthomosaic found for the specified date"}), 404
+        
+        # Create output directory for plot images
+        output_dir = os.path.join(intermediate_path, 'plot_images', date)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        plots_processed = 0
+        
+        # Process the orthomosaic
+        try:
+            import rasterio
+            from rasterio.windows import from_bounds
+            from rasterio.warp import transform_bounds
+            import numpy as np
+            from PIL import Image
+            
+            with rasterio.open(orthomosaic_path) as src:
+                print(f"Opened orthomosaic: {orthomosaic_path}")
+                print(f"CRS: {src.crs}, Shape: {src.shape}, Transform: {src.transform}")
+                
+                # Process each plot boundary
+                for feature in boundaries['features']:
+                    properties = feature['properties']
+                    geometry = feature['geometry']
+                    
+                    # Get plot and accession info
+                    plot = properties.get('plot', properties.get('Plot', 'unknown'))
+                    accession = properties.get('accession', 'unknown')
+                    
+                    if plot == 'unknown' or accession == 'unknown':
+                        print(f"Skipping feature - plot: {plot}, accession: {accession}")
+                        continue
+                        
+                    # Validate geometry
+                    if not geometry or geometry.get('type') != 'Polygon':
+                        print(f"Invalid geometry for plot {plot}")
+                        continue
+                        
+                    # Convert geometry coordinates to image coordinates
+                    coords = geometry['coordinates'][0]  # Polygon exterior ring
+                    
+                    if len(coords) < 4:  # A polygon needs at least 4 points (including closing point)
+                        print(f"Invalid polygon for plot {plot}: only {len(coords)} coordinates")
+                        continue
+                    
+                    # Get bounding box from polygon
+                    lons = [coord[0] for coord in coords]
+                    lats = [coord[1] for coord in coords]
+                    min_lon, max_lon = min(lons), max(lons)
+                    min_lat, max_lat = min(lats), max(lats)
+                    
+                    print(f"Plot {plot}: bounds = ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
+                    
+                    # Transform geographic coordinates to the orthomosaic's coordinate system
+                    try:
+                        # Transform bounds from WGS84 (EPSG:4326) to the orthomosaic's CRS
+                        transformed_bounds = transform_bounds(
+                            'EPSG:4326',  # source CRS (WGS84)
+                            src.crs,      # destination CRS (orthomosaic's CRS)
+                            min_lon, min_lat, max_lon, max_lat
+                        )
+                        min_x, min_y, max_x, max_y = transformed_bounds
+                        
+                        print(f"Plot {plot}: transformed bounds = ({min_x}, {min_y}, {max_x}, {max_y})")
+                        
+                        # Validate transformed bounds
+                        if min_x >= max_x or min_y >= max_y:
+                            print(f"Invalid transformed bounds for plot {plot}: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
+                            continue
+                        
+                        # Add small buffer to ensure non-zero area (in projected coordinates)
+                        x_buffer = max(0.1, (max_x - min_x) * 0.1)  # 0.1 meter minimum buffer
+                        y_buffer = max(0.1, (max_y - min_y) * 0.1)
+                        min_x -= x_buffer
+                        max_x += x_buffer
+                        min_y -= y_buffer
+                        max_y += y_buffer
+                        
+                        # Create window from transformed bounds
+                        window = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+                        
+                        print(f"Plot {plot}: window = {window} (width={window.width}, height={window.height})")
+                        
+                        # Validate window dimensions
+                        if window.width <= 0 or window.height <= 0:
+                            print(f"Invalid window dimensions for plot {plot}: width={window.width}, height={window.height}")
+                            continue
+                        
+                        # Read the windowed data
+                        data = src.read(window=window)
+                        
+                        # Create new transform for the windowed data
+                        window_transform = src.window_transform(window)
+                        
+                        # Create filename
+                        filename = f"plot_{plot}_accession_{accession}.tif"
+                        temp_tif_path = os.path.join(output_dir, filename)
+                        
+                        # Write cropped TIF
+                        with rasterio.open(
+                            temp_tif_path,
+                            'w',
+                            driver='GTiff',
+                            height=data.shape[1],
+                            width=data.shape[2],
+                            count=data.shape[0],
+                            dtype=data.dtype,
+                            crs=src.crs,
+                            transform=window_transform,
+                        ) as dst:
+                            dst.write(data)
+                        
+                        # Convert TIF to PNG
+                        png_filename = f"plot_{plot}_accession_{accession}.png"
+                        png_path = os.path.join(output_dir, png_filename)
+                        
+                        # Open TIF and convert to PNG
+                        with rasterio.open(temp_tif_path) as tif_src:
+                            # Read all bands
+                            data = tif_src.read()
+                            
+                            # Handle different band configurations
+                            if data.shape[0] >= 3:  # RGB or RGBA
+                                # Take first 3 bands for RGB
+                                rgb_data = data[:3]
+                                # Transpose from (bands, height, width) to (height, width, bands)
+                                rgb_data = np.transpose(rgb_data, (1, 2, 0))
+                                
+                                # Normalize to 0-255 if needed
+                                if rgb_data.dtype == np.uint16:
+                                    rgb_data = (rgb_data / 65535.0 * 255).astype(np.uint8)
+                                elif rgb_data.dtype == np.float32 or rgb_data.dtype == np.float64:
+                                    rgb_data = (np.clip(rgb_data, 0, 1) * 255).astype(np.uint8)
+                                
+                                # Create PIL image and save as PNG
+                                image = Image.fromarray(rgb_data)
+                                image.save(png_path)
+                                
+                                plots_processed += 1
+                        
+                        # Remove temporary TIF file
+                        os.remove(temp_tif_path)
+                        
+                    except Exception as e:
+                        print(f"Error processing plot {plot}: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"Error opening orthomosaic {orthomosaic_path}: {e}")
+            return jsonify({"error": f"Error opening orthomosaic: {e}"}), 500
+        
+        return jsonify({
+            "message": f"Successfully processed {plots_processed} plots",
+            "plots_processed": plots_processed,
+            "output_directory": output_dir
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in split_orthomosaics: {e}")
+        return jsonify({"error": str(e)}), 500
 
 app = FastAPI()
 
