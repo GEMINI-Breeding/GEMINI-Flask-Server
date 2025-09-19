@@ -49,6 +49,7 @@ from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, r
 from scripts.mavlink import process_mavlink_log_for_webapp
 from scripts.bin_to_images.bin_to_images import extract_binary, extraction_worker
 from scripts.plot_marking.plot_marking import plot_marking_bp
+from scripts.create_geotiff_pyramid import create_tiled_pyramid
 
 # stitch pipeline
 import sys
@@ -777,7 +778,8 @@ def upload_files():
     if uploaded_file_paths and dir_db is not None:
         try:
             # Refresh the directory in the database
-            dir_db.force_refresh(full_dir_path)
+            dir_db._refresh_directory_sync(full_dir_path)
+            # changed to use method for DirectoryIndexDict instead of DirectoryIndex
             print(f"Updated directory database for: {full_dir_path}")
         except Exception as e:
             print(f"Error updating directory database: {e}")
@@ -885,6 +887,15 @@ def get_binary_progress():
     except Exception as e:
         return jsonify({'progress': 0, 'error': str(e)}), 500
 
+def create_pyramid_external_ortho(ortho_path):
+    try:
+        ortho_output_path = ortho_path.replace('.tif', '-Pyramid.tif')
+        create_tiled_pyramid(ortho_path, ortho_output_path)
+        print(f"GeoTIFF pyramid created at {ortho_output_path}")
+    except Exception as e:
+        print(f"Error creating GeoTIFF pyramid: {e}")
+        traceback.print_exc()
+
 @file_app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     chunk = request.files['fileChunk']
@@ -902,8 +913,10 @@ def upload_chunk():
     
     print(f"Chunk upload - Original dir_path: {repr(dir_path)}")
     print(f"Chunk upload - Cleaned dir_path: {repr(dir_path_clean)}")
-    
-    full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
+    if file_name.endswith('-RGB.tif') or file_name.endswith('-DEM.tif'):
+        full_dir_path = os.path.join(data_root_dir, dir_path_clean)
+    else:
+        full_dir_path = os.path.join(UPLOAD_BASE_DIR, dir_path_clean)
     cache_dir_path = os.path.join(full_dir_path, 'cache')
     os.makedirs(full_dir_path, exist_ok=True)
     os.makedirs(cache_dir_path, exist_ok=True)
@@ -935,18 +948,24 @@ def upload_chunk():
             # Update directory database after successful file assembly
             if dir_db is not None:
                 try:
-                    dir_db.force_refresh(full_dir_path)
+                    dir_db._refresh_directory_sync(full_dir_path)
+                    # changed to use method for DirectoryIndexDict instead of DirectoryIndex
                     print(f"Updated directory database for: {full_dir_path}")
                 except Exception as e:
                     print(f"Error updating directory database: {e}")
-                    
+            if file_name.endswith('DEM.tif') or file_name.endswith('RGB.tif'):
+                file_path = os.path.join(full_dir_path, file_name)
+                create_pyramid_external_ortho(file_path)
+                full_raw_path = full_dir_path.replace('Processed/', 'Raw/')
+                os.makedirs(full_raw_path, exist_ok=True)
+                dir_db._refresh_directory_sync(full_raw_path)
             return "File reassembled and saved successfully", 200
         except Exception as e:
             print(f"Error during reassembly: {e}")
             return f"Error during reassembly: {e}", 500
     else:
         return f"Chunk {chunk_index} of {total_chunks} received", 202
-    
+
 @file_app.route('/check_uploaded_chunks', methods=['POST'])
 def check_uploaded_chunks():
     data = request.json
@@ -2894,7 +2913,8 @@ def upload_trait_labels():
     # Update directory database after upload completion
     if uploaded_files and dir_db is not None:
         try:
-            dir_db.force_refresh(full_dir_path)
+            dir_db._refresh_directory_sync(full_dir_path)
+            # changed to use method for DirectoryIndexDict instead of DirectoryIndex
             print(f"Updated directory database for: {full_dir_path}")
         except Exception as e:
             print(f"Error updating directory database: {e}")
