@@ -41,7 +41,7 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
-from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png, monitor_log_updates
+from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png, monitor_log_updates, make_project_path
 from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
 from scripts.utils import update_or_add_entry, split_data, prepare_labels, remove_files_from_folder, copy_files_to_folder, check_model_details
 from scripts.utils import generate_hash
@@ -64,7 +64,7 @@ from scripts.stitch_utils import (
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
-from scripts.directory_index import DirectoryIndex, DirectoryIndexDict
+from scripts.directory_index import DirectoryIndexDict
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -778,9 +778,8 @@ def upload_files():
     if uploaded_file_paths and dir_db is not None:
         try:
             # Refresh the directory in the database
-            dir_db._refresh_directory_sync(full_dir_path)
-            # changed to use method for DirectoryIndexDict instead of DirectoryIndex
-            print(f"Updated directory database for: {full_dir_path}")
+            dir_db.push(uploaded_file_paths)
+            print(f"Updated directory database for: {uploaded_file_paths}")
         except Exception as e:
             print(f"Error updating directory database: {e}")
 
@@ -948,9 +947,8 @@ def upload_chunk():
             # Update directory database after successful file assembly
             if dir_db is not None:
                 try:
-                    dir_db._refresh_directory_sync(full_dir_path)
-                    # changed to use method for DirectoryIndexDict instead of DirectoryIndex
-                    print(f"Updated directory database for: {full_dir_path}")
+                    dir_db.push(assembled_path)
+                    print(f"Updated directory database for: {assembled_path}")
                 except Exception as e:
                     print(f"Error updating directory database: {e}")
             if file_name.endswith('DEM.tif') or file_name.endswith('RGB.tif'):
@@ -1659,7 +1657,10 @@ def get_odm_logs():
         return jsonify({"log_content": ''.join(combined_logs)}), 200
     else:
         # Original ODM logs logic
-        logs_path = os.path.join(data_root_dir, 'temp', 'project', 'code', 'logs.txt')
+        project_path = make_project_path(data_root_dir,  
+                                ortho_data['year'],ortho_data['experiment'], ortho_data['location'],
+                                ortho_data['population'],ortho_data['date'], ortho_data['platform'], ortho_data['sensor'])
+        logs_path = os.path.join(project_path, 'code', 'logs.txt')
         print("Logs Path:", logs_path)  # Debug statement
         if os.path.exists(logs_path):
             with open(logs_path, 'r') as log_file:
@@ -1799,12 +1800,18 @@ def run_odm_endpoint():
     experiment = data.get('experiment')
     platform = data.get('platform')
     sensor = data.get('sensor')
-    temp_dir = data.get('temp_dir')
     reconstruction_quality = data.get('reconstruction_quality')
     custom_options = data.get('custom_options')
 
-    if not temp_dir:
-        temp_dir = os.path.join(data_root_dir, 'temp/project')
+    project_path = make_project_path(data_root_dir,  
+                                year, experiment, location, 
+                                population, date, 
+                                platform, sensor)
+    
+    # Create project_path if not exists
+    os.makedirs(project_path, exist_ok=True)
+    print(f"project_path: {project_path}")
+    
     if not reconstruction_quality:
         reconstruction_quality = 'Low'
 
@@ -1817,34 +1824,34 @@ def run_odm_endpoint():
                          experiment, 
                          platform, 
                          sensor, 
-                         temp_dir, 
+                         project_path, 
                          reconstruction_quality, 
                          custom_options)
     try:
         # Check if the container exists
-        command = f"docker ps -a --filter name=GEMINI-Container --format '{{{{.Names}}}}'"
+        odm_container_name = f"ODM-{args.location}-{args.population}-{args.date}-{args.sensor}".replace(' ', '-')
+        command = f"docker ps -a --filter name={odm_container_name} --format '{{{{.Names}}}}'"
         command = command.split()
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         
-        container_exists = "GEMINI-Container" in stdout.decode().strip()
+        container_exists = odm_container_name in stdout.decode().strip()
 
         if container_exists:
             print('Removing temp folder...')
-            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
-            cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+            cleanup_command = f"docker exec {odm_container_name} rm -rf {project_path}"
             cleanup_command = cleanup_command.split()
             cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
             cleanup_process.wait()
             
             # Stop the container if it's running
-            command = f"docker stop GEMINI-Container"
+            command = f"docker stop {odm_container_name}"
             command = command.split()
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
 
             # Remove the container if it exists
-            command = f"docker rm GEMINI-Container"
+            command = f"docker rm {odm_container_name}"
             command = command.split()
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
@@ -1859,8 +1866,8 @@ def run_odm_endpoint():
         thread.start()
         
         # Run progress tracker
-        logs_path = os.path.join(data_root_dir, 'temp/project/code/logs.txt')
-        progress_file = os.path.join(data_root_dir, 'temp/progress.txt')
+        logs_path = os.path.join(project_path, 'code/logs.txt')
+        progress_file = os.path.join(project_path, '../progress.txt')
         os.makedirs(os.path.dirname(progress_file), exist_ok=True)
         thread_prog = threading.Thread(target=monitor_log_updates, args=(latest_data, logs_path, progress_file), daemon=True)
         thread_prog.start()
@@ -1880,7 +1887,24 @@ def run_odm_endpoint():
 
 @file_app.route('/stop_odm', methods=['POST'])
 def stop_odm():
-    # global data_root_dir, stitch_thread, stitch_stop_event, odm_method, stitched_path, temp_output
+    data = request.json
+    location = data.get('location')
+    population = data.get('population')
+    date = data.get('date')
+    year = data.get('year')
+    experiment = data.get('experiment')
+    platform = data.get('platform')
+    sensor = data.get('sensor')
+    reconstruction_quality = data.get('reconstruction_quality')
+    custom_options = data.get('custom_options')
+
+    project_path = make_project_path(data_root_dir,  
+                                year, experiment, location, 
+                                population, date, 
+                                platform, sensor)
+    
+    odm_container_name = f"ODM-{location}-{population}-{date}-{sensor}".replace(' ', '-')
+
     try:
         if odm_method == 'stitch' and stitch_thread is not None:
             print("Stopping stitching thread...")
@@ -1896,10 +1920,9 @@ def stop_odm():
                 shutil.rmtree(temp_output)
                 print(f"Removed existing temp output path: {temp_output}")
         else:
-            print('ODM processed stopped by user.')
+            print('ODM requested to stop by user.')
             print('Removing temp folder...')
-            folder_to_delete = os.path.join(data_root_dir, 'temp', 'project')
-            cleanup_command = f"docker exec GEMINI-Container rm -rf {folder_to_delete}"
+            cleanup_command = f"docker exec {odm_container_name} rm -rf {project_path}"
             cleanup_command = cleanup_command.split()
             cleanup_process = subprocess.Popen(cleanup_command, stderr=subprocess.STDOUT)
             cleanup_process.wait()
@@ -1907,20 +1930,20 @@ def stop_odm():
             print('Stopping ODM process...')
             stop_event = threading.Event()
             stop_event.set()
-            command = f"docker stop GEMINI-Container"
+            command = f"docker stop {odm_container_name}"
             command = command.split()
             # Run the command
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
             
             print('Removing ODM container...')
-            command = f"docker rm GEMINI-Container"
+            command = f"docker rm {odm_container_name}"
             command = command.split()
             # Run the command
             process = subprocess.Popen(command, stderr=subprocess.STDOUT)
             process.wait()
             # reset_odm(data_root_dir)
-            shutil.rmtree(os.path.join(data_root_dir, 'temp'))
+            shutil.rmtree(os.path.join(project_path))
         return jsonify({"message": "ODM process stopped"}), 200
     except subprocess.CalledProcessError as e:
         return jsonify({"error": e.stderr.decode("utf-8")}), 500
@@ -2910,14 +2933,13 @@ def upload_trait_labels():
         file.save(file_path)
         uploaded_files.append(file_path)
 
-    # Update directory database after upload completion
-    if uploaded_files and dir_db is not None:
-        try:
-            dir_db._refresh_directory_sync(full_dir_path)
-            # changed to use method for DirectoryIndexDict instead of DirectoryIndex
-            print(f"Updated directory database for: {full_dir_path}")
-        except Exception as e:
-            print(f"Error updating directory database: {e}")
+        # Update directory database after upload completion
+        if uploaded_files and dir_db is not None:
+            try:
+                dir_db.push(file_path)
+                print(f"Updated directory database for: {file_path}")
+            except Exception as e:
+                print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -3695,23 +3717,18 @@ if __name__ == "__main__":
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
     global dir_db
-    if 1:
-        db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
-        dir_db = None
-        # Use dictionary-based index
-        dir_db = DirectoryIndexDict(verbose=False)
-        # Try loading from file if exists
-        if os.path.exists(db_path):
-            dir_db.load_dict(db_path)
-            print(f"Loaded directory index dict from {db_path}")
-        else:
-            print(f"No dict file found, will build index from scratch.")
+  
+    db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
+    dir_db = None
+    # Use dictionary-based index
+    dir_db = DirectoryIndexDict(verbose=False)
+    # Try loading from file if exists
+    if os.path.exists(db_path):
+        dir_db.load_dict(db_path)
+        print(f"Loaded directory index dict from {db_path}")
     else:
-        db_path = os.path.join(data_root_dir, "directory_index.db")
-        dir_db = None
-        # Use SQLite-based index
-        dir_db = DirectoryIndex(db_path=db_path, verbose=False)
-        # No need to load_dict or save_dict for DirectoryIndex
+        print(f"No dict file found, will build index from scratch.")
+
 
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
