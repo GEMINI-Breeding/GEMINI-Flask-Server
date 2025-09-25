@@ -29,6 +29,26 @@ from create_geotiff_pyramid import create_tiled_pyramid
 from thermal_camera.flir_one_pro_extract import extract_thermal_images_NIRFormat as extract_thermal_images
 from utils import check_nvidia_smi
 
+
+def make_project_path(data_root_dir, year, experiment,location, 
+                                population, date, 
+                                platform, sensor):
+    
+    project_path = os.path.join(data_root_dir, 'Intermediate',  
+                                year, experiment, location, 
+                                population, date, 
+                                platform, sensor, 
+                                'temp/project')
+    # Trim the last '/'
+    if project_path[-1] == '/':
+        project_path = project_path[:-1]
+
+    # Add 'project' if it's not included
+    if os.path.basename(project_path) != 'project':
+        project_path = os.path.join(project_path, 'project')
+
+    return project_path
+
 def _copy_image(src_folder, dest_folder, image_name):
     
     src_path = os.path.join(src_folder, image_name)
@@ -58,7 +78,7 @@ def append_to_log(project_path, message, verbose=False):
         if verbose:
             print(msg, flush=True)
         
-def _create_directory_structure(args):
+def create_directory_structure(args):
     
     '''
     Create a temporary directory structure for ODM and arrange the images and
@@ -66,21 +86,23 @@ def _create_directory_structure(args):
     '''
 
     # Create the temporary directory structure
-    project_path = args.temp_dir
+    project_path = args.project_path
 
-    if project_path[-1] == '/':
-        project_path = project_path[:-1]
-    if os.path.basename(project_path) != 'project':
-        project_path = os.path.join(project_path, 'project')
-
-    if not os.path.exists(project_path):
-        os.makedirs(project_path)
-        os.makedirs(os.path.join(project_path, 'code'))
+    os.makedirs(project_path, exist_ok=True)
+    os.makedirs(os.path.join(project_path, 'code'), exist_ok=True)
 
 
     # Copy the gcp_list.txt to the temporary directory
-    gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'gcp_list.txt')
-    geo_txt_path = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'geo.txt')
+    gcp_pth = os.path.join(args.data_root_dir, 'Intermediate', 
+                           args.year, args.experiment, 
+                           args.location, args.population, 
+                           args.date, args.platform, 
+                           args.sensor, 'gcp_list.txt')
+    geo_txt_path = os.path.join(args.data_root_dir, 'Raw', 
+                                args.year, args.experiment, 
+                                args.location, args.population, 
+                                args.date, args.platform, 
+                                args.sensor, 'geo.txt')
     # print(f"GCP Path: {gcp_pth}")
     # Check if gcp_pth exists
     if not os.path.exists(gcp_pth):
@@ -107,12 +129,7 @@ def _create_directory_structure(args):
 
 def process_outputs(args, debug=False):
 
-    project_path = args.temp_dir
-
-    if project_path[-1] == '/':
-        project_path = project_path[:-1]
-    if os.path.basename(project_path) != 'project':
-        project_path = os.path.join(project_path, 'project')    
+    project_path = args.project_path
     
     log_file = os.path.join(project_path, 'code', 'logs.txt')
     ortho_file = os.path.join(project_path, 'code', 'odm_orthophoto', 'odm_orthophoto.tif')
@@ -145,6 +162,9 @@ def process_outputs(args, debug=False):
         print(f"Error: DEM file {dem_file} does not exist.")
         return False
     
+    append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
+
+    # Copy ODM files
     additional_files = ['benchmark.txt', 'cameras.json', 'images.json','img_list.txt',
                         'logs.txt', 'log.json', 'options.json', 'recipe.yaml', 'odm_report']
     for file in additional_files:
@@ -167,25 +187,18 @@ def process_outputs(args, debug=False):
                 else:
                     os.system(f'cp "{file_path}" "{os.path.join(output_folder)}"')
 
-    if debug:
-        debug_tmp = project_path.replace('temp','temp'+args.year + args. experiment + args.location + args.population + args.date + args.platform + args.sensor)
-        if not os.path.exists(debug_tmp):
-            os.makedirs(output_folder)
-        os.system(f'mv "{project_path}" "{debug_tmp}"')
+    # Copy png from the ODM result
+    file_path = os.path.join(project_path, 'code', 'opensfm','stats','ortho.png')
+    output_path = os.path.join(output_folder, args.date+'-RGB.png')
+    try:
+        shutil.copy(file_path, output_path)
+    except PermissionError:
+        os.system(f'cp "{file_path}" "{output_path}"')
+    
+    # Delete ODM temp folder
+    if not debug:
+        shutil.rmtree(project_path)
 
-    if 0:
-        # save png image
-        convert_tif_to_png(os.path.join(args.data_root_dir, 'Processed', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, args.date+'-RGB-Pyramid.tif'))
-    else:
-        # Just copy from the ODM result
-        file_path = os.path.join(project_path, 'code', 'opensfm','stats','ortho.png')
-        output_path = os.path.join(output_folder, args.date+'-RGB-Pyramid.png')
-        try:
-            shutil.copy(file_path, output_path)
-        except PermissionError:
-            os.system(f'cp "{file_path}" "{output_path}"')
-
-    append_to_log(project_path, "Orthomosaic Generation Completed", verbose=True)
     return True
 
 def make_odm_args_from_metadata(metadata):
@@ -205,11 +218,11 @@ def make_odm_args_from_metadata(metadata):
     custom_options = metadata['custom_options']
     image_pth = metadata['image_pth']
     data_root_dir = metadata['data_root_dir']
-    temp_dir = metadata['temp_dir']
+    project_path = metadata['project_path']
 
-    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options)
+    return make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, project_path, reconstruction_quality, custom_options)
 
-def make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, temp_dir, reconstruction_quality, custom_options):
+def make_odm_args(data_root_dir, location, population, date, year, experiment, platform, sensor, project_path, reconstruction_quality, custom_options):
     # Run ODM
     args = argparse.Namespace()
     args.data_root_dir = data_root_dir
@@ -220,7 +233,7 @@ def make_odm_args(data_root_dir, location, population, date, year, experiment, p
     args.experiment = experiment
     args.platform = platform
     args.sensor = sensor
-    args.temp_dir = temp_dir
+    args.project_path = project_path
     args.reconstruction_quality = reconstruction_quality
     args.custom_options = custom_options
 
@@ -229,22 +242,21 @@ def make_odm_args(data_root_dir, location, population, date, year, experiment, p
 def reset_odm(args, metadata_file_name=None):
     # May be more appropriate to rename as "prep_odm" in the future to clarify functionality
     # This function now contains checks for existing processed data previously in run_odm
-    drd = args.data_root_dir
-    temp_dir = args.temp_dir
+    project_path = args.project_path
 
     # Check if the temp directory exists
-    if not os.path.exists(temp_dir):
+    if not os.path.exists(project_path):
         # No need to reset ODM
         return
 
     if metadata_file_name is None:
         metadata_file_name = 'metadata.json'
         
-    metadata_file = os.path.join(temp_dir, 'code', metadata_file_name)
+    metadata_file = os.path.join(project_path, 'code', metadata_file_name)
     # Check if the metadata file exists
     if not os.path.exists(metadata_file):
         # Try with yaml
-        metadata_file = os.path.join(temp_dir, 'code', metadata_file_name.replace('.json', '.yaml'))
+        metadata_file = os.path.join(project_path, 'code', metadata_file_name.replace('.json', '.yaml'))
         
     reset_odm_temp = False
     if os.path.exists(metadata_file):
@@ -270,7 +282,7 @@ def reset_odm(args, metadata_file_name=None):
         reset_odm_temp = True
     
     if reset_odm_temp:
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(project_path)
 
 def odm_args_checker(arg1, arg2):
     """
@@ -334,19 +346,14 @@ def run_odm(args):
     '''
     
     try:
-        _create_directory_structure(args)
+        create_directory_structure(args)
 
         # Run ODM
-        project_path = args.temp_dir
-
-        if project_path[-1] == '/':
-            project_path = project_path[:-1]
-        if os.path.basename(project_path) != 'project':
-            project_path = os.path.join(project_path, 'project')
-        
-        
-        print('Project Path: ', project_path)
-        image_path = os.path.join(args.data_root_dir, 'Raw', args.year, args.experiment, args.location, args.population, args.date, args.platform, args.sensor, 'Images')
+        project_path = args.project_path
+        image_path = os.path.join(args.data_root_dir, 'Raw', 
+                                  args.year, args.experiment, args.location, 
+                                  args.population, args.date, args.platform, 
+                                  args.sensor, 'Images')
         print('Image Path: ', image_path)
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
@@ -410,12 +417,12 @@ def run_odm(args):
             #     odm_options = base_options
         
             # Create a container name with safe characters only
-            container_name = f"GEMINI-Container-{args.location.replace(' ', '-')}-{args.population.replace(' ', '-')}-{args.date}-{args.sensor.replace(' ', '-')}"
+            odm_container_name = f"ODM-{args.location}-{args.population}-{args.date}-{args.sensor}".replace(' ', '-')
 
             # Create the command with security options and proper handling of paths with spaces
             docker_command = [
                 'docker', 'run',
-                '--name', container_name,
+                '--name', odm_container_name,
                 '-i', '--rm',
                 '--security-opt=no-new-privileges',
                 '-v', f'{project_path}:/datasets:rw', 
@@ -452,7 +459,7 @@ def run_odm(args):
                 'image_pth': image_path,
                 'command': ' '.join(docker_command),  # Store as string for logging
                 'data_root_dir': args.data_root_dir,
-                'temp_dir': args.temp_dir
+                'project_path': args.project_path
             }
             
             recipe_file = os.path.join(project_path, 'code', 'recipe.yaml')
@@ -553,7 +560,7 @@ if __name__ == '__main__':
     parser.add_argument('--year', type=str, help='Year of the data collection')
     parser.add_argument('--experiment', type=str, help='Experiment name')
     parser.add_argument('--sensor', type=str, help='Sensor used')
-    parser.add_argument('--temp_dir', type=str, help='Temporary directory to store the images and gcp_list.txt',
+    parser.add_argument('--project_path', type=str, help='Temporary directory to store the images and gcp_list.txt',
                         default='/home/GEMINI/GEMINI-App-Data/temp/project') # TODO: Automatically generate a temp directory? or use /var/tmp?
     parser.add_argument('--reconstruction_quality', type=str, help='Reconstruction quality (default, custom)',
                         choices=['Default', 'Custom'], default='default')
