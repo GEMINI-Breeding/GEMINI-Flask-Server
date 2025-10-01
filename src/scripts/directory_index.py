@@ -6,8 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Empty
 from threading import Thread, Event
 import pickle
+import stat
+
+from utils import normalize_path
 class DirectoryIndexDict:
-    def __init__(self, verbose=True, dict_path=None, exclude=['temp'], save_interval=60):
+    def __init__(self, dict_path, verbose=True, exclude=['temp'], save_interval=60):
         self.verbose = verbose
         self.refresh_queue = Queue()
         self.queue_worker_running = False
@@ -27,14 +30,6 @@ class DirectoryIndexDict:
         if self.verbose:
             print(message)
 
-    def _normalize_path(self, path):
-        if not path:
-            return path
-        normalized = os.path.abspath(path)
-        if len(normalized) > 1 and normalized.endswith(os.sep):
-            normalized = normalized.rstrip(os.sep)
-        return normalized
-
     def _start_queue_worker(self):
         if not self.queue_worker_running:
             self.queue_worker_running = True
@@ -50,14 +45,14 @@ class DirectoryIndexDict:
                 if task is None:
                     self._log("Queue worker received stop signal")
                     break
-                parent_path = self._normalize_path(task)
+                parent_path = normalize_path(task)
                 now = time.time()
                 # Skip if already processing
                 if parent_path in self.processing_paths:
                     self.refresh_queue.task_done()
                     continue
-                # Skip if processed recently (within 30s)
-                if parent_path in self.processed_paths and now - self.processed_paths[parent_path] < 30:
+                # Skip if processed recently (within 300s)
+                if parent_path in self.processed_paths and now - self.processed_paths[parent_path] < 300:
                     self.refresh_queue.task_done()
                     # Signal completion even if skipped
                     if parent_path in self.completion_events:
@@ -143,80 +138,92 @@ class DirectoryIndexDict:
             self._log(f"Error joining queue: {e}")
         self._log("DirectoryIndexDict shutdown complete")
 
-    def get_children(self, parent_path, directories_only=True, wait_if_needed=True, timeout=300):
+    def get_children(self, parent_path, directories_only=True, wait_if_needed=False, timeout=300):
         """
-        Get children from dict with flexible refresh and waiting options.
+        Get children immediately from dict and queue refresh if needed.
+        Returns tuple (children, is_fresh) where is_fresh indicates if data was recently updated.
         """
-        parent_path = self._normalize_path(parent_path)
+        parent_path = normalize_path(parent_path)
+        is_fresh = False
+
+        # 1. Immediately return current data from dictionary
         with self.db_lock:
             items = self.db.get(parent_path, [])
-            # Only use dict entries, skip strings
             items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
             if directories_only:
                 children = [os.path.basename(p['path']) for p in items if p['is_directory']]
             else:
                 children = [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
 
-        # If wait_if_needed and no children but path exists, queue and wait
-        if wait_if_needed and not children and os.path.exists(parent_path):
-            self._log(f"No data found for existing path {parent_path}, queuing and waiting...")
-            completion_event = Event()
-            self.completion_events[parent_path] = completion_event
-            try:
-                if parent_path not in self.processing_paths:
-                    self.refresh_queue.put(parent_path)
-                if completion_event.wait(timeout=timeout):
-                    self._log(f"Queue processing completed for {parent_path}, retrying query...")
-                    with self.db_lock:
-                        items = self.db.get(parent_path, [])
-                        items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
-                        if directories_only:
-                            children = [os.path.basename(p['path']) for p in items if p['is_directory']]
-                        else:
-                            children = [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
-                else:
-                    self._log(f"Timeout waiting for queue processing of {parent_path}")
-            finally:
-                self.completion_events.pop(parent_path, None)
+        # 2. Check if refresh is needed
+        now = time.time()
+        needs_refresh = False
+
+        # Check current state
+        is_being_processed = parent_path in self.processing_paths
+        is_in_queue = any(task == parent_path for task in list(self.refresh_queue.queue))
+        is_stale = parent_path not in self.processed_paths or now - self.processed_paths[parent_path] > 300
+
+        # Determine if refresh is needed
+        if not children and os.path.exists(parent_path):
+            needs_refresh = not (is_being_processed or is_in_queue)
+        elif is_stale:
+            needs_refresh = not (is_being_processed or is_in_queue)
+
+        # 3. Queue refresh if needed
+        if needs_refresh:
+            self._log(f"Queuing background refresh for {parent_path} (In process: {is_being_processed}, In queue: {is_in_queue})")
+            self.refresh_queue.put(parent_path)
+            
+            # Only wait if explicitly requested
+            if wait_if_needed:
+                completion_event = Event()
+                self.completion_events[parent_path] = completion_event
+                try:
+                    if completion_event.wait(timeout=timeout):
+                        # Refresh complete, get updated data
+                        with self.db_lock:
+                            items = self.db.get(parent_path, [])
+                            items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
+                            if directories_only:
+                                children = [os.path.basename(p['path']) for p in items if p['is_directory']]
+                            else:
+                                children = [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
+                        is_fresh = True
+                finally:
+                    self.completion_events.pop(parent_path, None)
         else:
-            should_refresh = False
-            if not children:
-                should_refresh = True
-                reason = "no data found"
-            else:
-                now = time.time()
-                if parent_path not in self.processed_paths:
-                    should_refresh = True
-                    reason = "initial refreshing"
-                elif now - self.processed_paths[parent_path] > 300:
-                    should_refresh = True
-                    reason = "data is old"
-            if should_refresh and parent_path not in self.processing_paths:
-                self._log(f"Queuing refresh for {parent_path} ({reason})")
-                self.refresh_queue.put(parent_path)
+            is_fresh = parent_path in self.processed_paths and now - self.processed_paths[parent_path] < 300
+
         return children
 
     def _refresh_directory_sync(self, parent_path):
-        parent_path = self._normalize_path(parent_path)
+        parent_path = normalize_path(parent_path)
         try:
-            if not os.path.exists(parent_path):
-                self._log(f"Path does not exist: {parent_path}")
+            # Add quick path checks
+            if not os.access(parent_path, os.R_OK):
+                self._log(f"No read access: {parent_path}")
                 return False
-            if not os.path.isdir(parent_path):
-                self._log(f"Path is not directory: {parent_path}")
+                
+            # Use stat to get directory info quickly
+            st = os.stat(parent_path)
+            if not stat.S_ISDIR(st.st_mode):
                 return False
-            # Get current directory contents (directories only, fast)
-            current_items = []
+
+            # Fast directory scan with list comprehension
             with os.scandir(parent_path) as it:
-                for entry in it:
-                    if not entry.name.startswith('.') and entry.is_dir() and not entry in self.exclude:
-                        current_items.append({'path': entry.path, 'is_directory': True})
+                current_items = [
+                    {'path': entry.path, 'is_directory': True}
+                    for entry in it 
+                    if entry.is_dir(follow_symlinks=False) and  # Don't follow symlinks
+                       not entry.name.startswith('.') and 
+                       entry.name not in self.exclude
+                ]
+
             with self.db_lock:
                 self.db[parent_path] = current_items
-            self._log(f"Background refresh: updated {len(current_items)} items for {parent_path}")
-            if self.dict_path:
-                self.save_dict(self.dict_path)
             return True
+
         except Exception as e:
             self._log(f"Error in background refresh for {parent_path}: {e}")
             return False
@@ -257,56 +264,6 @@ class DirectoryIndexDict:
 
     def set_verbose(self, verbose):
         self.verbose = verbose
-
-_dir_cache = {}
-_cache_ttl = 60
-
-def _scan_directory(dir_path, include_files=False, return_type_info=False):
-    """Scan directory and return items"""
-    items = []
-    try:
-        for item in os.listdir(dir_path):
-            if item.startswith('.'):
-                continue
-                
-            item_path = os.path.join(dir_path, item)
-            is_dir = os.path.isdir(item_path)
-            is_file = os.path.isfile(item_path)
-            
-            if is_dir or (include_files and is_file):
-                if return_type_info:
-                    items.append({
-                        'name': item,
-                        'is_directory': is_dir,
-                        'is_file': is_file
-                    })
-                else:
-                    items.append(item)
-    except Exception as e:
-        print(f"Error scanning directory {dir_path}: {e}")
-    
-    return items
-
-def get_cached_dirs(dir_path, include_files=False, return_type_info=False):
-    """Backward compatible cached directory listing"""
-    now = time.time()
-    cache_key = f"{dir_path}_{include_files}_{return_type_info}"
-    
-    if cache_key in _dir_cache:
-        data, timestamp = _dir_cache[cache_key]
-        if now - timestamp < _cache_ttl:
-            return data
-    
-    if os.path.exists(dir_path):
-        try:
-            items = _scan_directory(dir_path, include_files, return_type_info)
-            items.sort(key=lambda x: x['name'] if isinstance(x, dict) else x)
-            _dir_cache[cache_key] = (items, now)
-            return items
-        except Exception as e:
-            print(f"Error reading directory {dir_path}: {e}")
-    
-    return []
 
 
 if __name__ == "__main__":

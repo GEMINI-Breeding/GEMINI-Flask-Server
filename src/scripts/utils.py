@@ -268,3 +268,11 @@ def generate_hash(trait, length=6):
     random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
     hash_id = f"{trait}-{random_sequence}"
     return hash_id
+
+def normalize_path(path):
+    if not path:
+        return path
+    normalized = os.path.abspath(path)
+    if len(normalized) > 1 and normalized.endswith(os.sep):
+        normalized = normalized.rstrip(os.sep)
+    return normalized

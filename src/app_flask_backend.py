@@ -201,7 +201,7 @@ def list_dirs(dir_path):
     full_path = os.path.join(data_root_dir, dir_path)
 
     # Try index first
-    dirs = dir_db.get_children(full_path, directories_only=True, wait_if_needed=True)
+    dirs = dir_db.get_children(full_path, directories_only=True, wait_if_needed=False)
 
     return jsonify(dirs), 200
 
@@ -267,7 +267,7 @@ def list_files(dir_path):
     
     # Try to get files from directory index (both files and directories, then filter)
     try:
-        all_items = dir_db.get_children(full_path, directories_only=False, wait_if_needed=True)
+        all_items = dir_db.get_children(full_path, directories_only=False, wait_if_needed=False)
         
         # Filter to get only files (not directories)
         if all_items and isinstance(all_items[0], dict):
@@ -956,7 +956,7 @@ def upload_chunk():
                 create_pyramid_external_ortho(file_path)
                 full_raw_path = full_dir_path.replace('Processed/', 'Raw/')
                 os.makedirs(full_raw_path, exist_ok=True)
-                dir_db._refresh_directory_sync(full_raw_path)
+                dir_db.push([file_path, full_raw_path])
             return "File reassembled and saved successfully", 200
         except Exception as e:
             print(f"Error during reassembly: {e}")
@@ -3700,6 +3700,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_root_dir', type=str, default='~/GEMINI-App-Data',required=False)
     parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
     parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
+    parser.add_argument('--debug', type=bool, default=False, required=False)
     args = parser.parse_args()
 
     # Print the arguments to the console
@@ -3721,7 +3722,7 @@ if __name__ == "__main__":
     db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
     dir_db = None
     # Use dictionary-based index
-    dir_db = DirectoryIndexDict(verbose=False)
+    dir_db = DirectoryIndexDict(dict_path=db_path, verbose=args.debug)
     # Try loading from file if exists
     if os.path.exists(db_path):
         dir_db.load_dict(db_path)
