@@ -1,7 +1,7 @@
 from pymavlink import mavutil
 import matplotlib.pyplot as plt
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 from scipy.spatial import KDTree
 
@@ -419,7 +419,7 @@ def process_mavlink_log_for_webapp(file_paths, data_type, msgs_synced_file, exis
                         
                         # Check if this rounded timestamp already exists
                         if rounded_timestamp not in existing_timestamps:
-                            timestamp = datetime.fromtimestamp(row['timestamp'])
+                            timestamp = datetime.fromtimestamp(row['timestamp'], tz=timezone.utc)
                             
                             # Find closest rangefinder distance using KD-Tree
                             rangefinder_distance = None
@@ -497,7 +497,7 @@ def process_mavlink_log_for_webapp(file_paths, data_type, msgs_synced_file, exis
                             
                             webapp_row = {
                                 'image_path': file_path,
-                                'time': timestamp.strftime('%Y:%m:%d %H:%M:%S.%f'),  # Extended format with microseconds
+                                'time': timestamp.strftime('%Y:%m:%d %H:%M:%S.%f %z'),  # Extended format with microseconds
                                 'timestamp': rounded_timestamp,  # Store rounded timestamp for next iteration
                                 'lat': round(row['lat'], 8),  # Round coordinates to 8 decimal places (~1cm precision)
                                 'lon': round(row['lon'], 8),
