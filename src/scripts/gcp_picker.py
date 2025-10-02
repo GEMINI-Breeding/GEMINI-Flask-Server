@@ -10,6 +10,9 @@ import base64
 import io
 import re
 import piexif # pip install piexif
+from datetime import datetime, timezone
+
+from utils import convert_to_unix_timestamp
 
 def clean_duplicates_in_msgs_synced(csv_path):
     """Remove duplicate entries from msgs_synced.csv based on image_path."""
@@ -42,11 +45,11 @@ def get_image_exif(image_path):
     width, height = image.size
     
     # Flag to track if we need to rotate the image
-    needs_rotation = False
+    do_rotation = False
     
     # Check if image is in portrait mode (height > width)
     if height > width:
-        needs_rotation = True
+        do_rotation = True
         print(f"Image is in portrait orientation, will rotate: {os.path.basename(image_path)}")
     
     # Read EXIF data using both PIL and piexif for different operations
@@ -54,37 +57,35 @@ def get_image_exif(image_path):
     
     # Read full EXIF data with piexif for modification
     try:
-        piexif_data = piexif.load(image_path)
+        exif_dict = piexif.load(image_path)
     except Exception as e:
         print(f"Error reading EXIF data with piexif: {e}")
-        piexif_data = {'0th': {}, 'Exif': {}, 'GPS': {}, '1st': {}, 'thumbnail': None}
+        exif_dict = {'0th': {}, 'Exif': {}, 'GPS': {}, '1st': {}, 'thumbnail': None}
+
     
+    # # Update the time string format to include timezone
+    # time_string = f"{time_string}{tz_string}"
+
     latitude = None
     longitude = None
     altitude = None
-    time_stamp = ""
-    needs_update = False
-    
+    gps_time_string = None
+    exif_update = False
+
+    time_string = None
+    unix_time_stamp = None
+
     # First check if standard timestamps exist
-    standard_time_exists = False
     for tag_id in [36867, 36868, 306]:  # DateTimeOriginal, DateTimeDigitized, DateTime
         if tag_id in exif_data:
             if exif_data[tag_id]:  # Make sure it's not empty
-                time_stamp = exif_data[tag_id]
-                standard_time_exists = True
+                time_string = exif_data[tag_id]
                 break
     
-    # If no standard timestamp but GPS data exists
-    if not standard_time_exists and exif_data is not None and 34853 in exif_data:
-    # If GPS data exists
-    # if exif_data is not None and 34853 in exif_data:
+    # Check GPS EXIF data
+    if exif_data is not None and 34853 in exif_data:
         gps_info = exif_data[34853]
-        
-        # Extract GPS date and time if available
-        gps_date = None
-        gps_time = None
-        
-        # Extract GPS coordinates
+        # Get the latitude and longitude
         try:
             latitude = float(gps_info[2][0] + gps_info[2][1] / 60 + gps_info[2][2] / 3600)
             if gps_info[1] == 'S':
@@ -96,6 +97,10 @@ def get_image_exif(image_path):
         except (KeyError, IndexError, TypeError) as e:
             print(f"Error extracting GPS coordinates: {e}")
         
+        # Extract GPS date and time if available
+        gps_date = None
+        gps_time = None
+        
         # Get GPS date (tag 29)
         if 29 in gps_info:
             gps_date = gps_info[29]
@@ -105,51 +110,50 @@ def get_image_exif(image_path):
             try:
                 hour = int(gps_info[7][0].numerator / gps_info[7][0].denominator)
                 minute = int(gps_info[7][1].numerator / gps_info[7][1].denominator)
-                second = int(gps_info[7][2].numerator / gps_info[7][2].denominator)
-                gps_time = f"{hour:02d}:{minute:02d}:{second:02d}"
+                # Get full precision for seconds including fractional part
+                second = float(gps_info[7][2].numerator) / float(gps_info[7][2].denominator)
+                microseconds = int((second % 1) * 1000000)  # Convert fractional seconds to microseconds
+                second = int(second)  # Get integer part of seconds
+                
+                gps_time = f"{hour:02d}:{minute:02d}:{second:02d}.{microseconds:06d}"
             except (AttributeError, ZeroDivisionError) as e:
                 print(f"Error parsing GPS time: {e}")
         
         # If we have both GPS date and time, create standard timestamp
         if gps_date and gps_time:
-            time_stamp = f"{gps_date} {gps_time}"
-            print(f"Created timestamp from GPS data: {time_stamp}")
-            
-            # Update standard EXIF tags with GPS timestamp
-            if '0th' not in piexif_data:
-                piexif_data['0th'] = {}
-            if 'Exif' not in piexif_data:
-                piexif_data['Exif'] = {}
-            
-            # Convert to bytes for piexif
-            time_bytes = time_stamp.encode('ascii')
-            
-            # Update all the standard time fields
-            piexif_data['0th'][piexif.ImageIFD.DateTime] = time_bytes  # 306
-            piexif_data['Exif'][piexif.ExifIFD.DateTimeOriginal] = time_bytes  # 36867
-            piexif_data['Exif'][piexif.ExifIFD.DateTimeDigitized] = time_bytes  # 36868
-            
-            # Flag that we need to save changes
-            needs_update = True
-    else:
-        # Standard processing for files with existing timestamps
-        if exif_data is not None and 34853 in exif_data:
-            gps_info = exif_data[34853]
+            gps_time_string = f"{gps_date} {gps_time}"
             try:
-                latitude = float(gps_info[2][0] + gps_info[2][1] / 60 + gps_info[2][2] / 3600)
-                if gps_info[1] == 'S':
-                    latitude = -latitude
-                longitude = float(gps_info[4][0] + gps_info[4][1] / 60 + gps_info[4][2] / 3600)
-                if gps_info[3] == 'W':
-                    longitude = -longitude
-                altitude = float(gps_info[6])
-            except (KeyError, IndexError, TypeError) as e:
-                print(f"Error extracting GPS coordinates: {e}")
-    
+                # Create datetime object in UTC
+                dt = datetime.strptime(gps_time_string, '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                # gps_time_string = dt.strftime('%Y:%m:%d %H:%M:%S.%f %z')  
+                unix_time_stamp = dt.timestamp()  # Get UNIX timestamp
+            except ValueError as e:
+                print(f"Error converting GPS time to timestamp: {e}")
+                unix_time_stamp = None
+    # If unix_time_stamp exists update time_string
+    if unix_time_stamp is not None:
+        # Update standard EXIF tags with GPS timestamp
+        if '0th' not in exif_dict:
+            exif_dict['0th'] = {}
+        if 'Exif' not in exif_dict:
+            exif_dict['Exif'] = {}
+        
+        # Convert to bytes for piexif
+        dt_local = datetime.fromtimestamp(unix_time_stamp) # Can we use GPS info to calculate the right time zone?
+        time_string = dt_local.strftime('%Y:%m:%d %H:%M:%S.%f %z') # Include timezone in output
+        
+        # Update all the standard time fields
+        exif_dict['0th'][piexif.ImageIFD.DateTime] = time_string  # 306
+        exif_dict['Exif'][piexif.ExifIFD.DateTimeOriginal] = time_string  # 36867
+        exif_dict['Exif'][piexif.ExifIFD.DateTimeDigitized] = time_string  # 36868
+        
+        # Flag that we need to save changes
+        exif_update = True
+
     # If we need to update EXIF or rotate the image
-    if needs_update or needs_rotation:
+    if exif_update or do_rotation:
         try:
-            if needs_rotation:
+            if do_rotation:
                 # Rotate the image 90 degrees clockwise
                 rotated_image = image.transpose(Image.ROTATE_270)
                 # Update dimensions after rotation
@@ -158,14 +162,14 @@ def get_image_exif(image_path):
                 image = rotated_image
             
             # Convert EXIF data to bytes
-            exif_bytes = piexif.dump(piexif_data)
+            exif_bytes = piexif.dump(exif_dict)
             
             # Save the image with updated EXIF and/or rotation
             image.save(image_path, exif=exif_bytes)
             
-            if needs_update:
+            if exif_update:
                 print(f"Updated EXIF timestamps in {os.path.basename(image_path)}")
-            if needs_rotation:
+            if do_rotation:
                 print(f"Rotated {os.path.basename(image_path)} to landscape orientation")
         except Exception as e:
             print(f"Error updating image: {e}")
@@ -173,7 +177,8 @@ def get_image_exif(image_path):
     # Create and return the message dictionary with potentially updated dimensions
     msg = {
         'image_path': image_path,
-        'time': time_stamp,
+        'time': time_string,
+        'timestamp': unix_time_stamp,
         'lat': latitude,
         'lon': longitude,
         'alt': altitude,
@@ -703,46 +708,26 @@ def update_msgs_synced_with_drone_data(df_msgs_synced, drone_msgs_path):
     Update df_msgs_synced lat, lon, and alt using drone_msgs.csv with KD tree timestamp matching
     """
     from sklearn.neighbors import NearestNeighbors
-    from datetime import datetime
     import pandas as pd
     import numpy as np
     
     print(f"Loading drone messages from {drone_msgs_path}")
     df_drone = pd.read_csv(drone_msgs_path)
     
-    # Convert timestamps to Unix timestamps for KD tree matching
-    def convert_to_unix_timestamp(timestamp_str):
-        try:
-            # Try different timestamp formats
-            formats = [
-                '%Y:%m:%d %H:%M:%S',  # EXIF format
-                '%Y-%m-%d %H:%M:%S',  # Standard format
-                '%Y/%m/%d %H:%M:%S',  # Alternative format
-            ]
-            
-            for fmt in formats:
-                try:
-                    dt = datetime.strptime(str(timestamp_str), fmt)
-                    return dt.timestamp()
-                except ValueError:
-                    continue
-            
-            # If no format works, try parsing as float (already Unix timestamp)
-            return float(timestamp_str)
-        except:
-            return None
-    
     # Convert timestamps for both datasets
     print("Converting timestamps for matching...")
     
     # For msgs_synced
-    df_msgs_synced['unix_time'] = df_msgs_synced['time'].apply(convert_to_unix_timestamp)
+    if 'timestamp' in df_drone.columns:
+        df_msgs_synced['unix_time'] = df_msgs_synced['timestamp']
+    else:
+        df_msgs_synced['unix_time'] = df_msgs_synced['time'].apply(convert_to_unix_timestamp)
     valid_msgs_mask = df_msgs_synced['unix_time'].notna()
     valid_msgs_count = valid_msgs_mask.sum()
     
     # For drone_msgs
     if 'timestamp' in df_drone.columns:
-        df_drone['unix_time'] = df_drone['timestamp'].apply(convert_to_unix_timestamp)
+        df_drone['unix_time'] = df_drone['timestamp']
     elif 'time' in df_drone.columns:
         df_drone['unix_time'] = df_drone['time'].apply(convert_to_unix_timestamp)
     else:
