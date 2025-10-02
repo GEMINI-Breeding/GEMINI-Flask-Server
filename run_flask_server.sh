@@ -13,7 +13,7 @@ echo "Resolved Conda environment path: $conda_env_path"
 
 # Common Conda installation directories to check
 POSSIBLE_CONDA_DIRS=(
-    "$HOME/miniconda3"
+    "$HOME/miniconda"
     "$HOME/anaconda3"
     "/opt/conda"
     "/usr/local/miniconda3"
