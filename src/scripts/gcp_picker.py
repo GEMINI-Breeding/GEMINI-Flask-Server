@@ -111,11 +111,8 @@ def get_image_exif(image_path):
                 hour = int(gps_info[7][0].numerator / gps_info[7][0].denominator)
                 minute = int(gps_info[7][1].numerator / gps_info[7][1].denominator)
                 # Get full precision for seconds including fractional part
-                second = float(gps_info[7][2].numerator) / float(gps_info[7][2].denominator)
-                microseconds = int((second % 1) * 1000000)  # Convert fractional seconds to microseconds
-                second = int(second)  # Get integer part of seconds
-                
-                gps_time = f"{hour:02d}:{minute:02d}:{second:02d}.{microseconds:06d}"
+                second = int(gps_info[7][2].numerator / gps_info[7][2].denominator)
+                gps_time = f"{hour:02d}:{minute:02d}:{second:02d}"
             except (AttributeError, ZeroDivisionError) as e:
                 print(f"Error parsing GPS time: {e}")
         
