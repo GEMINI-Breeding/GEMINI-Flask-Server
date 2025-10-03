@@ -3738,11 +3738,11 @@ if __name__ == "__main__":
     now_drone_processing = False
 
     # Start the Titiler server using the subprocess module
-    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port}"
+    titiler_command = f"uvicorn titiler.application.main:app --reload --port {args.titiler_port} --host 0.0.0.0"
     titiler_process = subprocess.Popen(titiler_command, shell=True)
 
-    # Start the Flask server
-    uvicorn.run(app, port=args.flask_port)
+    # Start the Flask server - bind to all interfaces (0.0.0.0) to allow external access
+    uvicorn.run(app, host="0.0.0.0", port=args.flask_port)
 
     # Save the directory index dict before shutdown
     if ".pkl" in db_path:
