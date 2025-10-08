@@ -742,6 +742,13 @@ def upload_files():
             filename = 'field_design.csv'
         elif data_type == 'gcpLocations':
             filename = 'gcp_locations.csv'
+            
+        # TODO: upload msgs synced file option
+        elif data_type.lower() == 'platformlogs':
+            
+            # check if file has "msgs_synced" in its name
+            if "msgs_synced" in filename or "synced" in filename or "msgs" in filename:
+                filename = "msgs_synced.csv"
         
         file_path = os.path.join(full_dir_path, filename)
 
@@ -751,7 +758,6 @@ def upload_files():
             file.save(file_path)
             uploaded_file_paths.append(file_path)  
 
-    
     if data_type.lower() == 'image' and uploaded_file_paths:
         thread = threading.Thread(
             target=process_exif_data_async, 
@@ -773,6 +779,23 @@ def upload_files():
         )
         thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
+        
+    # NOTE: will include /top/rgb_file column in msgs_synced_file to anticipate stitching needs and multiple cameras
+    # read msgs_synced.csv file if it exists
+    candidates = [
+        os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv"),
+        os.path.join(os.path.dirname(full_dir_path), "Metadata", "msgs_synced.csv")
+    ]
+    # msgs_synced_file = os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv")
+    msgs_synced_file = next((f for f in candidates if os.path.isfile(f)), None)
+    if msgs_synced_file:
+        existing_df = pd.read_csv(msgs_synced_file)
+        
+        # check if 'top/rgb_file' column exists
+        if '/top/rgb_file' not in existing_df.columns:
+            existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x))
+            existing_df.to_csv(msgs_synced_file, index=False)
+            print(f"Added 'top/rgb_file' column to {msgs_synced_file}")
 
     # Update directory database after upload completion
     if uploaded_file_paths and dir_db is not None:
@@ -2228,10 +2251,14 @@ def associate_plots_with_boundaries():
     
     try:
         # Paths
-        msgs_synced_path = os.path.join(
-            data_root_dir, "Raw", year, experiment, location, population,
-            date, platform, sensor, "Metadata", "msgs_synced.csv"
-        )
+        candidates = [
+            os.path.join(data_root_dir, "Raw", year, experiment, location, population,
+                        date, platform, sensor, "Metadata", "msgs_synced.csv"),
+            os.path.join(data_root_dir, "Raw", year, experiment, location, population,
+                        date, platform, sensor, "msgs_synced.csv")
+        ]
+        msgs_synced_path = next((p for p in candidates if os.path.exists(p)), None)
+        
         plot_borders_path = os.path.join(
             data_root_dir, "Raw", year, experiment, location, population,
             "plot_borders.csv"

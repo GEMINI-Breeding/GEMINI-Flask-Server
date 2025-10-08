@@ -203,6 +203,10 @@ def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='a', header=False, index=False)
         else:
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
+            
+    # check if image has any exif data
+    if not exif_data_list:
+        print("No new EXIF data extracted. You may need to upload a msgs_synced.csv (synced metadata) file manually.")
 
 def natural_sort_key(s):
     """
