@@ -233,19 +233,19 @@ class DirectoryIndexDict:
             path_list = [path_list]
 
         for path in path_list:
-            need_to_push = True
-            basename = os.path.basename(path)
+            # basename = os.path.basename(path)
             parent_name = os.path.dirname(path)
-            if parent_name in self.db:
-                dir_list = [p['path'] for p in self.db[parent_name]]
-                if basename in dir_list:
-                    need_to_push = False # Already exists
-                else:
-                    pass
+            record = {'path': path, 'is_directory': os.path.isdir(path)}
 
-            if need_to_push:
-                # Append if needed
-                self.db[parent_name].append({'path': path, 'is_directory': os.path.isdir(path)})
+            if parent_name in self.db:
+                # Check if basename is 
+                dir_list = [p['path'] for p in self.db[parent_name]]
+                if path not in dir_list:
+                    # Append if needed
+                    self.db[parent_name].append(record)
+            else:
+                # Even parent path is not exist
+                self.db[parent_name] = [record]
                 
     def save_dict(self, filename):
         with self.db_lock:
