@@ -204,6 +204,14 @@ def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df
         else:
             pd.DataFrame(exif_data_list).to_csv(msgs_synced_file, mode='w', header=True, index=False)
             
+    # read msgs synced file and ensure /top/rgb_file column exists
+    if msgs_synced_file:
+        existing_df = pd.read_csv(msgs_synced_file)
+        
+        # only apply basename if row is empty
+        existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x) if pd.isna(x) else x)
+        existing_df.to_csv(msgs_synced_file, index=False)
+        
     # check if image has any exif data
     if not exif_data_list:
         print("No new EXIF data extracted. You may need to upload a msgs_synced.csv (synced metadata) file manually.")

@@ -743,7 +743,6 @@ def upload_files():
         elif data_type == 'gcpLocations':
             filename = 'gcp_locations.csv'
             
-        # TODO: upload msgs synced file option
         elif data_type.lower() == 'platformlogs':
             
             # check if file has "msgs_synced" in its name
@@ -780,24 +779,24 @@ def upload_files():
         thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
         
-    # NOTE: will include /top/rgb_file column in msgs_synced_file to anticipate stitching needs and multiple cameras
-    # read msgs_synced.csv file if it exists
-    candidates = [
-        os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv"),
-        os.path.join(os.path.dirname(full_dir_path), "Metadata", "msgs_synced.csv")
-    ]
-    # msgs_synced_file = os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv")
-    msgs_synced_file = next((f for f in candidates if os.path.isfile(f)), None)
-    if msgs_synced_file:
-        existing_df = pd.read_csv(msgs_synced_file)
+        # NOTE: will include /top/rgb_file column in msgs_synced_file to anticipate stitching needs and multiple cameras
+        # read msgs_synced.csv file if it exists
+        candidates = [
+            os.path.join(os.path.dirname(full_dir_path), "msgs_synced.csv"),
+            os.path.join(os.path.dirname(full_dir_path), "Metadata", "msgs_synced.csv")
+        ]
+
+        msgs_synced_file = next((f for f in candidates if os.path.isfile(f)), None)
         
-        # TODO: read csv and update existing paths
-        # TODO: make sure image_path is full path (could initially be only filename)
-        existing_df['image_path'] = existing_df['image_path'].apply(lambda x: os.path.join(os.path.dirname(msgs_synced_file), x) if not os.path.isabs(x) else x)
-        existing_paths = set(existing_df['image_path'].values)
-        
-        # check if 'top/rgb_file' column exists
-        if '/top/rgb_file' not in existing_df.columns:
+        if msgs_synced_file:
+            existing_df = pd.read_csv(msgs_synced_file)
+            
+            print(f"Ensuring image_path column has full paths in {msgs_synced_file}...")
+            existing_df['image_path'] = existing_df['image_path'].apply(lambda x: os.path.join(os.path.dirname(msgs_synced_file), x) if not os.path.isabs(x) else x)
+            existing_paths = set(existing_df['image_path'].values)
+
+            print('Adding /top/rgb_file column to msgs_synced.csv if missing...')
+            
             existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x))
             existing_df.to_csv(msgs_synced_file, index=False)
             print(f"Added 'top/rgb_file' column to {msgs_synced_file}")
