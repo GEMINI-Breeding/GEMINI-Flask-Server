@@ -3701,6 +3701,8 @@ if __name__ == "__main__":
     parser.add_argument('--flask_port', type=int, default=5000,required=False) # Default port is 5000
     parser.add_argument('--titiler_port', type=int, default=8091,required=False) # Default port is 8091
     parser.add_argument('--debug', type=bool, default=False, required=False)
+    parser.add_argument('--workers', type=int, default=4, required=False) 
+
     args = parser.parse_args()
 
     # Print the arguments to the console
