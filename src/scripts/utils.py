@@ -11,6 +11,7 @@ import pandas as pd
 import random
 import re
 import string
+from datetime import datetime, timezone
 
 def _copy_image(src_folder, dest_folder, image_name):
     
@@ -268,3 +269,45 @@ def generate_hash(trait, length=6):
     random_sequence = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
     hash_id = f"{trait}-{random_sequence}"
     return hash_id
+
+def normalize_path(path):
+    if not path:
+        return path
+    normalized = os.path.abspath(path)
+    if len(normalized) > 1 and normalized.endswith(os.sep):
+        normalized = normalized.rstrip(os.sep)
+    return normalized
+
+
+# Convert timestamps to Unix timestamps for KD tree matching
+def convert_to_unix_timestamp(timestamp_str):
+    try:
+        # Try different timestamp formats with optional timezone
+        formats = [
+            '%Y:%m:%d %H:%M:%S.%f %z',  # EXIF format with microseconds and timezone
+            '%Y:%m:%d %H:%M:%S %z',      # EXIF format with timezone
+            '%Y:%m:%d %H:%M:%S.%f',      # EXIF format with microseconds
+            '%Y:%m:%d %H:%M:%S',         # EXIF format
+            '%Y-%m-%d %H:%M:%S %z',      # Standard format with timezone
+            '%Y-%m-%d %H:%M:%S',         # Standard format
+            '%Y/%m/%d %H:%M:%S %z',      # Alternative format with timezone
+            '%Y/%m/%d %H:%M:%S',         # Alternative format
+        ]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(str(timestamp_str), fmt)
+                # If no timezone info, assume UTC
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except ValueError:
+                continue
+            except Exception as e:
+                print(f"Error parsing timestamp: {e}")
+        
+        # If no format works, try parsing as float (already Unix timestamp)
+        return float(timestamp_str)
+    except Exception as e:
+        print(f"Failed to convert timestamp: {e}")
+        return None
