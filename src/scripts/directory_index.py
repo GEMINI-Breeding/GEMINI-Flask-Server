@@ -236,24 +236,58 @@ class DirectoryIndexDict:
             self._log(f"Error in background refresh for {parent_path}: {e}")
             return False
         
-    def push(self, path_list):
+    def push(self, path_list, recursive=True):
+        """
+        Push paths to the database.
+        
+        Args:
+            path_list: Single path or list of paths to add
+            recursive: If True, also add all parent directories up to data_root_dir
+        """
         if not isinstance(path_list, list):
             path_list = [path_list]
 
-        for path in path_list:
-            # basename = os.path.basename(path)
-            parent_name = os.path.dirname(path)
-            record = {'path': path, 'is_directory': os.path.isdir(path)}
+        with self.db_lock:
+            for path in path_list:
+                path = normalize_path(path)
+                
+                if recursive:
+                    # Build list of all parent paths up to data_root_dir
+                    paths_to_add = []
+                    current = path
+                    
+                    while current and current != self.data_root_dir:
+                        paths_to_add.append(current)
+                        parent = os.path.dirname(current)
+                        if parent == current:  # Reached root
+                            break
+                        current = parent
+                    
+                    # Add paths from top to bottom (parent to child)
+                    for p in reversed(paths_to_add):
+                        self._push_single_path(p)
+                else:
+                    self._push_single_path(path)
 
-            if parent_name in self.db:
-                # Check if basename is 
-                dir_list = [p['path'] for p in self.db[parent_name]]
-                if path not in dir_list:
-                    # Append if needed
-                    self.db[parent_name].append(record)
-            else:
-                # Even parent path is not exist
-                self.db[parent_name] = [record]
+    def _push_single_path(self, path):
+        """
+        Add a single path to the database without recursion.
+        Should be called within db_lock context.
+        """
+        parent_name = os.path.dirname(path)
+        record = {'path': path, 'is_directory': os.path.isdir(path)}
+
+        if parent_name in self.db:
+            # Check if path already exists
+            dir_list = [p['path'] for p in self.db[parent_name]]
+            if path not in dir_list:
+                # Append if needed
+                self.db[parent_name].append(record)
+                self._log(f"Added {path} under {parent_name}")
+        else:
+            # Even parent path doesn't exist
+            self.db[parent_name] = [record]
+            self._log(f"Created new parent {parent_name} with child {path}")
                 
     def save_dict(self, filename):
         with self.db_lock:
@@ -286,7 +320,7 @@ if __name__ == "__main__":
     ]
 
 
-    # --- Test Dictionary-based DirectoryIndexDict ---
+    # --- Test DirectoryIndexDict (Dict) Timing Check ---
     print("=== DirectoryIndexDict (Dict) Timing Check ===")
     t2 = time.time()
     dir_dict = DirectoryIndexDict(verbose=False)
