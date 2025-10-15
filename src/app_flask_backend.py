@@ -791,6 +791,11 @@ def upload_files():
     if msgs_synced_file:
         existing_df = pd.read_csv(msgs_synced_file)
         
+        # TODO: read csv and update existing paths
+        # TODO: make sure image_path is full path (could initially be only filename)
+        existing_df['image_path'] = existing_df['image_path'].apply(lambda x: os.path.join(os.path.dirname(msgs_synced_file), x) if not os.path.isabs(x) else x)
+        existing_paths = set(existing_df['image_path'].values)
+        
         # check if 'top/rgb_file' column exists
         if '/top/rgb_file' not in existing_df.columns:
             existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x))
