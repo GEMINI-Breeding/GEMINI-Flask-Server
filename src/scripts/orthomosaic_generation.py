@@ -354,7 +354,23 @@ def run_odm(args):
                                   args.year, args.experiment, args.location, 
                                   args.population, args.date, args.platform, 
                                   args.sensor, 'Images')
-        print('Image Path: ', image_path)
+        
+        # IMPORTANT: Convert container paths to host paths for Docker-in-Docker
+        # Get host data root from environment variable (same as docker-compose mount)
+        host_data_root = os.getenv('REACT_APP_APP_DATA', os.path.expanduser('~/GEMINI-App-Data'))
+        # Expand ~ to absolute path if present
+        host_data_root = os.path.expanduser(host_data_root)
+        
+        # Replace container path with host path
+        container_data_root = args.data_root_dir
+        host_project_path = project_path.replace(container_data_root, host_data_root)
+        host_image_path = image_path.replace(container_data_root, host_data_root)
+        
+        print('Image Path (container):', image_path)
+        print('Image Path (host):', host_image_path)
+        print('Project Path (container):', project_path)
+        print('Project Path (host):', host_project_path)
+        
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
         with open(log_file, 'w') as f:
@@ -419,15 +435,15 @@ def run_odm(args):
             # Create a container name with safe characters only
             odm_container_name = f"ODM-{args.location}-{args.population}-{args.date}-{args.sensor}".replace(' ', '-')
 
-            # Create the command with security options and proper handling of paths with spaces
+            # Create the command with HOST paths for volume mounts
             docker_command = [
                 'docker', 'run',
                 '--name', odm_container_name,
                 '-i', '--rm',
                 '--security-opt=no-new-privileges',
-                '-v', f'{project_path}:/datasets:rw', 
-                '-v', f'{image_path}:/datasets/code/images:ro', # Limit volume mounts and 
-                '-v', '/etc/timezone:/etc/timezone:ro',         # make read-only where possible
+                '-v', f'{host_project_path}:/datasets:rw',  # Use HOST path
+                '-v', f'{host_image_path}:/datasets/code/images:ro',  # Use HOST path
+                '-v', '/etc/timezone:/etc/timezone:ro',
                 '-v', '/etc/localtime:/etc/localtime:ro'
             ]
             
