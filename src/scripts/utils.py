@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import os
 import shutil
-import platform
 import select
 import yaml
 from pathlib import Path
@@ -24,16 +23,26 @@ def _copy_image(src_folder, dest_folder, image_name):
 def check_nvidia_smi():
     '''
     Check if nvidia-smi is installed on the system.
-    Returns False automatically on macOS as it doesn't support NVIDIA GPUs.
+    Returns False automatically on macOS and ARM64 as they don't support NVIDIA GPUs.
     '''
-
+    import platform
+    
     # Check operating system first
-    if platform.system() == 'Darwin':  # 'Darwin' is the system name for macOS
+    if platform.system() == 'Darwin':  # macOS
+        return False
+    
+    # Check if running on ARM64 (Apple Silicon, AWS Graviton, etc.)
+    machine = platform.machine().lower()
+    if machine in ('aarch64', 'arm64'):
         return False
         
-    # For other systems, check using docker nvidia-smi
+    # For x86_64 systems, check using docker nvidia-smi
     try:
-        output = subprocess.check_output(['docker', 'run', '--rm', '--gpus', 'all', 'nvidia/cuda:11.0.3-base', 'nvidia-smi'])
+        output = subprocess.check_output(
+            ['docker', 'run', '--rm', '--gpus', 'all', 'nvidia/cuda:11.0.3-base', 'nvidia-smi'],
+            timeout=10,
+            stderr=subprocess.DEVNULL
+        )
         if 'NVIDIA-SMI' in output.decode('utf-8'):
             return True
         else:

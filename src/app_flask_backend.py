@@ -10,7 +10,6 @@ import csv
 import shutil
 import traceback
 import tempfile
-import torch
 import argparse
 import requests
 from multiprocessing import active_children, Process
