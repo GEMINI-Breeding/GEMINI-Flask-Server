@@ -234,7 +234,7 @@ def apply_nms(predictions, iou_threshold=0.5):
     return final_predictions
 
 
-def create_traits_geojson(predictions_df, data_root_dir, year, experiment, location, population, date, platform, sensor, agrowstitch_dir):
+def create_traits_geojson(predictions_df, data_root_dir, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, plot_filter_enabled=False, selected_populations=None, selected_columns=None, selected_rows=None):
     """
     Create a GeoJSON file with detection counts per plot for integration with the stats/map tabs
     
@@ -247,12 +247,24 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
         str: Path to created GeoJSON file
     """
     try:
+        # Initialize default values for filtering parameters
+        if selected_populations is None:
+            selected_populations = []
+        if selected_columns is None:
+            selected_columns = []
+        if selected_rows is None:
+            selected_rows = []
+        
         print(f"DEBUG: Starting create_traits_geojson with parameters:")
         print(f"  data_root_dir: {data_root_dir}")
         print(f"  year: {year}, experiment: {experiment}, location: {location}")
         print(f"  population: {population}, date: {date}, platform: {platform}, sensor: {sensor}")
         print(f"  agrowstitch_dir: {agrowstitch_dir}")
         print(f"  predictions_df shape: {predictions_df.shape}")
+        print(f"  plot_filter_enabled: {plot_filter_enabled}")
+        print(f"  selected_populations: {selected_populations}")
+        print(f"  selected_columns: {selected_columns}")
+        print(f"  selected_rows: {selected_rows}")
         
         # Look for existing plot boundary GeoJSON first
         plot_boundary_geojson = os.path.join(
@@ -354,6 +366,48 @@ def create_traits_geojson(predictions_df, data_root_dir, year, experiment, locat
                 print("WARNING: No labeled plots found, using all plots")
         else:
             print("WARNING: No accession column found, using all plots")
+        
+        # Apply custom plot filtering if enabled
+        if plot_filter_enabled and (selected_populations or selected_columns or selected_rows):
+            print(f"DEBUG: Applying plot filtering - populations: {selected_populations}, columns: {selected_columns}, rows: {selected_rows}")
+            original_count = len(plot_gdf)
+            
+            # Apply population filter
+            if selected_populations:
+                if 'population' in plot_gdf.columns:
+                    plot_gdf = plot_gdf[plot_gdf['population'].isin(selected_populations)]
+                    print(f"DEBUG: After population filter: {len(plot_gdf)} plots")
+                else:
+                    print("WARNING: Population filtering requested but no 'population' column found")
+            
+            # Apply column filter
+            if selected_columns:
+                if 'column' in plot_gdf.columns:
+                    # Convert to string for comparison in case columns are numeric
+                    plot_gdf = plot_gdf[plot_gdf['column'].astype(str).isin([str(c) for c in selected_columns])]
+                    print(f"DEBUG: After column filter: {len(plot_gdf)} plots")
+                else:
+                    print("WARNING: Column filtering requested but no 'column' column found")
+            
+            # Apply row filter
+            if selected_rows:
+                if 'row' in plot_gdf.columns:
+                    # Convert to string for comparison in case rows are numeric
+                    plot_gdf = plot_gdf[plot_gdf['row'].astype(str).isin([str(r) for r in selected_rows])]
+                    print(f"DEBUG: After row filter: {len(plot_gdf)} plots")
+                else:
+                    print("WARNING: Row filtering requested but no 'row' column found")
+            
+            print(f"DEBUG: Plot filtering complete - reduced from {original_count} to {len(plot_gdf)} plots")
+            
+            if len(plot_gdf) == 0:
+                print("ERROR: Plot filtering resulted in no plots to process")
+                inference_status.update({
+                    'running': False,
+                    'error': 'Plot filtering resulted in no plots to process. Please adjust your filter criteria.',
+                    'completed': True
+                })
+                return
         
         # Aggregate predictions by plot, skipping rows with missing plot_label or accession
         if not predictions_df.empty:
@@ -600,13 +654,26 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
             platform = data.get('platform')
             sensor = data.get('sensor')
             agrowstitch_dir = data.get('agrowstitchDir')
+            
+            # Extract plot filtering parameters
+            plot_filter_enabled = data.get('plotFilterEnabled', False)
+            selected_populations = data.get('selectedPopulations', [])
+            selected_columns = data.get('selectedColumns', [])
+            selected_rows = data.get('selectedRows', [])
+            
+            # Extract confidence threshold parameter (optional)
+            confidence_threshold = data.get('confidence_threshold', None)  # Expects value between 0.01 and 0.99, or None
+            
             print(f"[DEBUG] Params year={year} experiment={experiment} location={location} population={population} date={date} platform={platform} sensor={sensor} agrowstitchDir={agrowstitch_dir}")
+            print(f"[DEBUG] Plot filtering: enabled={plot_filter_enabled}, populations={selected_populations}, columns={selected_columns}, rows={selected_rows}")
+            print(f"[DEBUG] Confidence threshold: {confidence_threshold}")
+            
             if not all([api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir]):
                 print("[ERROR] Missing required parameters for inference start")
                 return jsonify({'error': 'Missing required parameters'}), 400
             inference_status.update({'running': True,'progress': 0,'message': 'Initializing inference...','error': None,'results': None,'completed': False})
             print("[DEBUG] Spawning inference worker thread")
-            thread = threading.Thread(target=run_roboflow_inference_worker, args=(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task, include_masks), daemon=True)
+            thread = threading.Thread(target=run_roboflow_inference_worker, args=(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task, include_masks, plot_filter_enabled, selected_populations, selected_columns, selected_rows, confidence_threshold), daemon=True)
             thread.start()
             return jsonify({'message': 'Inference started successfully'}), 200
         except Exception as e:
@@ -615,9 +682,16 @@ def run_roboflow_inference_endpoint(file_app, data_root_dir):
             return jsonify({'error': str(e)}), 500
 
 
-def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task='detection', include_masks=True):
+def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, location, population, date, platform, sensor, agrowstitch_dir, data_root_dir, model_task='detection', include_masks=True, plot_filter_enabled=False, selected_populations=None, selected_columns=None, selected_rows=None, confidence_threshold=None):
     """Worker function to run Roboflow inference in background (supports detection & segmentation)."""
     global inference_status
+    
+    if selected_populations is None:
+        selected_populations = []
+    if selected_columns is None:
+        selected_columns = []
+    if selected_rows is None:
+        selected_rows = []
     try:
         inference_status['message'] = 'Loading plot images...'
         inference_status['progress'] = 10
@@ -734,10 +808,18 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
                         inference_status['message'] = f'Plot {plot_index} crop {j + 1}/{len(crops)}'
                         temp_dirs.add(crop_info['temp_dir'])
                         print(f"[DEBUG] Inference on crop {j+1}/{len(crops)} path={crop_info['crop_path']} offsets=({crop_info['x_offset']},{crop_info['y_offset']}) size=({crop_info['width']}x{crop_info['height']})")
-                        custom_configuration = InferenceConfiguration(confidence_threshold=0.5) # adjust as needed / set automatically in future
+                        
                         try:
-                            with client.use_configuration(custom_configuration):
+                            # Use custom configuration only if confidence threshold is specified
+                            if confidence_threshold is not None:
+                                custom_configuration = InferenceConfiguration(confidence_threshold=confidence_threshold)
+                                with client.use_configuration(custom_configuration):
+                                    result = client.infer(crop_info['crop_path'], model_id=model_id)
+                                print(f"[DEBUG] Using custom confidence threshold: {confidence_threshold}")
+                            else:
+                                # Use Roboflow's optimal default confidence threshold
                                 result = client.infer(crop_info['crop_path'], model_id=model_id)
+                                print(f"[DEBUG] Using Roboflow's default confidence threshold")
                         except Exception as infer_e:
                             print(f"[ERROR] client.infer failed plot={plot_index} crop={j+1}: {type(infer_e).__name__}: {infer_e}")
                             if 'docker' in str(infer_e).lower():
@@ -853,7 +935,8 @@ def run_roboflow_inference_worker(api_url, api_key, model_id, year, experiment, 
             inference_status['message'] = 'Creating traits GeoJSON...'
             geojson_path = create_traits_geojson(
                 predictions_df, data_root_dir, year, experiment, location, 
-                population, date, platform, sensor, agrowstitch_dir
+                population, date, platform, sensor, agrowstitch_dir,
+                plot_filter_enabled, selected_populations, selected_columns, selected_rows
             )
             
             # Prepare results summary
@@ -1306,6 +1389,354 @@ def download_inference_csv_endpoint(file_app):
             return jsonify({'error': str(e)}), 500
 
 
+def get_plot_boundary_info_endpoint(file_app, data_root_dir):
+    """
+    Get plot boundary information for filtering options
+    """
+    @file_app.route('/get_plot_boundary_info', methods=['POST'])
+    def get_plot_boundary_info():
+        try:
+            data = request.json
+            year = data.get('year')
+            experiment = data.get('experiment')
+            location = data.get('location')
+            population = data.get('population')
+            date = data.get('date')
+            platform = data.get('platform')
+            sensor = data.get('sensor')
+            
+            if not all([year, experiment, location, population]):
+                return jsonify({'error': 'Missing required parameters (year, experiment, location, population)'}), 400
+            
+            plot_gdf = None
+            source_file = None
+            
+            # First, try to find an existing traits GeoJSON file (if inference has been run before)
+            if date and platform and sensor:
+                plots_dir = os.path.join(
+                    data_root_dir, 'Processed', year, experiment, location, population,
+                    date, platform, sensor
+                )
+                
+                if os.path.exists(plots_dir):
+                    # Look for AgRowStitch directories
+                    agrowstitch_dirs = [d for d in os.listdir(plots_dir) if d.startswith('AgRowStitch_v')]
+                    
+                    # Try to find an existing traits GeoJSON file
+                    for agr_dir in sorted(agrowstitch_dirs, reverse=True):  # Try newest version first
+                        traits_file = os.path.join(plots_dir, agr_dir, f"{date}-{platform}-{sensor}-{agr_dir}-Traits-WGS84.geojson")
+                        if os.path.exists(traits_file):
+                            try:
+                                plot_gdf = gpd.read_file(traits_file)
+                                source_file = traits_file
+                                print(f"DEBUG: Found traits file for plot boundary info: {traits_file}")
+                                break
+                            except Exception as e:
+                                print(f"DEBUG: Failed to read traits file {traits_file}: {e}")
+                                continue
+            
+            # If no traits file found, try the standard plot boundary GeoJSON
+            if plot_gdf is None:
+                plot_boundary_geojson = os.path.join(
+                    data_root_dir, 'Intermediate', year, experiment, location, population, 'Plot-Boundary-WGS84.geojson'
+                )
+                
+                if os.path.exists(plot_boundary_geojson):
+                    try:
+                        plot_gdf = gpd.read_file(plot_boundary_geojson)
+                        source_file = plot_boundary_geojson
+                        print(f"DEBUG: Using plot boundary GeoJSON: {plot_boundary_geojson}")
+                    except Exception as e:
+                        print(f"DEBUG: Failed to read plot boundary file {plot_boundary_geojson}: {e}")
+            
+            # If still no data, try plot_borders.csv as fallback
+            if plot_gdf is None:
+                plot_borders_csv = os.path.join(
+                    data_root_dir, "Raw", year, experiment, location, population, "plot_borders.csv"
+                )
+                
+                if os.path.exists(plot_borders_csv):
+                    try:
+                        borders_df = pd.read_csv(plot_borders_csv)
+                        print(f"DEBUG: Using plot borders CSV as fallback: {plot_borders_csv}")
+                        print(f"DEBUG: CSV columns: {list(borders_df.columns)}")
+                        
+                        # Create a simple GeoDataFrame structure for extracting filter options
+                        # Map common column variations
+                        column_mapping = {
+                            'Plot': 'plot',
+                            'Accession': 'accession', 
+                            'Population': 'population',
+                            'Row': 'row',
+                            'Column': 'column'
+                        }
+                        
+                        # Normalize column names
+                        for old_name, new_name in column_mapping.items():
+                            if old_name in borders_df.columns and new_name not in borders_df.columns:
+                                borders_df[new_name] = borders_df[old_name]
+                        
+                        # Add population if not present
+                        if 'population' not in borders_df.columns:
+                            borders_df['population'] = population
+                        
+                        plot_gdf = gpd.GeoDataFrame(borders_df)
+                        source_file = plot_borders_csv
+                        
+                    except Exception as e:
+                        print(f"DEBUG: Failed to read plot borders CSV {plot_borders_csv}: {e}")
+            
+            if plot_gdf is None:
+                return jsonify({
+                    'populations': [],
+                    'columns': [],
+                    'rows': [],
+                    'total_plots': 0,
+                    'message': 'No plot boundary data found. Please ensure plot_borders.csv exists in the Raw data directory.'
+                }), 200
+            
+            # Extract unique values for filtering
+            populations = []
+            columns = []
+            rows = []
+            
+            print(f"DEBUG: Plot data columns: {list(plot_gdf.columns)}")
+            
+            if 'population' in plot_gdf.columns:
+                populations = sorted([str(x) for x in plot_gdf['population'].dropna().unique() if str(x) != 'nan'])
+            
+            if 'column' in plot_gdf.columns:
+                columns = sorted([str(x) for x in plot_gdf['column'].dropna().unique() if str(x) != 'nan'])
+            elif 'Column' in plot_gdf.columns:
+                columns = sorted([str(x) for x in plot_gdf['Column'].dropna().unique() if str(x) != 'nan'])
+            
+            if 'row' in plot_gdf.columns:
+                rows = sorted([str(x) for x in plot_gdf['row'].dropna().unique() if str(x) != 'nan'])
+            elif 'Row' in plot_gdf.columns:
+                rows = sorted([str(x) for x in plot_gdf['Row'].dropna().unique() if str(x) != 'nan'])
+            
+            print(f"DEBUG: Extracted filtering options - populations: {populations}, columns: {columns}, rows: {rows}")
+            
+            return jsonify({
+                'populations': populations,
+                'columns': columns,
+                'rows': rows,
+                'total_plots': len(plot_gdf),
+                'source_file': source_file,
+                'message': f'Plot boundary data loaded from {source_file.split("/")[-1] if source_file else "unknown"}'
+            }), 200
+            
+        except Exception as e:
+            print(f"Error getting plot boundary info: {e}")
+            return jsonify({'error': str(e)}), 500
+
+
+def update_traits_confidence_threshold_endpoint(file_app, data_root_dir):
+    """
+    Update trait counts in GeoJSON based on new confidence threshold
+    """
+    @file_app.route('/update_traits_confidence_threshold', methods=['POST'])
+    def update_traits_confidence_threshold():
+        try:
+            data = request.json
+            year = data.get('year')
+            experiment = data.get('experiment') 
+            location = data.get('location')
+            population = data.get('population')
+            date = data.get('date')
+            platform = data.get('platform')
+            sensor = data.get('sensor')
+            agrowstitch_version = data.get('agrowstitch_version')
+            orthomosaic = data.get('orthomosaic')
+            confidence_threshold = float(data.get('confidence_threshold', 0.5))
+            model_task = data.get('model_task', 'detection')
+            
+            version_identifier = orthomosaic if orthomosaic else agrowstitch_version
+            
+            if not all([year, experiment, location, population, date, version_identifier]):
+                return jsonify({'error': 'Missing required parameters'}), 400
+            
+            # Find the predictions CSV file
+            csv_path = None
+            if version_identifier == 'Plot_Images':
+                plot_images_dir = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date)
+                
+                if model_task == 'segmentation':
+                    primary_filename = f"{date}_Plot_Images_roboflow_predictions_segmentation.csv"
+                else:
+                    primary_filename = f"{date}_Plot_Images_roboflow_predictions_detection.csv"
+                
+                primary_path = os.path.join(plot_images_dir, primary_filename)
+                if os.path.exists(primary_path):
+                    csv_path = primary_path
+                else:
+                    fallback_filename = f"{date}_Plot_Images_roboflow_predictions.csv"
+                    fallback_path = os.path.join(plot_images_dir, fallback_filename)
+                    if os.path.exists(fallback_path):
+                        csv_path = fallback_path
+            else:
+                processed_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor)
+                
+                if model_task == 'segmentation':
+                    primary_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions_segmentation.csv"
+                else:
+                    primary_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions_detection.csv"
+                
+                primary_path = os.path.join(processed_dir, primary_filename)
+                if os.path.exists(primary_path):
+                    csv_path = primary_path
+                else:
+                    fallback_filename = f"{date}_{platform}_{sensor}_{version_identifier}_roboflow_predictions.csv"
+                    fallback_path = os.path.join(processed_dir, fallback_filename)
+                    if os.path.exists(fallback_path):
+                        csv_path = fallback_path
+            
+            if not csv_path or not os.path.exists(csv_path):
+                return jsonify({'error': 'Inference results CSV not found'}), 404
+            
+            # Find the traits GeoJSON file
+            geojson_path = None
+            if version_identifier == 'Plot_Images':
+                output_dir = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date)
+                geojson_filename = f"{date}-Plot_Images-Traits-WGS84.geojson"
+            else:
+                output_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor, version_identifier)
+                geojson_filename = f"{date}-{platform}-{sensor}-{version_identifier}-Traits-WGS84.geojson"
+            
+            geojson_path = os.path.join(output_dir, geojson_filename)
+            
+            if not os.path.exists(geojson_path):
+                return jsonify({'error': 'Traits GeoJSON file not found'}), 404
+            
+            # Create backup of original GeoJSON if it doesn't exist
+            backup_path = geojson_path.replace('.geojson', '_original_backup.geojson')
+            if not os.path.exists(backup_path):
+                import shutil
+                shutil.copy2(geojson_path, backup_path)
+            
+            # Load predictions and filter by confidence threshold
+            predictions_df = pd.read_csv(csv_path)
+            filtered_predictions = predictions_df[predictions_df['confidence'] >= confidence_threshold]
+            
+            # Load existing traits GeoJSON
+            traits_gdf = gpd.read_file(geojson_path)
+            
+            # Get model_id from predictions
+            model_id = filtered_predictions['model_id'].iloc[0] if 'model_id' in filtered_predictions.columns and not filtered_predictions['model_id'].isna().all() else 'unknown'
+            
+            # Calculate new class counts based on filtered predictions
+            if not filtered_predictions.empty:
+                # Use the same normalization logic as create_traits_geojson
+                def normalize_plot_label(val):
+                    if pd.isna(val):
+                        return None
+                    sval = str(val).strip()
+                    if sval.endswith('.0'):
+                        sval = sval[:-2]
+                    return sval
+                
+                # Group predictions by plot and class to get new counts
+                class_counts_by_plot = {}
+                
+                for plot_label in filtered_predictions['plot_label'].unique():
+                    if pd.isna(plot_label):
+                        continue
+                    
+                    # Normalize the plot label for consistent matching
+                    normalized_label = normalize_plot_label(plot_label)
+                    if not normalized_label:
+                        continue
+                        
+                    plot_preds = filtered_predictions[filtered_predictions['plot_label'] == plot_label]
+                    class_counts_by_plot[normalized_label] = plot_preds['class'].value_counts().to_dict()
+                
+                # Update traits GeoJSON with new counts
+                # First, reset all detection columns to 0
+                detection_columns = [col for col in traits_gdf.columns if '/' in col and model_id in col]
+                for col in detection_columns:
+                    traits_gdf[col] = 0
+                
+                # Update with new counts
+                for idx, row in traits_gdf.iterrows():
+                    plot_val = normalize_plot_label(row.get('plot', ''))
+                    
+                    if plot_val and plot_val in class_counts_by_plot:
+                        for class_name, count in class_counts_by_plot[plot_val].items():
+                            col_name = f"{model_id}/{class_name}"
+                            if col_name in traits_gdf.columns:
+                                traits_gdf.loc[idx, col_name] = count
+            else:
+                # No predictions meet threshold - set all counts to 0
+                detection_columns = [col for col in traits_gdf.columns if '/' in col and model_id in col]
+                for col in detection_columns:
+                    traits_gdf[col] = 0
+            
+            # Save updated GeoJSON
+            traits_gdf.to_file(geojson_path, driver='GeoJSON')
+            
+            return jsonify({
+                'success': True,
+                'message': f'Trait counts updated for confidence threshold {confidence_threshold:.0%}',
+                'updated_file': geojson_path
+            }), 200
+            
+        except Exception as e:
+            print(f"Error updating traits confidence threshold: {e}")
+            return jsonify({'error': str(e)}), 500
+
+
+def revert_traits_to_original_endpoint(file_app, data_root_dir):
+    """
+    Revert trait counts to original values before confidence threshold updates
+    """
+    @file_app.route('/revert_traits_to_original', methods=['POST'])
+    def revert_traits_to_original():
+        try:
+            data = request.json
+            year = data.get('year')
+            experiment = data.get('experiment')
+            location = data.get('location') 
+            population = data.get('population')
+            date = data.get('date')
+            platform = data.get('platform')
+            sensor = data.get('sensor')
+            agrowstitch_version = data.get('agrowstitch_version')
+            orthomosaic = data.get('orthomosaic')
+            
+            version_identifier = orthomosaic if orthomosaic else agrowstitch_version
+            
+            if not all([year, experiment, location, population, date, version_identifier]):
+                return jsonify({'error': 'Missing required parameters'}), 400
+            
+            # Find the traits GeoJSON file and backup
+            if version_identifier == 'Plot_Images':
+                output_dir = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population, 'plot_images', date)
+                geojson_filename = f"{date}-Plot_Images-Traits-WGS84.geojson"
+            else:
+                output_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform, sensor, version_identifier)
+                geojson_filename = f"{date}-{platform}-{sensor}-{version_identifier}-Traits-WGS84.geojson"
+            
+            geojson_path = os.path.join(output_dir, geojson_filename)
+            backup_path = geojson_path.replace('.geojson', '_original_backup.geojson')
+            
+            if not os.path.exists(backup_path):
+                return jsonify({'error': 'Original backup file not found'}), 404
+            
+            # Restore from backup
+            import shutil
+            shutil.copy2(backup_path, geojson_path)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Trait counts reverted to original values',
+                'restored_file': geojson_path
+            }), 200
+            
+        except Exception as e:
+            print(f"Error reverting traits to original: {e}")
+            return jsonify({'error': str(e)}), 500
+
+
 def register_inference_routes(file_app, data_root_dir):
     run_roboflow_inference_endpoint(file_app, data_root_dir)
     get_inference_progress_endpoint(file_app)
@@ -1313,3 +1744,6 @@ def register_inference_routes(file_app, data_root_dir):
     get_plot_predictions_endpoint(file_app, data_root_dir)
     delete_inference_results_endpoint(file_app)
     download_inference_csv_endpoint(file_app)
+    get_plot_boundary_info_endpoint(file_app, data_root_dir)
+    update_traits_confidence_threshold_endpoint(file_app, data_root_dir)
+    revert_traits_to_original_endpoint(file_app, data_root_dir)
