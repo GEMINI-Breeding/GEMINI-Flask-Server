@@ -229,47 +229,44 @@ def image_selection(data_root_dir, image_folder, files, df_msgs_synced,
     selected_images = []
     len_files = len(files)
     print(f"Selecting images out of {len_files} files in {image_folder}...")
-    for filename in tqdm(files):
+    img_width = 0
+    img_height = 0
+    for i, filename in enumerate(tqdm(files)):
         image_path = os.path.join(image_folder, filename)
         normalized_filename = f'/top/{filename}'
         
-        # try:
-        if image_path in image_names_in_df:
-            # print('Using image_path')
-            index = image_names_in_df.index(image_path)
-            # Use the DataFrame row at this index
-            msg = df_msgs_synced.iloc[index].to_dict()
-        elif normalized_filename in image_names_in_df:
-            # print('Using normalized filename')
-            index = image_names_in_df.index(normalized_filename)
-            msg = df_msgs_synced.iloc[index].to_dict()
-            
-            # get naturalWidth and naturalHeight from the file
-            with Image.open(image_path) as img:
-                msg['naturalWidth'] = img.width
-                msg['naturalHeight'] = img.height
-            
-        elif check_exif:
+        if check_exif:
             msg = get_image_exif(image_path)
             # If we got valid EXIF data, add it to the DataFrame and CSV
             if msg is not None:
                 # Add to our in-memory DataFrame
                 df_msgs_synced = pd.concat([df_msgs_synced, pd.DataFrame([msg])], ignore_index=True)
                 # Add to image_names_in_df list for subsequent lookups
-                image_names_in_df.append(filename)             
+                image_names_in_df.append(filename)
         else:
-            print(f"Skipping {filename}: no EXIF data found")
-            continue
-        # except (ValueError, IndexError) as e:
-        #     print(f"Error finding index for {filename}: {e}")
-        #     msg = get_image_exif(image_path)
-        #     # If we got valid EXIF data from the fallback, save it too
-        #     if msg is not None:
-        #         df_msgs_synced = pd.concat([df_msgs_synced, pd.DataFrame([msg])], ignore_index=True)
-        #         image_names_in_df.append(filename)
-        #     else:
-        #         print(f"Skipping {filename}: no EXIF data found")
-        #         continue
+            if image_path in image_names_in_df:
+                # print('Using image_path')
+                index = image_names_in_df.index(image_path)
+            elif normalized_filename in image_names_in_df:
+                # print('Using normalized filename')
+                index = image_names_in_df.index(normalized_filename)
+
+            
+            if i % (max(len_files // 10, 1)) == 0:
+                # get naturalWidth and naturalHeight from the file
+                with Image.open(image_path) as img:
+                    if img_height > 0 and img_width > 0:
+                        if abs(img_height - img.height) > 0 or abs(img_height - img.height) > 0:
+                            print("[WARN] Image size inconsistent")
+
+                    img_height = img.height
+                    img_width = img.width
+
+            # Use .at for scalar assignment (faster and correct)
+            df_msgs_synced.at[index, 'naturalWidth'] = img_width
+            df_msgs_synced.at[index, 'naturalHeight'] = img_height
+                
+            msg = df_msgs_synced.iloc[index].to_dict()
 
         if msg is not None:
             if len(gcp_locations) > 0 and (msg['lat'] is not None) and (msg['lon'] is not None):

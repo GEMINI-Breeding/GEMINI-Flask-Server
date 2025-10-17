@@ -10,11 +10,10 @@ import stat
 
 from utils import normalize_path
 class DirectoryIndexDict:
-    def __init__(self, dict_path, verbose=True, exclude=['temp'], save_interval=60):
+    def __init__(self, dict_path, data_root_dir= None, verbose=True, exclude=['temp'], save_interval=60):
         self.verbose = verbose
         self.refresh_queue = Queue()
         self.queue_worker_running = False
-        self.processing_paths = set()
         self.processed_paths = {}  # path -> last processed timestamp
         self.completion_events = {}  # path -> threading.Event
         self.db = {}  # parent_path -> list of children
@@ -25,6 +24,40 @@ class DirectoryIndexDict:
         self._start_queue_worker()
         if self.dict_path:
             self._start_periodic_save_thread()
+
+        # Set data_root_dir to make the database in relative path
+        if data_root_dir is None:
+            data_root_dir = os.path.dirname(dict_path)
+        self.data_root_dir = data_root_dir
+
+        # Run initial scan
+        self._log("Initial scan")
+        # Start recursive enqueue of directories for background processing
+        if self.data_root_dir and os.path.isdir(self.data_root_dir):
+            self._start_initial_recursive_scan()
+        
+    def _start_initial_recursive_scan(self):
+        """
+        Walk the data_root_dir and enqueue each directory for background indexing.
+        Runs in a daemon thread so it doesn't block init.
+        """
+        def worker():
+            root = self.data_root_dir
+            try:
+                for dirpath, dirnames, _ in os.walk(root):
+                    # filter out dot directories and excluded names in-place so walk won't descend into them
+                    dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in self.exclude]
+                    p = normalize_path(dirpath)
+                    # avoid duplicate enqueues by a quick check
+                    if not any(task == p for task in list(self.refresh_queue.queue)):
+                        self.refresh_queue.put(p)
+                self._log("Initial recursive enqueue complete")
+            except Exception as e:
+                self._log(f"Error during initial recursive scan: {e}")
+
+        t = Thread(target=worker, daemon=True)
+        t.start()
+        self._log("Started initial recursive scan thread")
 
     def _log(self, message):
         if self.verbose:
@@ -45,52 +78,52 @@ class DirectoryIndexDict:
                 if task is None:
                     self._log("Queue worker received stop signal")
                     break
+                
                 parent_path = normalize_path(task)
                 now = time.time()
-                # Skip if already processing
-                if parent_path in self.processing_paths:
-                    self.refresh_queue.task_done()
-                    continue
+                
                 # Skip if processed recently (within 300s)
                 if parent_path in self.processed_paths and now - self.processed_paths[parent_path] < 300:
                     self.refresh_queue.task_done()
-                    # Signal completion even if skipped
                     if parent_path in self.completion_events:
                         self.completion_events[parent_path].set()
                     continue
+                
                 self._log(f"Processing queued refresh for: {parent_path} (Queue size: {self.refresh_queue.qsize()})")
-                self.processing_paths.add(parent_path)
-                try:
-                    success = self._refresh_directory_sync(parent_path)
-                    if success:
-                        self.processed_paths[parent_path] = now
-                        self._log(f"Successfully processed: {parent_path}")
-                    else:
-                        self._log(f"Failed to process: {parent_path}")
-                    # Signal completion regardless of success/failure
-                    if parent_path in self.completion_events:
-                        self.completion_events[parent_path].set()
-                finally:
-                    self.processing_paths.discard(parent_path)
+                
+                # Process the directory
+                success = self._refresh_directory_sync(parent_path)
+                if success:
+                    self.processed_paths[parent_path] = now
+                    self._log(f"Successfully processed: {parent_path}")
+                else:
+                    self._log(f"Failed to process: {parent_path}")
+                
+                # Signal completion
+                if parent_path in self.completion_events:
+                    self.completion_events[parent_path].set()
+                
                 # Clean up old processed paths (keep only last hour)
                 old_paths = [path for path, timestamp in self.processed_paths.items()
                              if now - timestamp > 3600]
                 for path in old_paths:
                     del self.processed_paths[path]
+                
                 self.refresh_queue.task_done()
+                
             except Empty:
                 continue
             except Exception as e:
                 import traceback
                 self._log(f"Queue worker error: {type(e).__name__}: {str(e)}")
                 self._log(f"Traceback: {traceback.format_exc()}")
-                # Signal completion even on error
                 if 'parent_path' in locals() and parent_path in self.completion_events:
                     self.completion_events[parent_path].set()
                 try:
                     self.refresh_queue.task_done()
                 except Exception:
                     pass
+    
         self._log("Queue worker thread stopped")
 
     def _start_periodic_save_thread(self):
@@ -102,13 +135,9 @@ class DirectoryIndexDict:
         thread.start()
         self._log(f"Started periodic save thread every {self.save_interval} seconds")
 
-    def get_queue_size(self):
-        return self.refresh_queue.qsize()
-
     def get_processing_status(self):
         return {
             'queue_size': self.refresh_queue.qsize(),
-            'processing_paths': list(self.processing_paths),
             'processed_count': len(self.processed_paths)
         }
 
@@ -120,59 +149,37 @@ class DirectoryIndexDict:
             except:
                 break
         self.processed_paths.clear()
-        self.processing_paths.clear()
         for event in self.completion_events.values():
             event.set()
         self.completion_events.clear()
         self._log("Queue cleared and processed paths reset")
 
-    def close(self):
-        self._log("Shutting down DirectoryIndexDict...")
-        self.queue_worker_running = False
-        self.refresh_queue.put(None)
-        for event in self.completion_events.values():
-            event.set()
-        try:
-            self.refresh_queue.join()
-        except Exception as e:
-            self._log(f"Error joining queue: {e}")
-        self._log("DirectoryIndexDict shutdown complete")
-
     def get_children(self, parent_path, directories_only=True, wait_if_needed=False, timeout=300):
         """
         Get children immediately from dict and queue refresh if needed.
-        Returns tuple (children, is_fresh) where is_fresh indicates if data was recently updated.
         """
         parent_path = normalize_path(parent_path)
-        is_fresh = False
 
         # 1. Immediately return current data from dictionary
-        with self.db_lock:
-            items = self.db.get(parent_path, [])
-            items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
-            if directories_only:
-                children = [os.path.basename(p['path']) for p in items if p['is_directory']]
-            else:
-                children = [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
+        children = self._get_children_from_db(parent_path, directories_only)
 
         # 2. Check if refresh is needed
         now = time.time()
         needs_refresh = False
 
         # Check current state
-        is_being_processed = parent_path in self.processing_paths
         is_in_queue = any(task == parent_path for task in list(self.refresh_queue.queue))
         is_stale = parent_path not in self.processed_paths or now - self.processed_paths[parent_path] > 300
 
         # Determine if refresh is needed
         if not children and os.path.exists(parent_path):
-            needs_refresh = not (is_being_processed or is_in_queue)
+            needs_refresh = not is_in_queue
         elif is_stale:
-            needs_refresh = not (is_being_processed or is_in_queue)
+            needs_refresh = not is_in_queue
 
         # 3. Queue refresh if needed
         if needs_refresh:
-            self._log(f"Queuing background refresh for {parent_path} (In process: {is_being_processed}, In queue: {is_in_queue})")
+            self._log(f"Queuing background refresh for {parent_path} (In queue: {is_in_queue})")
             self.refresh_queue.put(parent_path)
             
             # Only wait if explicitly requested
@@ -182,20 +189,21 @@ class DirectoryIndexDict:
                 try:
                     if completion_event.wait(timeout=timeout):
                         # Refresh complete, get updated data
-                        with self.db_lock:
-                            items = self.db.get(parent_path, [])
-                            items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
-                            if directories_only:
-                                children = [os.path.basename(p['path']) for p in items if p['is_directory']]
-                            else:
-                                children = [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
-                        is_fresh = True
+                        children = self._get_children_from_db(parent_path, directories_only)
                 finally:
                     self.completion_events.pop(parent_path, None)
-        else:
-            is_fresh = parent_path in self.processed_paths and now - self.processed_paths[parent_path] < 300
 
         return children
+
+    def _get_children_from_db(self, parent_path, directories_only=True):
+        """Helper to extract children from db."""
+        with self.db_lock:
+            items = self.db.get(parent_path, [])
+            items = [p for p in items if isinstance(p, dict) and 'path' in p and 'is_directory' in p]
+            if directories_only:
+                return [os.path.basename(p['path']) for p in items if p['is_directory']]
+            else:
+                return [{'name': os.path.basename(p['path']), 'is_directory': p['is_directory']} for p in items]
 
     def _refresh_directory_sync(self, parent_path):
         parent_path = normalize_path(parent_path)
@@ -228,24 +236,58 @@ class DirectoryIndexDict:
             self._log(f"Error in background refresh for {parent_path}: {e}")
             return False
         
-    def push(self, path_list):
+    def push(self, path_list, recursive=True):
+        """
+        Push paths to the database.
+        
+        Args:
+            path_list: Single path or list of paths to add
+            recursive: If True, also add all parent directories up to data_root_dir
+        """
         if not isinstance(path_list, list):
             path_list = [path_list]
 
-        for path in path_list:
-            need_to_push = True
-            basename = os.path.basename(path)
-            parent_name = os.path.dirname(path)
-            if parent_name in self.db:
-                dir_list = [p['path'] for p in self.db[parent_name]]
-                if basename in dir_list:
-                    need_to_push = False # Already exists
+        with self.db_lock:
+            for path in path_list:
+                path = normalize_path(path)
+                
+                if recursive:
+                    # Build list of all parent paths up to data_root_dir
+                    paths_to_add = []
+                    current = path
+                    
+                    while current and current != self.data_root_dir:
+                        paths_to_add.append(current)
+                        parent = os.path.dirname(current)
+                        if parent == current:  # Reached root
+                            break
+                        current = parent
+                    
+                    # Add paths from top to bottom (parent to child)
+                    for p in reversed(paths_to_add):
+                        self._push_single_path(p)
                 else:
-                    pass
+                    self._push_single_path(path)
 
-            if need_to_push:
+    def _push_single_path(self, path):
+        """
+        Add a single path to the database without recursion.
+        Should be called within db_lock context.
+        """
+        parent_name = os.path.dirname(path)
+        record = {'path': path, 'is_directory': os.path.isdir(path)}
+
+        if parent_name in self.db:
+            # Check if path already exists
+            dir_list = [p['path'] for p in self.db[parent_name]]
+            if path not in dir_list:
                 # Append if needed
-                self.db[parent_name].append({'path': path, 'is_directory': os.path.isdir(path)})
+                self.db[parent_name].append(record)
+                self._log(f"Added {path} under {parent_name}")
+        else:
+            # Even parent path doesn't exist
+            self.db[parent_name] = [record]
+            self._log(f"Created new parent {parent_name} with child {path}")
                 
     def save_dict(self, filename):
         with self.db_lock:
@@ -278,7 +320,7 @@ if __name__ == "__main__":
     ]
 
 
-    # --- Test Dictionary-based DirectoryIndexDict ---
+    # --- Test DirectoryIndexDict (Dict) Timing Check ---
     print("=== DirectoryIndexDict (Dict) Timing Check ===")
     t2 = time.time()
     dir_dict = DirectoryIndexDict(verbose=False)
