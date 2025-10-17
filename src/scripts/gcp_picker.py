@@ -209,7 +209,7 @@ def process_exif_data_async(file_paths, data_type, msgs_synced_file, existing_df
         existing_df = pd.read_csv(msgs_synced_file)
         
         # only apply basename if row is empty
-        existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x) if pd.isna(x) else x)
+        existing_df['/top/rgb_file'] = existing_df['image_path'].apply(lambda x: os.path.basename(x))
         existing_df.to_csv(msgs_synced_file, index=False)
         
     # check if image has any exif data

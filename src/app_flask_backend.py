@@ -1723,11 +1723,29 @@ def run_stitch_endpoint():
             experiment, location, population,
             date, platform, sensor, "Images", "top"
         )
+        
+        # if image_path does not exist, remove 'top' from the path
+        if not os.path.exists(image_path):
+            image_path = os.path.join(
+                data_root_dir, "Raw", year,
+                experiment, location, population,
+                date, platform, sensor, "Images"
+            )
+            
         msgs_synced_path = os.path.join(
             data_root_dir, "Raw", year,
             experiment, location, population,
             date, platform, sensor, "Metadata", "msgs_synced.csv"
         )
+        
+        # if msgs_synced_path does not exist, remove 'Metadata' from the path
+        if not os.path.exists(msgs_synced_path):
+            msgs_synced_path = os.path.join(
+                data_root_dir, "Raw", year,
+                experiment, location, population,
+                date, platform, sensor, "msgs_synced.csv"
+            )
+            
         save_path = os.path.join(
             data_root_dir, "Processed", year,
             experiment, location, population,
@@ -1738,6 +1756,11 @@ def run_stitch_endpoint():
             experiment, location, population,
             date, platform, sensor, "Metadata", "top_calibration.json"
         )
+        
+        # if image_calibration does not exist, make it None
+        if not os.path.exists(image_calibration):
+            image_calibration = None
+            
         config_path = f"{AGROWSTITCH_PATH}/panorama_maker/config.yaml"
         stitched_path = os.path.join(os.path.dirname(image_path), "final_mosaics")
         temp_output = os.path.join(os.path.dirname(image_path), "top_output")

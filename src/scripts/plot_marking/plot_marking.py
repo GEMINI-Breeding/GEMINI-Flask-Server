@@ -17,7 +17,7 @@ def check_csv_integrity(csv_path):
     try:
         # Try to read with error detection
         df = pd.read_csv(csv_path, on_bad_lines='warn')
-        expected_cols = 33  # Expected number of columns based on header
+        expected_cols = 33  # Expected number of columns based on header # TODO: Sometimes not true
         
         # Check if we have the expected number of columns
         if len(df.columns) != expected_cols:
@@ -38,13 +38,28 @@ def check_csv_integrity(csv_path):
 def update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction=None, filter=False, shift_all=False, shift_amount=0, original_start_image_index=None):
     data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
     image_dir_path = os.path.join(data_root_dir_path, directory)
+    
     metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
     csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
     start_image_name = "/top/" + start_image_name
     end_image_name = "/top/" + end_image_name
-    if not os.path.exists(csv_path):
-        print(f"ERROR: Metadata CSV not found at {csv_path}")
-        return False
+    
+     # check if metadata directory exists
+    if not os.path.exists(metadata_dir):
+           
+        metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..')) # folder above Metadata
+        csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+        
+        start_image_name = start_image_name.replace('/top/', '')
+        end_image_name = end_image_name.replace('/top/', '')
+
+        if not os.path.exists(csv_path):
+            print(f"ERROR: CSV file not found at {csv_path}")
+            return False
+        
+    # if not os.path.exists(csv_path):
+    #     print(f"ERROR: Metadata CSV not found at {csv_path}")
+    #     return False
     
     # Check CSV integrity before processing
     is_valid, df = check_csv_integrity(csv_path)
@@ -62,8 +77,13 @@ def update_plot_index(directory, start_image_name, end_image_name, plot_index, c
     is_update = plot_index in df['plot_index'].values
     image_column = f'/{camera}/rgb_file'
     if image_column not in df.columns:
-        print(f"ERROR: Image column '{image_column}' not found in CSV")
-        return False
+        
+        image_column = '/top/rgb_file'  # Fallback to default column
+        
+        if image_column not in df.columns:
+            print(f"ERROR: Image column '{image_column}' not found in CSV")
+            return False
+        
     try:
         start_row_index = df.index[df[image_column] == start_image_name].tolist()[0]
         end_row_index = df.index[df[image_column] == end_image_name].tolist()[0]
@@ -241,13 +261,16 @@ def mark_plot():
     shift_amount = data.get('shift_amount', 0)
     original_start_image_index = data.get('original_start_image_index')
 
-    if not all([directory, start_image_name, end_image_name, plot_index is not None, camera]):
+    # if not all([directory, start_image_name, end_image_name, plot_index is not None, camera]):
+    if not all([directory, start_image_name, end_image_name, plot_index is not None]):
+        print(f"ERROR: Missing required parameters: {directory}, {start_image_name}, {end_image_name}, {plot_index}")
         return jsonify({"error": "Missing required parameters"}), 400
 
     success = update_plot_index(directory, start_image_name, end_image_name, plot_index, camera, stitch_direction, filter=False, shift_all=shift_all, shift_amount=shift_amount, original_start_image_index=original_start_image_index)
     if success:
         return jsonify({"status": "success", "message": f"Plot {plot_index} marked successfully."})
     else:
+        print(f"ERROR: Failed to mark plot {plot_index}")
         return jsonify({"error": "Failed to mark plot."}), 500
 
 @plot_marking_bp.route('/get_stitch_direction', methods=['POST'])
@@ -333,8 +356,33 @@ def get_image_plot_index():
     metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..', '..', 'Metadata'))
     csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
     
+    print(f"Looking for image '{image_name}' in directory '{directory}'")
+    # check if image_name is in directory
+    if not os.path.exists(image_dir_path):
+        return jsonify({'error': 'Image directory not found'}), 404
+    if not os.path.exists(os.path.join(image_dir_path, image_name)):
+        
+        # try another path (remove top/)
+        image_name = image_name.replace('/top/', '')
+        print(f"Looking for image '{image_name}' in directory '{directory}'")
+        
+        if not os.path.exists(os.path.join(image_dir_path, image_name)):
+            print(f"ERROR: Image file '{image_name}' not found in directory '{image_dir_path}'")
+            return jsonify({'error': 'Image file not found'}), 404
+
+    # check if metadata directory exists
+    if not os.path.exists(metadata_dir):
+           
+        metadata_dir = os.path.abspath(os.path.join(image_dir_path, '..')) # folder above Metadata
+        csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
+
+        if not os.path.exists(csv_path):
+            print(f"ERROR: CSV file not found at {csv_path}")
+            return jsonify({'error': 'CSV file not found in alternative location'}), 404
+            
     if not directory or not image_name:
-        return jsonify({'error': 'Missing directory or image name'}), 400
+        print(f"ERROR: Missing directory or image name: {directory}, {image_name}")
+        return jsonify({'error': f'Missing directory or image name: {directory}, {image_name}'}), 400
     
     if not os.path.exists(csv_path):
         print(f"ERROR: CSV file not found at {csv_path}")
@@ -357,6 +405,7 @@ def get_image_plot_index():
                 break
     
     if not image_col:
+        print(f"ERROR: Image column not found for image '{image_name}'")
         return jsonify({'plot_index': -1, 'lat': None, 'lon': None}), 200
 
     # Get the row for this image
@@ -419,6 +468,7 @@ def get_image_plot_index():
                 else:
                     pass
             except Exception as e:
+                print(f"ERROR: Failed to read plot_borders.csv: {e}")
                 pass
 
         return jsonify({
@@ -429,6 +479,7 @@ def get_image_plot_index():
             'accession': accession
         }), 200
     else:
+        print(f"ERROR: No data found for image '{image_name}'")
         return jsonify({'plot_index': -1, 'lat': None, 'lon': None, 'plot_name': None, 'accession': None}), 200
 
 @plot_marking_bp.route('/get_gps_data', methods=['POST'])
