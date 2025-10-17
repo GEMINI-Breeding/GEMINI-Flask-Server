@@ -21,16 +21,62 @@ POSSIBLE_CONDA_DIRS=(
     "/usr/local/anaconda3"
 )
 
-echo "Checking for Conda installations in the following paths:"
-for dir in "${POSSIBLE_CONDA_DIRS[@]}"; do
-    echo "  - $dir"
-    if [ -f "$dir/etc/profile.d/conda.sh" ]; then
-        echo "✅ Found Conda at: $dir"
-        source "$dir/etc/profile.d/conda.sh"
-        CONDA_FOUND=true
-        break
+# Auto-detect conda base path (works if conda is on PATH, or falls back to common locations)
+detect_conda_base() {
+    # If conda command is available prefer conda info --base
+    if command -v conda >/dev/null 2>&1; then
+        local base
+        base="$(conda info --base 2>/dev/null || true)"
+        [ -n "$base" ] && { printf '%s' "$base"; return 0; }
+
+        # Fallback: derive from the conda executable path
+        local conda_bin
+        conda_bin="$(command -v conda 2>/dev/null || true)"
+        if [ -n "$conda_bin" ]; then
+            if command -v python >/dev/null 2>&1; then
+                base="$(python - <<'PY' "$conda_bin"
+import os,sys
+print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))
+PY
+)"
+                [ -n "$base" ] && { printf '%s' "$base"; return 0; }
+            else
+                printf '%s' "$(dirname "$(dirname "$conda_bin")")"
+                return 0
+            fi
+        fi
     fi
-done
+
+    # Last resort: search common install locations
+    for d in "${POSSIBLE_CONDA_DIRS[@]}"; do
+        if [ -f "$d/etc/profile.d/conda.sh" ]; then
+            printf '%s' "$d"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Use the detector to find and initialize conda
+conda_base="$(detect_conda_base || true)"
+if [ -n "$conda_base" ]; then
+    echo "✅ Found Conda base at: $conda_base"
+    if [ -f "$conda_base/etc/profile.d/conda.sh" ]; then
+        # Preferred: source the conda.sh to enable activate/deactivate
+        source "$conda_base/etc/profile.d/conda.sh"
+        CONDA_FOUND=true
+    else
+        # Try the shell hook (works even when conda isn't initialized for this shell)
+        if command -v conda >/dev/null 2>&1; then
+            # try bash hook then zsh hook (no-op if unsupported)
+            eval "$(conda shell.bash hook 2>/dev/null || conda shell.zsh hook 2>/dev/null || true)" && CONDA_FOUND=true
+        fi
+    fi
+else
+    echo "❌ Could not auto-detect conda. Will fall back to manual list."
+    # ...existing fallback loop that checks POSSIBLE_CONDA_DIRS...
+fi
 
 # Function to check if environment needs updating
 check_environment_update() {
