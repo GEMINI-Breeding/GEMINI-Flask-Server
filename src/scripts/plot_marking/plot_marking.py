@@ -488,14 +488,11 @@ def get_image_plot_index():
 def get_gps_data():
     data = request.get_json()
     directory = data.get('directory')
-    print(directory)
     data_root_dir_path = os.path.abspath(current_app.config['DATA_ROOT_DIR'])
     dir_path = os.path.join(data_root_dir_path, directory)
     metadata_dir = os.path.abspath(os.path.join(dir_path, '..', '..', 'Metadata'))
     if not os.path.exists(metadata_dir):
         metadata_dir = os.path.abspath(os.path.join(dir_path, '..'))
-
-
     csv_path = os.path.join(metadata_dir, 'msgs_synced.csv')
 
     if not directory:
