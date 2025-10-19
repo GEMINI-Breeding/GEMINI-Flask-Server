@@ -357,19 +357,19 @@ def run_odm(args):
         
         # IMPORTANT: Convert container paths to host paths for Docker-in-Docker
         # Get host data root from environment variable (same as docker-compose mount)
-        host_data_root = os.getenv('REACT_APP_APP_DATA', os.path.expanduser('~/GEMINI-App-Data'))
-        # Expand ~ to absolute path if present
-        host_data_root = os.path.expanduser(host_data_root)
-        
+        host_data_root = os.getenv('REACT_APP_APP_DATA')
+
         # Replace container path with host path
         container_data_root = args.data_root_dir
-        host_project_path = project_path.replace(container_data_root, host_data_root)
-        host_image_path = image_path.replace(container_data_root, host_data_root)
+        if container_data_root != host_data_root:
+            print(f'[Docker Mode] Converting container paths to host paths')
+            host_project_path = project_path.replace(container_data_root, host_data_root)
+            host_image_path = image_path.replace(container_data_root, host_data_root)
         
-        print('Image Path (container):', image_path)
-        print('Image Path (host):', host_image_path)
-        print('Project Path (container):', project_path)
-        print('Project Path (host):', host_project_path)
+            print('Image Path (container):', image_path)
+            print('Image Path (host):', host_image_path)
+            print('Project Path (container):', project_path)
+            print('Project Path (host):', host_project_path)
         
         odm_options = ""
         log_file = os.path.join(project_path, 'code', 'logs.txt')
