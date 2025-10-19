@@ -10,7 +10,7 @@ cligj==0.7.2
 color-operations==0.1.1
 cramjam==2.6.2
 exceptiongroup==1.1.2
-fiona==1.9.4.post1
+#fiona==1.9.4.post1
 flask[async]==2.3.2
 geopandas==0.13.2
 h11==0.14.0

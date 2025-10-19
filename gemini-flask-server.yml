@@ -10,5 +10,6 @@ dependencies:
   - scipy
   - protobuf
   - exiftool
+  - fiona
   - pip:
       - -r requirements.txt
