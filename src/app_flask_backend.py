@@ -1480,7 +1480,7 @@ def query_images():
     middle_image = data['middleImage']
     platform = data['selectedPlatformQuery']
 
-    if platform == 'Drone':
+    if platform == 'Drone' or 'drone' in platform.lower():
         # Do Drone Image query
         filtered_images = query_drone_images(data,data_root_dir)
     else:
@@ -3491,32 +3491,60 @@ def split_orthomosaics():
         base_path = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
         intermediate_path = os.path.join(data_root_dir, 'Intermediate', year, experiment, location, population)
         
-        # Find orthomosaic
+        # Allow client to specify which orthomosaic to use (preferred).
+        ortho_type = data.get('ortho_type')
+        ortho_path_rel = data.get('ortho_path')
+        agrowstitch_plots = data.get('agrowstitch_plots', []) or []
+
         orthomosaic_path = None
         platform_name = None
         sensor_name = None
-        
-        for platform in os.listdir(base_path):
-            platform_path = os.path.join(base_path, platform)
-            if not os.path.isdir(platform_path):
-                continue
-                
-            for sensor in os.listdir(platform_path):
-                sensor_path = os.path.join(platform_path, sensor)
-                if not os.path.isdir(sensor_path):
-                    continue
-                    
-                for file in os.listdir(sensor_path):
-                    if file.endswith('-RGB.tif'):
-                        orthomosaic_path = os.path.join(sensor_path, file)
-                        platform_name = platform
-                        sensor_name = sensor
+
+        # If client provided a relative ortho path (e.g. Processed/...), resolve to absolute and use it
+        if ortho_path_rel:
+            if os.path.isabs(ortho_path_rel):
+                candidate = ortho_path_rel
+            else:
+                candidate = os.path.join(data_root_dir, ortho_path_rel)
+
+            if os.path.exists(candidate):
+                orthomosaic_path = candidate
+                # try to infer platform/sensor from path: .../Processed/<year>/<exp>/<loc>/<pop>/<date>/<platform>/<sensor>/...
+                parts = candidate.split(os.sep)
+                if 'Processed' in parts:
+                    try:
+                        idx = parts.index('Processed')
+                        # safe indexing
+                        platform_name = parts[idx + 6] if len(parts) > idx + 6 else None
+                        sensor_name = parts[idx + 7] if len(parts) > idx + 7 else None
+                    except Exception:
+                        platform_name = None
+                        sensor_name = None
+
+        # If no ortho was provided or candidate missing, fallback to scanning Processed folder for a '-RGB.tif'
+        if not orthomosaic_path:
+            if os.path.exists(base_path):
+                for platform in os.listdir(base_path):
+                    platform_path = os.path.join(base_path, platform)
+                    if not os.path.isdir(platform_path):
+                        continue
+
+                    for sensor in os.listdir(platform_path):
+                        sensor_path = os.path.join(platform_path, sensor)
+                        if not os.path.isdir(sensor_path):
+                            continue
+
+                        for file in os.listdir(sensor_path):
+                            if file.endswith('-RGB.tif'):
+                                orthomosaic_path = os.path.join(sensor_path, file)
+                                platform_name = platform
+                                sensor_name = sensor
+                                break
+
+                        if orthomosaic_path:
+                            break
+                    if orthomosaic_path:
                         break
-                        
-                if orthomosaic_path:
-                    break
-            if orthomosaic_path:
-                break
         
         if not orthomosaic_path:
             return jsonify({"error": "No RGB orthomosaic found for the specified date"}), 404
@@ -3524,151 +3552,125 @@ def split_orthomosaics():
         # Create output directory for plot images
         output_dir = os.path.join(intermediate_path, 'plot_images', date)
         os.makedirs(output_dir, exist_ok=True)
-        
-        plots_processed = 0
-        
-        # Process the orthomosaic
-        try:
-            import rasterio
-            from rasterio.windows import from_bounds
-            from rasterio.warp import transform_bounds
-            import numpy as np
-            from PIL import Image
+
+        # Process the orthomosaic(s)
+        import cv2
+        from osgeo import gdal, ogr
+        from scripts.drone_trait_extraction.drone_gis import crop_geojson
+
+        # Normalize property keys FIRST (before building plot_labels dict)
+        for feature in boundaries['features']:
+            props = feature.setdefault('properties', {})
             
-            with rasterio.open(orthomosaic_path) as src:
-                print(f"Opened orthomosaic: {orthomosaic_path}")
-                print(f"CRS: {src.crs}, Shape: {src.shape}, Transform: {src.transform}")
+            # Normalize plot key to uppercase 'Plot' for crop_geojson compatibility
+            if 'plot' in props:
+                props['Plot'] = props['plot']
+            elif 'Plot' not in props:
+                print(f"Warning: Feature missing 'plot' property: {props}")
+            
+            # Normalize column/row to Bed/Tier
+            if 'column' in props and 'Bed' not in props:
+                props['Bed'] = props['column']
+            if 'row' in props and 'Tier' not in props:
+                props['Tier'] = props['row']
+            
+            # Normalize accession to Label
+            if 'accession' in props and 'Label' not in props:
+                props['Label'] = props['accession']
+            elif 'Label' not in props:
+                props['Label'] = props.get('accession', '')
+
+        # Build plot_labels dict AFTER normalization (using lowercase 'plot' as key for output filenames)
+        plot_labels = dict()
+        for feature in boundaries['features']:
+            properties = feature.get('properties', {})
+            # Use lowercase 'plot' for dict key (for consistent filename generation)
+            plot = properties.get('plot', properties.get('Plot'))
+            accession = properties.get('accession', properties.get('Label', 'unknown'))
+            if plot is not None and plot != 'unknown' and accession != 'unknown':
+                plot_labels[str(plot)] = accession
+        
+        print(f"Built plot_labels for {len(plot_labels)} plots")
+
+        # Prepare mask datasource once (GeoJSON in memory)
+        ogr_mem_path = None
+        mask_ds = None
+        if isinstance(boundaries, dict):
+            geojson_str = json.dumps(boundaries)
+            ogr_mem_path = '/vsimem/temp.geojson'
+            gdal.FileFromMemBuffer(ogr_mem_path, geojson_str)
+            mask_ds = ogr.Open(ogr_mem_path)
+
+        plots_processed = 0
+
+        # Case 1: AgRowStitch provided individual plot files -> iterate them
+        if ortho_type == 'agrowstitch' and agrowstitch_plots:
+            for p in agrowstitch_plots:
+                # p may be a dict with 'fullPath' or a simple string
+                plot_rel = p.get('fullPath') if isinstance(p, dict) and p.get('fullPath') else (p if isinstance(p, str) else None)
+                if not plot_rel:
+                    continue
+                plot_path = plot_rel if os.path.isabs(plot_rel) else os.path.join(data_root_dir, plot_rel)
+                if not os.path.exists(plot_path):
+                    print(f"AgRowStitch plot file not found: {plot_path}")
+                    continue
+
+                dataset = gdal.Open(plot_path, gdal.GA_ReadOnly)
+                if dataset is None:
+                    print(f"Unable to open plot dataset: {plot_path}")
+                    continue
+
+                data_rgb = crop_geojson(dataset, mask_ds, image_type='rgb')
+                for data_line in data_rgb:
+                    # crop_geojson returns 'Plot' (uppercase) - convert to string for lookup
+                    plot_id = data_line.get('Plot')
+                    if plot_id is None:
+                        print(f"Warning: Skipping crop result with missing Plot ID: {data_line.get('Label', 'unknown')}")
+                        continue
+                    
+                    plot_key = str(plot_id)
+                    accession = plot_labels.get(plot_key, 'unknown')
+                    
+                    # Use lowercase 'plot' in filename for consistency
+                    filename = f"plot_{plot_key}_accession_{accession}.png"
+                    png_path = os.path.join(output_dir, filename)
+                    cv2.imwrite(png_path, data_line['img'])
+                    plots_processed += 1
+
+        else:
+            # Default: single orthomosaic file (drone or combined AgRowStitch)
+            if not orthomosaic_path or not os.path.exists(orthomosaic_path):
+                return jsonify({"error": "No RGB orthomosaic found for the specified date"}), 404
+
+            dataset = gdal.Open(orthomosaic_path, gdal.GA_ReadOnly)
+            if dataset is None:
+                return jsonify({"error": f"Unable to open orthomosaic: {orthomosaic_path}"}), 500
+
+            data_rgb = crop_geojson(dataset, mask_ds, image_type='rgb')
+
+            for data_line in data_rgb:
+                # crop_geojson returns 'Plot' (uppercase) - convert to string for lookup
+                plot_id = data_line.get('Plot')
+                if plot_id is None:
+                    print(f"Warning: Skipping crop result with missing Plot ID: {data_line.get('Label', 'unknown')}")
+                    continue
                 
-                # Process each plot boundary
-                for feature in boundaries['features']:
-                    properties = feature['properties']
-                    geometry = feature['geometry']
-                    
-                    # Get plot and accession info
-                    plot = properties.get('plot', properties.get('Plot', 'unknown'))
-                    accession = properties.get('accession', 'unknown')
-                    
-                    if plot == 'unknown' or accession == 'unknown':
-                        print(f"Skipping feature - plot: {plot}, accession: {accession}")
-                        continue
-                        
-                    # Validate geometry
-                    if not geometry or geometry.get('type') != 'Polygon':
-                        print(f"Invalid geometry for plot {plot}")
-                        continue
-                        
-                    # Convert geometry coordinates to image coordinates
-                    coords = geometry['coordinates'][0]  # Polygon exterior ring
-                    
-                    if len(coords) < 4:  # A polygon needs at least 4 points (including closing point)
-                        print(f"Invalid polygon for plot {plot}: only {len(coords)} coordinates")
-                        continue
-                    
-                    # Get bounding box from polygon
-                    lons = [coord[0] for coord in coords]
-                    lats = [coord[1] for coord in coords]
-                    min_lon, max_lon = min(lons), max(lons)
-                    min_lat, max_lat = min(lats), max(lats)
-                    
-                    print(f"Plot {plot}: bounds = ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
-                    
-                    # Transform geographic coordinates to the orthomosaic's coordinate system
-                    try:
-                        # Transform bounds from WGS84 (EPSG:4326) to the orthomosaic's CRS
-                        transformed_bounds = transform_bounds(
-                            'EPSG:4326',  # source CRS (WGS84)
-                            src.crs,      # destination CRS (orthomosaic's CRS)
-                            min_lon, min_lat, max_lon, max_lat
-                        )
-                        min_x, min_y, max_x, max_y = transformed_bounds
-                        
-                        print(f"Plot {plot}: transformed bounds = ({min_x}, {min_y}, {max_x}, {max_y})")
-                        
-                        # Validate transformed bounds
-                        if min_x >= max_x or min_y >= max_y:
-                            print(f"Invalid transformed bounds for plot {plot}: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
-                            continue
-                        
-                        # Add small buffer to ensure non-zero area (in projected coordinates)
-                        x_buffer = max(0.1, (max_x - min_x) * 0.1)  # 0.1 meter minimum buffer
-                        y_buffer = max(0.1, (max_y - min_y) * 0.1)
-                        min_x -= x_buffer
-                        max_x += x_buffer
-                        min_y -= y_buffer
-                        max_y += y_buffer
-                        
-                        # Create window from transformed bounds
-                        window = from_bounds(min_x, min_y, max_x, max_y, src.transform)
-                        
-                        print(f"Plot {plot}: window = {window} (width={window.width}, height={window.height})")
-                        
-                        # Validate window dimensions
-                        if window.width <= 0 or window.height <= 0:
-                            print(f"Invalid window dimensions for plot {plot}: width={window.width}, height={window.height}")
-                            continue
-                        
-                        # Read the windowed data
-                        data = src.read(window=window)
-                        
-                        # Create new transform for the windowed data
-                        window_transform = src.window_transform(window)
-                        
-                        # Create filename
-                        filename = f"plot_{plot}_accession_{accession}.tif"
-                        temp_tif_path = os.path.join(output_dir, filename)
-                        
-                        # Write cropped TIF
-                        with rasterio.open(
-                            temp_tif_path,
-                            'w',
-                            driver='GTiff',
-                            height=data.shape[1],
-                            width=data.shape[2],
-                            count=data.shape[0],
-                            dtype=data.dtype,
-                            crs=src.crs,
-                            transform=window_transform,
-                        ) as dst:
-                            dst.write(data)
-                        
-                        # Convert TIF to PNG
-                        png_filename = f"plot_{plot}_accession_{accession}.png"
-                        png_path = os.path.join(output_dir, png_filename)
-                        
-                        # Open TIF and convert to PNG
-                        with rasterio.open(temp_tif_path) as tif_src:
-                            # Read all bands
-                            data = tif_src.read()
-                            
-                            # Handle different band configurations
-                            if data.shape[0] >= 3:  # RGB or RGBA
-                                # Take first 3 bands for RGB
-                                rgb_data = data[:3]
-                                # Transpose from (bands, height, width) to (height, width, bands)
-                                rgb_data = np.transpose(rgb_data, (1, 2, 0))
-                                
-                                # Normalize to 0-255 if needed
-                                if rgb_data.dtype == np.uint16:
-                                    rgb_data = (rgb_data / 65535.0 * 255).astype(np.uint8)
-                                elif rgb_data.dtype == np.float32 or rgb_data.dtype == np.float64:
-                                    rgb_data = (np.clip(rgb_data, 0, 1) * 255).astype(np.uint8)
-                                
-                                # Create PIL image and save as PNG
-                                image = Image.fromarray(rgb_data)
-                                image.save(png_path)
-                                
-                                plots_processed += 1
-                        
-                        # Remove temporary TIF file
-                        os.remove(temp_tif_path)
-                        
-                    except Exception as e:
-                        print(f"Error processing plot {plot}: {e}")
-                        continue
-                        
-        except Exception as e:
-            print(f"Error opening orthomosaic {orthomosaic_path}: {e}")
-            return jsonify({"error": f"Error opening orthomosaic: {e}"}), 500
+                plot_key = str(plot_id)
+                accession = plot_labels.get(plot_key, 'unknown')
+                
+                # Use lowercase 'plot' in filename for consistency
+                filename = f"plot_{plot_key}_accession_{accession}.png"
+                png_path = os.path.join(output_dir, filename)
+                cv2.imwrite(png_path, data_line['img'])
+                plots_processed += 1
+
+        # Clean up memory file
+        if ogr_mem_path:
+            try:
+                gdal.Unlink(ogr_mem_path)
+            except Exception:
+                pass
+
         
         return jsonify({
             "message": f"Successfully processed {plots_processed} plots",
