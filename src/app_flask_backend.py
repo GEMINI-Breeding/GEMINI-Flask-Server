@@ -3523,6 +3523,7 @@ def split_orthomosaics():
 
         # If no ortho was provided or candidate missing, fallback to scanning Processed folder for a '-RGB.tif'
         if not orthomosaic_path:
+            print("No orthomosaic path provided or file not found, scanning Processed folder...")
             if os.path.exists(base_path):
                 for platform in os.listdir(base_path):
                     platform_path = os.path.join(base_path, platform)
@@ -3549,9 +3550,19 @@ def split_orthomosaics():
         if not orthomosaic_path:
             return jsonify({"error": "No RGB orthomosaic found for the specified date"}), 404
         
-        # Create output directory for plot images
-        output_dir = os.path.join(intermediate_path, 'plot_images', date)
+        # Log the orthomosaic path being used
+        print(f"Using orthomosaic: {orthomosaic_path}")
+        print(f"Platform: {platform_name}, Sensor: {sensor_name}")
+        
+        # Ensure platform_name and sensor_name are valid for directory creation
+        if not platform_name or not sensor_name:
+            print(f"Warning: Missing platform or sensor name, using fallback directory structure")
+            output_dir = os.path.join(intermediate_path, 'plot_images', date)
+        else:
+            output_dir = os.path.join(intermediate_path, 'plot_images', date, platform_name, sensor_name)
+        
         os.makedirs(output_dir, exist_ok=True)
+        print(f"Output directory: {output_dir}")
 
         # Process the orthomosaic(s)
         import cv2
@@ -3580,6 +3591,11 @@ def split_orthomosaics():
             elif 'Label' not in props:
                 props['Label'] = props.get('accession', '')
 
+        print(f"Received {len(boundaries['features'])} features in GeoJSON")
+        if boundaries['features']:
+            first_props = boundaries['features'][0].get('properties', {})
+            print(f"Sample feature properties after normalization: {first_props}")
+
         # Build plot_labels dict AFTER normalization (using lowercase 'plot' as key for output filenames)
         plot_labels = dict()
         for feature in boundaries['features']:
@@ -3605,37 +3621,8 @@ def split_orthomosaics():
 
         # Case 1: AgRowStitch provided individual plot files -> iterate them
         if ortho_type == 'agrowstitch' and agrowstitch_plots:
-            for p in agrowstitch_plots:
-                # p may be a dict with 'fullPath' or a simple string
-                plot_rel = p.get('fullPath') if isinstance(p, dict) and p.get('fullPath') else (p if isinstance(p, str) else None)
-                if not plot_rel:
-                    continue
-                plot_path = plot_rel if os.path.isabs(plot_rel) else os.path.join(data_root_dir, plot_rel)
-                if not os.path.exists(plot_path):
-                    print(f"AgRowStitch plot file not found: {plot_path}")
-                    continue
-
-                dataset = gdal.Open(plot_path, gdal.GA_ReadOnly)
-                if dataset is None:
-                    print(f"Unable to open plot dataset: {plot_path}")
-                    continue
-
-                data_rgb = crop_geojson(dataset, mask_ds, image_type='rgb')
-                for data_line in data_rgb:
-                    # crop_geojson returns 'Plot' (uppercase) - convert to string for lookup
-                    plot_id = data_line.get('Plot')
-                    if plot_id is None:
-                        print(f"Warning: Skipping crop result with missing Plot ID: {data_line.get('Label', 'unknown')}")
-                        continue
-                    
-                    plot_key = str(plot_id)
-                    accession = plot_labels.get(plot_key, 'unknown')
-                    
-                    # Use lowercase 'plot' in filename for consistency
-                    filename = f"plot_{plot_key}_accession_{accession}.png"
-                    png_path = os.path.join(output_dir, filename)
-                    cv2.imwrite(png_path, data_line['img'])
-                    plots_processed += 1
+            
+            print("Agrowstitch plots are already cropped...")
 
         else:
             # Default: single orthomosaic file (drone or combined AgRowStitch)
@@ -3646,7 +3633,47 @@ def split_orthomosaics():
             if dataset is None:
                 return jsonify({"error": f"Unable to open orthomosaic: {orthomosaic_path}"}), 500
 
+            print(f"Opened orthomosaic successfully. Size: {dataset.RasterXSize}x{dataset.RasterYSize}")
+            proj = dataset.GetProjection()
+            print(f"Projection: {proj[:200]}...")
+            
+            geotransform = dataset.GetGeoTransform()
+            print(f"GeoTransform: {geotransform}")
+            print(f"Pixel size: {geotransform[1]} x {geotransform[5]} (x, y)")
+            
+            # Check if orthomosaic is in geographic coordinates (WGS84/lat-lon) - not PROJCS
+            is_geographic = proj.startswith('GEOGCS') and 'PROJCS' not in proj
+            if is_geographic:
+                # Calculate UTM zone based on center of orthomosaic
+                center_lon = geotransform[0] + (dataset.RasterXSize * geotransform[1]) / 2
+                center_lat = geotransform[3] + (dataset.RasterYSize * geotransform[5]) / 2
+                utm_zone = int((center_lon + 180) / 6) + 1
+                utm_epsg = 32600 + utm_zone if center_lat >= 0 else 32700 + utm_zone
+                
+                output_path = orthomosaic_path.replace('.tif', '_UTM.tif')
+                
+                error_msg = (
+                    f"ERROR: Orthomosaic is in geographic coordinates (EPSG:4326). "
+                    f"This uses degrees instead of meters, resulting in 1x1 pixel crops. "
+                    f"Please reproject to UTM Zone {utm_zone} (EPSG:{utm_epsg}) using:\n\n"
+                    f"gdalwarp -t_srs EPSG:{utm_epsg} -r cubic -co COMPRESS=LZW -co TILED=YES \\\n"
+                    f"  '{orthomosaic_path}' \\\n"
+                    f"  '{output_path}'\n\n"
+                    f"Or use the helper script:\n"
+                    f"python /home/earl/GEMINI-App/GEMINI-Flask-Server/reproject_orthomosaic.py '{orthomosaic_path}'"
+                )
+                print(error_msg)
+                return jsonify({"error": error_msg}), 400
+            
             data_rgb = crop_geojson(dataset, mask_ds, image_type='rgb')
+            
+            print(f"crop_geojson returned {len(data_rgb)} results")
+            if data_rgb:
+                first = data_rgb[0]
+                if 'img' in first and first['img'] is not None:
+                    print(f"First image shape: {first['img'].shape}, dtype: {first['img'].dtype}")
+                else:
+                    print(f"First result has no image data!")
 
             for data_line in data_rgb:
                 # crop_geojson returns 'Plot' (uppercase) - convert to string for lookup
