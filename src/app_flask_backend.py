@@ -40,8 +40,14 @@ import io
 # Local application/library specific imports
 from scripts.drone_trait_extraction import shared_states
 from scripts.drone_trait_extraction.drone_gis import process_tiff, find_drone_tiffs, query_drone_images
+
+# Database imports
+from database.config import DatabaseConfig
+from database.connection import init_db, get_db_session
+from database.models import Experiment, DataCollection, RawData
+from services.data_service import data_service
 from scripts.orthomosaic_generation import run_odm, reset_odm, make_odm_args, convert_tif_to_png, monitor_log_updates, make_project_path
-from scripts.utils import process_directories_in_parallel, process_directories_in_parallel_from_db, stream_output
+from scripts.utils import process_directories_in_parallel, stream_output
 from scripts.utils import update_or_add_entry, split_data, prepare_labels, remove_files_from_folder, copy_files_to_folder, check_model_details
 from scripts.utils import generate_hash
 from scripts.gcp_picker import collect_gcp_candidate, process_exif_data_async, refresh_gcp_candidate, gcp_picker_save_array
@@ -63,7 +69,6 @@ from scripts.stitch_utils import (
 from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from PIL import ImageFile
-from scripts.directory_index import DirectoryIndexDict
 
 # Paths to scripts
 TRAIN_MODEL = os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts/deep_learning/model_training/train.py'))
@@ -162,6 +167,29 @@ def serve_files(filename):
     # global data_root_dir
     return send_from_directory(data_root_dir, filename)
 
+# endpoint to convert flask file path to filesystem path for TiTiler
+@file_app.route('/get_filesystem_path', methods=['POST'])
+def get_filesystem_path():
+    """Convert a Flask file URL to a filesystem path that TiTiler can access"""
+    try:
+        data = request.json
+        relative_path = data.get('path', '')
+        
+        # Remove 'files/' prefix if present
+        if relative_path.startswith('files/'):
+            relative_path = relative_path[6:]
+        
+        # Construct absolute filesystem path
+        filesystem_path = os.path.join(data_root_dir, relative_path)
+        
+        # Verify the file exists
+        if not os.path.exists(filesystem_path):
+            return jsonify({'error': 'File not found', 'path': filesystem_path}), 404
+        
+        return jsonify({'filesystem_path': filesystem_path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # endpoint to serve image in memory
 @file_app.route('/images/<path:filename>')
 def serve_image(filename):
@@ -191,123 +219,109 @@ def fetch_data_root_dir():
     # global data_root_dir
     return data_root_dir
 
-# endpoint to list directories
-@file_app.route('/list_dirs/<path:dir_path>', methods=['GET'])
-def list_dirs(dir_path):
-    """Fast directory listing using index"""
-    global data_root_dir, dir_db
-    
-    full_path = os.path.join(data_root_dir, dir_path)
-
-    # Try index first
-    dirs = dir_db.get_children(full_path, directories_only=True, wait_if_needed=False)
-
-    return jsonify(dirs), 200
-
-@file_app.get("/list_dirs_nested")
-async def list_dirs_nested():
-    global data_root_dir, dir_db
-    
-    base_dir = Path(data_root_dir) / 'Raw'
-    
+#### DATABASE QUERY ENDPOINTS FOR AUTOCOMPLETE ####
+@file_app.route('/db/years', methods=['GET'])
+def db_get_years():
+    """Get all distinct years from experiments"""
     try:
-        print(f"Getting nested structure for Raw directory using DirectoryIndex: {base_dir}")
-        
-        # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(dir_db, base_dir, max_depth=9)
-        
-        return jsonify(nested_structure), 200
-        
+        years = data_service.get_years()
+        return jsonify(years), 200
     except Exception as e:
-        print(f"Error getting nested structure from database: {e}")
-        print("Falling back to original filesystem method...")
-        
-        # Fallback to original method if database approach fails
-        try:
-            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-            return jsonify(nested_structure), 200
-        except Exception as fallback_error:
-            print(f"Error in fallback method: {fallback_error}")
-            return jsonify({'error': 'Failed to get directory structure'}), 500
+        print(f"Error getting years: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@file_app.get("/list_dirs_nested_processed")
-async def list_dirs_nested_processed():
-    global data_root_dir, dir_db
-
-    base_dir = Path(data_root_dir) / 'Processed'
-    
+@file_app.route('/db/experiments', methods=['GET'])
+def db_get_experiments():
+    """Get experiments, optionally filtered by year"""
     try:
-        print(f"Getting nested structure for Processed directory using DirectoryIndex: {base_dir}")
-        
-        # Try database-first approach
-        nested_structure = await process_directories_in_parallel_from_db(base_dir, max_depth=9)
-        
-        return jsonify(nested_structure), 200
-        
+        year = request.args.get('year')
+        if not year:
+            return jsonify({'error': 'year parameter is required'}), 400
+        experiments = data_service.get_experiments(year)
+        return jsonify(experiments), 200
     except Exception as e:
-        print(f"Error getting nested structure from database: {e}")
-        print("Falling back to original filesystem method...")
-        
-        # Fallback to original method if database approach fails
-        try:
-            nested_structure = await process_directories_in_parallel(base_dir, max_depth=9)
-            return jsonify(nested_structure), 200
-        except Exception as fallback_error:
-            print(f"Error in fallback method: {fallback_error}")
-            return jsonify({'error': 'Failed to get directory structure'}), 500
+        print(f"Error getting experiments: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# endpoint to list files
-@file_app.route('/list_files/<path:dir_path>', methods=['GET'])
-def list_files(dir_path):
-    """Fast file listing using directory index"""
-    global data_root_dir, dir_db
-    
-    full_path = os.path.join(data_root_dir, dir_path)
-    
-    # Try to get files from directory index (both files and directories, then filter)
+@file_app.route('/db/locations', methods=['GET'])
+def db_get_locations():
+    """Get locations, optionally filtered by year and experiment"""
     try:
-        all_items = dir_db.get_children(full_path, directories_only=False, wait_if_needed=False)
-        
-        # Filter to get only files (not directories)
-        if all_items and isinstance(all_items[0], dict):
-            # If items have type information
-            files = [item['name'] for item in all_items if not item.get('is_directory', True)]
-        else:
-            # If no items returned from index, use fallback
-            files = []
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        if not year or not experiment:
+            return jsonify({'error': 'year and experiment parameters are required'}), 400
+        locations = data_service.get_locations(year, experiment)
+        return jsonify(locations), 200
     except Exception as e:
-        print(f"Error using directory index for files: {e}")
-        files = []
-    
-    # Enhanced fallback with error handling
-    if not files and os.path.exists(full_path):
-        try:
-            # Direct filesystem read as fallback
-            all_entries = os.listdir(full_path)
-            files = []
-            for entry in all_entries:
-                if not entry.startswith('.'):  # Skip hidden files
-                    entry_path = os.path.join(full_path, entry)
-                    if os.path.isfile(entry_path):  # Only include files
-                        files.append(entry)
-            
-            files.sort()
-            
-            # Queue for background processing to update the database
-            if hasattr(dir_db, 'refresh_queue'):
-                dir_db.refresh_queue.put(full_path)
-            
-        except PermissionError:
-            print(f"Permission denied accessing: {full_path}")
-            return jsonify({'error': 'Permission denied'}), 403
-        except Exception as e:
-            print(f"Error reading directory {full_path}: {e}")
-            return jsonify({'error': 'Directory read failed'}), 500
-    
-    if not os.path.exists(full_path):
-        return jsonify({'message': 'Directory not found'}), 404
-    
-    return jsonify(files), 200
+        print(f"Error getting locations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/populations', methods=['GET'])
+def db_get_populations():
+    """Get populations, optionally filtered by year, experiment, and location"""
+    try:
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        location = request.args.get('location')
+        if not year or not experiment or not location:
+            return jsonify({'error': 'year, experiment, and location parameters are required'}), 400
+        populations = data_service.get_populations(year, experiment, location)
+        return jsonify(populations), 200
+    except Exception as e:
+        print(f"Error getting populations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/dates', methods=['GET'])
+def db_get_dates():
+    """Get dates for data collections, filtered by experiment parameters"""
+    try:
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        location = request.args.get('location')
+        population = request.args.get('population')
+        if not year or not experiment or not location or not population:
+            return jsonify({'error': 'year, experiment, location, and population parameters are required'}), 400
+        dates = data_service.get_dates(year, experiment, location, population)
+        return jsonify(dates), 200
+    except Exception as e:
+        print(f"Error getting dates: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/platforms', methods=['GET'])
+def db_get_platforms():
+    """Get platforms for data collections, filtered by experiment and date parameters"""
+    try:
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        location = request.args.get('location')
+        population = request.args.get('population')
+        date = request.args.get('date')
+        if not all([year, experiment, location, population, date]):
+            return jsonify({'error': 'year, experiment, location, population, and date parameters are required'}), 400
+        platforms = data_service.get_platforms(year, experiment, location, population, date)
+        return jsonify(platforms), 200
+    except Exception as e:
+        print(f"Error getting platforms: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/sensors', methods=['GET'])
+def db_get_sensors():
+    """Get sensors for data collections, filtered by experiment, date, and platform parameters"""
+    try:
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        location = request.args.get('location')
+        population = request.args.get('population')
+        date = request.args.get('date')
+        platform = request.args.get('platform')
+        if not all([year, experiment, location, population, date, platform]):
+            return jsonify({'error': 'All parameters are required'}), 400
+        sensors = data_service.get_sensors(year, experiment, location, population, date, platform)
+        return jsonify(sensors), 200
+    except Exception as e:
+        print(f"Error getting sensors: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @file_app.route('/view_synced_data', methods=['POST'])
 def view_synced_data():
@@ -773,14 +787,70 @@ def upload_files():
         thread.daemon = True  # Set as daemon thread to terminate with main thread
         thread.start()
 
-    # Update directory database after upload completion
-    if uploaded_file_paths and dir_db is not None:
+    # Track uploaded files in database
+    if DatabaseConfig.USE_DATABASE and uploaded_file_paths: # TODO: Speed up and shorten
         try:
-            # Refresh the directory in the database
-            dir_db.push(uploaded_file_paths)
-            print(f"Updated directory database for: {uploaded_file_paths}")
+            # Parse dir_path to get hierarchy: year/experiment/location/population/date/platform/sensor
+            path_parts = dir_path_clean.split('/')
+            if len(path_parts) >= 7:
+                year, experiment, location, population, date, platform, sensor = path_parts[:7]
+                
+                # Determine the folder type (Images or Metadata)
+                folder_type = "images" if data_type.lower() == 'image' else "metadata"
+                
+                with get_db_session() as session:
+                    # Get or create experiment
+                    exp = session.query(Experiment).filter_by(
+                        year=year, name=experiment, location=location, population=population
+                    ).first()
+                    
+                    if not exp:
+                        exp = Experiment(year=year, name=experiment, location=location, population=population)
+                        session.add(exp)
+                        session.flush()
+                    
+                    # Get or create data collection
+                    collection = session.query(DataCollection).filter_by(
+                        experiment_id=exp.id, date=date, platform=platform, sensor=sensor
+                    ).first()
+                    
+                    if not collection:
+                        collection = DataCollection(
+                            experiment_id=exp.id,
+                            date=date,
+                            platform=platform,
+                            sensor=sensor
+                        )
+                        session.add(collection)
+                        session.flush()
+                    
+                    # Create a raw_data entry for each uploaded file
+                    for file_path in uploaded_file_paths:
+                        # Convert absolute path to relative path from UPLOAD_BASE_DIR
+                        relative_path = os.path.relpath(file_path, UPLOAD_BASE_DIR)
+                        data_path = f"Raw/{relative_path}"
+                        
+                        # Check if this specific file is already tracked
+                        existing = session.query(RawData).filter_by(
+                            collection_id=collection.id,
+                            data_type=folder_type,
+                            data_path=data_path
+                        ).first()
+                        
+                        if not existing:
+                            raw_data = RawData(
+                                collection_id=collection.id,
+                                data_type=folder_type,
+                                data_path=data_path,
+                                file_count=1,
+                                total_size_bytes=os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                            )
+                            session.add(raw_data)
+                    
+                    session.commit()
+                    print(f"✅ Tracked {len(uploaded_file_paths)} files in database for collection {collection.id}")
         except Exception as e:
-            print(f"Error updating directory database: {e}")
+            print(f"⚠️  Failed to track upload in database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -943,19 +1013,11 @@ def upload_chunk():
             for i in range(total_chunks):
                 os.remove(os.path.join(cache_dir_path, f"{file_name}.part{i}"))
             
-            # Update directory database after successful file assembly
-            if dir_db is not None:
-                try:
-                    dir_db.push(assembled_path)
-                    print(f"Updated directory database for: {assembled_path}")
-                except Exception as e:
-                    print(f"Error updating directory database: {e}")
             if file_name.endswith('DEM.tif') or file_name.endswith('RGB.tif'):
                 file_path = os.path.join(full_dir_path, file_name)
                 create_pyramid_external_ortho(file_path)
                 full_raw_path = full_dir_path.replace('Processed/', 'Raw/')
                 os.makedirs(full_raw_path, exist_ok=True)
-                dir_db.push([file_path, full_raw_path])
             return "File reassembled and saved successfully", 200
         except Exception as e:
             print(f"Error during reassembly: {e}")
@@ -2568,13 +2630,19 @@ def get_data_options():
     Get all available years from the data directory
     """
     try:
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            years = data_service.get_years()
+            return jsonify({'years': years}), 200
+        
+        # Filesystem fallback
         years = []
         raw_dir = os.path.join(data_root_dir, 'Raw')
         
         if os.path.exists(raw_dir):
             years = [item for item in os.listdir(raw_dir) 
                     if os.path.isdir(os.path.join(raw_dir, item)) and item.isdigit()]
-            years.sort()
+            years.sort(reverse=True)  # Match database behavior (DESC)
         
         return jsonify({'years': years}), 200
         
@@ -2593,7 +2661,13 @@ def get_experiments():
         
         if not year:
             return jsonify({'error': 'Year is required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            experiments = data_service.get_experiments(year)
+            return jsonify({'experiments': experiments}), 200
             
+        # Filesystem fallback
         experiments = []
         year_dir = os.path.join(data_root_dir, 'Raw', year)
         
@@ -2620,7 +2694,13 @@ def get_locations():
         
         if not all([year, experiment]):
             return jsonify({'error': 'Year and experiment are required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            locations = data_service.get_locations(year, experiment)
+            return jsonify({'locations': locations}), 200
             
+        # Filesystem fallback
         locations = []
         exp_dir = os.path.join(data_root_dir, 'Raw', year, experiment)
         
@@ -2648,7 +2728,13 @@ def get_populations():
         
         if not all([year, experiment, location]):
             return jsonify({'error': 'Year, experiment, and location are required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            populations = data_service.get_populations(year, experiment, location)
+            return jsonify({'populations': populations}), 200
             
+        # Filesystem fallback
         populations = []
         loc_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location)
         
@@ -2677,7 +2763,13 @@ def get_dates():
         
         if not all([year, experiment, location, population]):
             return jsonify({'error': 'Year, experiment, location, and population are required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            dates = data_service.get_dates(year, experiment, location, population)
+            return jsonify({'dates': dates}), 200
             
+        # Filesystem fallback
         dates = []
         # Check both Raw and Processed directories for dates
         raw_pop_dir = os.path.join(data_root_dir, 'Raw', year, experiment, location, population)
@@ -2699,7 +2791,7 @@ def get_dates():
                 if os.path.isdir(item_path):
                     date_set.add(item)
         
-        dates = sorted(list(date_set))
+        dates = sorted(list(date_set), reverse=True)  # Match database behavior (DESC)
         
         return jsonify({'dates': dates}), 200
         
@@ -2722,7 +2814,13 @@ def get_platforms():
         
         if not all([year, experiment, location, population, date]):
             return jsonify({'error': 'All parameters are required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            platforms = data_service.get_platforms(year, experiment, location, population, date)
+            return jsonify({'platforms': platforms}), 200
             
+        # Filesystem fallback
         platforms = []
         # Check Processed directory for platforms
         date_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date)
@@ -2754,7 +2852,13 @@ def get_sensors():
         
         if not all([year, experiment, location, population, date, platform]):
             return jsonify({'error': 'All parameters are required'}), 400
+        
+        # Use database if enabled, otherwise fall back to filesystem
+        if DatabaseConfig.USE_DATABASE:
+            sensors = data_service.get_sensors(year, experiment, location, population, date, platform)
+            return jsonify({'sensors': sensors}), 200
             
+        # Filesystem fallback
         sensors = []
         # Check Processed directory for sensors
         platform_dir = os.path.join(data_root_dir, 'Processed', year, experiment, location, population, date, platform)
@@ -2931,14 +3035,6 @@ def upload_trait_labels():
         print(f'Saving {file_path}...')
         file.save(file_path)
         uploaded_files.append(file_path)
-
-        # Update directory database after upload completion
-        if uploaded_files and dir_db is not None:
-            try:
-                dir_db.push(file_path)
-                print(f"Updated directory database for: {file_path}")
-            except Exception as e:
-                print(f"Error updating directory database: {e}")
 
     return jsonify({'message': 'Files uploaded successfully'}), 200
 
@@ -3718,19 +3814,35 @@ if __name__ == "__main__":
     global UPLOAD_BASE_DIR
     UPLOAD_BASE_DIR = os.path.join(data_root_dir, 'Raw')
 
-    global dir_db
-  
-    db_path = os.path.join(data_root_dir, "directory_index_dict.pkl")
-    dir_db = None
-    # Use dictionary-based index
-    dir_db = DirectoryIndexDict(dict_path=db_path, verbose=args.debug)
-    # Try loading from file if exists
-    if os.path.exists(db_path):
-        dir_db.load_dict(db_path)
-        print(f"Loaded directory index dict from {db_path}")
-    else:
-        print(f"No dict file found, will build index from scratch.")
-
+    # Initialize database connection if enabled
+    if DatabaseConfig.USE_DATABASE:
+        try:
+            print("Initializing database connection...")
+            init_db()
+            print("✅ Database connection initialized")
+            
+            # Auto-sync filesystem to database on startup (if directory exists)
+            raw_path = os.path.join(data_root_dir, 'Raw')
+            if os.path.exists(raw_path):
+                print("\n🔄 Syncing filesystem to database...")
+                from scripts.migrate_hierarchy import scan_directory, populate_database
+                
+                try:
+                    hierarchy_data = scan_directory(data_root_dir)
+                    populate_database(hierarchy_data)
+                    print(f"✅ Database synced successfully\n")
+                except Exception as e:
+                    print(f"⚠️  Filesystem sync failed: {e}")
+                    print("   Database is initialized but not synced with filesystem")
+            else:
+                print(f"ℹ️  Raw directory not found: {raw_path}")
+                print("   Creating directory structure...")
+                os.makedirs(raw_path, exist_ok=True)
+                print(f"✅ Created: {raw_path}")
+                print("   Database initialized - ready for uploads\n")
+                
+        except Exception as e:
+            print(f"⚠️  Failed to initialize database: {e}")
 
     # Register inference routes
     register_inference_routes(file_app, data_root_dir)
@@ -3745,11 +3857,6 @@ if __name__ == "__main__":
 
     # Start the Flask server - bind to all interfaces (0.0.0.0) to allow external access
     uvicorn.run(app, host="0.0.0.0", port=args.flask_port)
-
-
-    # Save the directory index dict before shutdown
-    if ".pkl" in db_path:
-        dir_db.save_dict(db_path)
 
     # Terminate the Titiler server when the Flask server is shut down
     titiler_process.terminate()
