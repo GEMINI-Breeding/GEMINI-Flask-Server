@@ -236,6 +236,117 @@ class DataService:
             self._cache_set(cache_key, json.dumps(result))
             return result
     
+    def get_all_data(self) -> List[dict]:
+        """Get all experiments with their data collections"""
+        cache_key = "all_data"
+        
+        cached = self._cache_get(cache_key)
+        if cached:
+            return json.loads(cached)
+        
+        with get_db_session() as session:
+            # Join experiments with data_collections
+            results = session.query(
+                Experiment.year,
+                Experiment.name.label('experiment'),
+                Experiment.location,
+                Experiment.population,
+                DataCollection.date,
+                DataCollection.platform,
+                DataCollection.sensor
+            ).join(
+                DataCollection,
+                Experiment.id == DataCollection.experiment_id
+            ).order_by(
+                Experiment.year,
+                Experiment.name,
+                Experiment.location,
+                Experiment.population,
+                DataCollection.date,
+                DataCollection.platform,
+                DataCollection.sensor
+            ).all()
+            
+            # Transform to list of dictionaries
+            data = []
+            for row in results:
+                item = {
+                    'year': row.year,
+                    'experiment': row.experiment,
+                    'location': row.location,
+                    'population': row.population,
+                    'date': row.date,
+                    'platform': row.platform,
+                    'sensor': row.sensor,
+                    'cameras': []  # TODO: Add camera detection for Amiga/rover platforms
+                }
+                
+                # For Amiga/rover platforms, check for camera folders
+                if row.platform in ['Amiga', 'rover']:
+                    # You could add logic here to check filesystem for camera folders
+                    # For now, just add default cameras
+                    item['cameras'] = ['top', 'left', 'right']
+                
+                data.append(item)
+            
+            self._cache_set(cache_key, json.dumps(data))
+            return data
+    
+    def get_images(self, year: str, experiment: str, location: str, population: str, 
+                   date: str, platform: str, sensor: str, camera: Optional[str] = None) -> List[str]:
+        """Get image paths from raw_data for a specific data collection"""
+        from database.models import RawData
+        
+        cache_key = f"images:{year}:{experiment}:{location}:{population}:{date}:{platform}:{sensor}:{camera or ''}"
+        
+        cached = self._cache_get(cache_key)
+        if cached:
+            return json.loads(cached)
+        
+        with get_db_session() as session:
+            # Find the experiment
+            exp = session.query(Experiment).filter_by(
+                year=year,
+                name=experiment,
+                location=location,
+                population=population
+            ).first()
+            
+            if not exp:
+                return []
+            
+            # Find the data collection
+            collection = session.query(DataCollection).filter_by(
+                experiment_id=exp.id,
+                date=date,
+                platform=platform,
+                sensor=sensor
+            ).first()
+            
+            if not collection:
+                return []
+            
+            # Get raw_data entries for images
+            raw_data_entries = session.query(RawData.data_path)\
+                .filter(
+                    RawData.collection_id == collection.id,
+                    RawData.data_type == 'images'
+                )\
+                .order_by(RawData.data_path)\
+                .all()
+            
+            # Extract just the filenames from the full paths
+            # Path format: Raw/2022/GEMINI/Davis/Legumes/2022-06-27/Drone/RGB/Images/IMG_0001.JPG
+            image_paths = []
+            for entry in raw_data_entries:
+                path = entry[0]
+                # Extract filename from path
+                filename = path.split('/')[-1]
+                image_paths.append(filename)
+            
+            self._cache_set(cache_key, json.dumps(image_paths))
+            return image_paths
+    
     def clear_cache(self):
         """Clear all cached data"""
         if self.redis:

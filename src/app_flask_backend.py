@@ -88,6 +88,29 @@ odm_method = None
 stitch_thread=None
 stitch_stop_event = threading.Event()
 
+# endpoint to convert flask file path to filesystem path for TiTiler
+@file_app.route('/get_filesystem_path', methods=['POST'])
+def get_filesystem_path():
+    """Convert a Flask file URL to a filesystem path that TiTiler can access"""
+    try:
+        data = request.json
+        relative_path = data.get('path', '')
+        
+        # Remove 'files/' prefix if present
+        if relative_path.startswith('files/'):
+            relative_path = relative_path[6:]
+        
+        # Construct absolute filesystem path
+        filesystem_path = os.path.join(data_root_dir, relative_path)
+        
+        # Verify the file exists
+        if not os.path.exists(filesystem_path):
+            return jsonify({'error': 'File not found', 'path': filesystem_path}), 404
+        
+        return jsonify({'filesystem_path': filesystem_path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 def complete_stitch_workflow(msgs_synced_path, image_path, config_path, custom_options, 
                             save_path, image_calibration, stitch_stop_event, progress_callback, monitoring_stop_event=None):
     """
@@ -165,30 +188,16 @@ def get_tif_to_png():
 @file_app.route('/files/<path:filename>')
 def serve_files(filename):
     # global data_root_dir
-    return send_from_directory(data_root_dir, filename)
-
-# endpoint to convert flask file path to filesystem path for TiTiler
-@file_app.route('/get_filesystem_path', methods=['POST'])
-def get_filesystem_path():
-    """Convert a Flask file URL to a filesystem path that TiTiler can access"""
-    try:
-        data = request.json
-        relative_path = data.get('path', '')
-        
-        # Remove 'files/' prefix if present
-        if relative_path.startswith('files/'):
-            relative_path = relative_path[6:]
-        
-        # Construct absolute filesystem path
-        filesystem_path = os.path.join(data_root_dir, relative_path)
-        
-        # Verify the file exists
-        if not os.path.exists(filesystem_path):
-            return jsonify({'error': 'File not found', 'path': filesystem_path}), 404
-        
-        return jsonify({'filesystem_path': filesystem_path})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    response = send_from_directory(data_root_dir, filename)
+    
+    # Add caching headers for images
+    if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff')):
+        # Cache for 5 minutes
+        response.cache_control.max_age = 300
+        response.cache_control.public = True
+        response.headers['Cache-Control'] = 'public, max-age=300'
+    
+    return response
 
 # endpoint to serve image in memory
 @file_app.route('/images/<path:filename>')
@@ -321,6 +330,38 @@ def db_get_sensors():
         return jsonify(sensors), 200
     except Exception as e:
         print(f"Error getting sensors: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/all_data', methods=['GET'])
+def db_get_all_data():
+    """Get all experiments with their data collections"""
+    try:
+        all_data = data_service.get_all_data()
+        return jsonify(all_data), 200
+    except Exception as e:
+        print(f"Error getting all data: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@file_app.route('/db/images', methods=['GET'])
+def db_get_images():
+    """Get image paths for a specific data collection"""
+    try:
+        year = request.args.get('year')
+        experiment = request.args.get('experiment')
+        location = request.args.get('location')
+        population = request.args.get('population')
+        date = request.args.get('date')
+        platform = request.args.get('platform')
+        sensor = request.args.get('sensor')
+        camera = request.args.get('camera')  # Optional for Amiga/rover
+        
+        if not all([year, experiment, location, population, date, platform, sensor]):
+            return jsonify({'error': 'Missing required parameters'}), 400
+        
+        images = data_service.get_images(year, experiment, location, population, date, platform, sensor, camera)
+        return jsonify(images), 200
+    except Exception as e:
+        print(f"Error getting images: {e}")
         return jsonify({'error': str(e)}), 500
 
 @file_app.route('/view_synced_data', methods=['POST'])
@@ -3825,9 +3866,13 @@ if __name__ == "__main__":
             raw_path = os.path.join(data_root_dir, 'Raw')
             if os.path.exists(raw_path):
                 print("\n🔄 Syncing filesystem to database...")
-                from scripts.migrate_hierarchy import scan_directory, populate_database
+                from scripts.migrate_hierarchy import scan_directory, populate_database, cleanup_deleted_entries
                 
                 try:
+                    # First, clean up deleted entries
+                    cleanup_deleted_entries(data_root_dir)
+                    
+                    # Then, add new entries
                     hierarchy_data = scan_directory(data_root_dir)
                     populate_database(hierarchy_data)
                     print(f"✅ Database synced successfully\n")

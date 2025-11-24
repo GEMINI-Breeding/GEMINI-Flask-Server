@@ -11,7 +11,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from database.connection import get_db_session, init_db
-from database.models import Experiment, DataCollection
+from database.models import Experiment, DataCollection, RawData
 from database.config import DatabaseConfig
 
 
@@ -165,6 +165,66 @@ def populate_database(structure: dict):
         print(f"\n📊 Database summary:")
         print(f"   - Total experiments: {total_exp}")
         print(f"   - Total data collections: {total_coll}")
+
+
+def cleanup_deleted_entries(root_dir: str):
+    """
+    Remove database entries for experiments and collections that no longer exist in filesystem.
+    Also removes raw_data entries for files that no longer exist.
+    """
+    print("\n🧹 Cleaning up deleted entries...")
+    
+    raw_path = os.path.join(root_dir, "Raw")
+    deleted_experiments = 0
+    deleted_collections = 0
+    deleted_files = 0
+    
+    with get_db_session() as session:
+        # Get all experiments from database
+        all_experiments = session.query(Experiment).all()
+        
+        for exp in all_experiments:
+            # Check if experiment directory still exists
+            exp_path = os.path.join(raw_path, exp.year, exp.name, exp.location, exp.population)
+            
+            if not os.path.exists(exp_path):
+                # Experiment directory deleted - remove from database
+                print(f"   🗑️  Removing experiment: {exp.year}/{exp.name}/{exp.location}/{exp.population}")
+                session.delete(exp)
+                deleted_experiments += 1
+                continue  # Skip collection check since experiment is gone
+            
+            # Check collections for this experiment
+            for collection in exp.collections:
+                collection_path = os.path.join(exp_path, collection.date, collection.platform, collection.sensor)
+                
+                if not os.path.exists(collection_path):
+                    # Collection directory deleted - remove from database
+                    print(f"   🗑️  Removing collection: {exp.year}/{exp.name}/{exp.location}/{exp.population}/{collection.date}/{collection.platform}/{collection.sensor}")
+                    session.delete(collection)
+                    deleted_collections += 1
+                    continue  # Skip file check since collection is gone
+                
+                # Check raw_data files for this collection
+                for raw_data in collection.raw_data:
+                    # data_path is relative to root_dir, like: Raw/2022/GEMINI/Davis/Legumes/2022-06-27/Drone/RGB/Images/IMG_001.JPG
+                    file_path = os.path.join(root_dir, raw_data.data_path)
+                    
+                    if not os.path.exists(file_path):
+                        # File deleted - remove from database
+                        session.delete(raw_data)
+                        deleted_files += 1
+        
+        # Commit deletions
+        session.commit()
+    
+    if deleted_experiments > 0 or deleted_collections > 0 or deleted_files > 0:
+        print(f"\n🧹 Cleanup complete:")
+        print(f"   - Removed {deleted_experiments} experiments")
+        print(f"   - Removed {deleted_collections} data collections")
+        print(f"   - Removed {deleted_files} raw data entries")
+    else:
+        print("   ✅ No stale entries found - database is clean!")
 
 
 def main():
